@@ -83,6 +83,7 @@ def describe(path):
         name=os.path.basename(path)[:-3],
         tag=getattr(osem, "VERSION_TAG", "v0"),
         fixes=tuple(getattr(osem, "FIXES", ())),
+        bench=getattr(osem, "BENCH_STATUS", "unknown"),
         n_enabled=sum(bool(v) for v in osem.ENABLE_CHANNEL),
         ki=[float(v) for v in osem.KI_GAIN],
         kd=[float(v) for v in osem.KD_GAIN],
@@ -364,12 +365,14 @@ def main():
     args = ap.parse_args()
 
     if args.list:
-        print(f"{'version':<10} {'channels':<9} {'I/D':<8} fixes")
+        print(f"{'version':<10} {'on bench':<11} {'channels':<9} {'I/D':<8} fixes")
         for path in versions():
             d = describe(path)
-            print(f"{d['name']:<10} {d['n_enabled']}/4       "
+            print(f"{d['name']:<10} {d['bench']:<11} {d['n_enabled']}/4       "
                   f"{'live' if any(d['ki']) or any(d['kd']) else 'zeroed':<8} "
                   f"{', '.join(d['fixes']) or '-'}")
+        print("\n  validated = confirmed on hardware   reported = report.pdf only, this file untested")
+        print("  untested  = never on hardware       broken   = does not damp, do not flash")
         return 0
 
     if args.test is not None:
@@ -383,6 +386,10 @@ def main():
         return 1 if _fail else 0
 
     path = resolve(args.version)
+    info = describe(path)
+    if info["bench"] != "validated":
+        print(f"  NOTE: {info['name']} is '{info['bench']}' on hardware -- fine in "
+              f"here, see README.md before flashing it.", flush=True)
     S.load(path)
     return S.serve(args.port)
 

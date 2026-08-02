@@ -10,7 +10,8 @@ help:                ## show this
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) \
 	  | sed 's/:.*##/\t/' | awk -F'\t' '{printf "  make %-8s %s\n", $$1, $$2}'
 	@echo
-	@echo "  Versions: $$($(PY) harness.py --list | tail -n +2 | awk '{print $$1}' | tr '\n' ' ')"
+	@echo
+	@$(PY) harness.py --list
 
 test:                ## interactive runner: pick a version, watch it damp, press x to kick
 	@$(PY) test/tui.py

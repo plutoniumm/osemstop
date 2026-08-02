@@ -107,6 +107,11 @@ DAC_CHANNELS = [0, 2, 4, 6]   # coil DAC channel for sensor index 0..3 (A0..A3)
 # Only ch0 (A0 -> DAC ch0) is experimentally validated. Flip these on one at
 # a time once you've confirmed clean, unclipped convergence on the scope for
 # that axis -- the same way we validated ch0.
+# --- bench status ---
+# 2026-07-15 run 3: ch0 at Kp=-0.030, real damping, no rail clipping. The ONLY
+# configuration confirmed on hardware. Start here on the bench.
+BENCH_STATUS = "validated"
+
 ENABLE_CHANNEL = [True, False, False, False]
 
 BIAS = np.array([0.25, 0.25, 0.25, 0.25])

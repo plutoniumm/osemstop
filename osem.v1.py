@@ -115,6 +115,11 @@ DAC_CHANNELS = [0, 2, 4, 6]   # coil DAC channel for sensor index 0..3 (A0..A3)
 VERSION_TAG = "v1"
 FIXES = ()                     # none -- v0's three known defects are all intact
 
+# --- bench status ---
+# report.pdf section 4 documents all four channels damping on the bench, but
+# THIS FILE has never been run there. Expect it to work; confirm on the scope.
+BENCH_STATUS = "reported"
+
 ENABLE_CHANNEL = [True, True, True, True]
 
 BIAS = np.array([0.25, 0.25, 0.25, 0.25])

@@ -159,7 +159,8 @@ COIL_GAIN = [1.00, 0.76, -4.15, 0.86]
 # phase across the channels and differs only in how much each one picks up.
 HUM_SCALE = [1.00, 0.86, 1.12, 0.94]
 
-STATE_CODE = {"CALIBRATING": 0, "DAMPING": 1, "FAULT": 2, "IDLE": 3}
+STATE_CODE = {"CALIBRATING": 0, "DAMPING": 1, "FAULT": 2, "IDLE": 3,
+              "SYSID": 4}   # v4 adds a system-identification phase
 
 
 class FakeDAC:

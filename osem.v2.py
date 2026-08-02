@@ -128,6 +128,11 @@ DAC_CHANNELS = [0, 2, 4, 6]   # coil DAC channel for sensor index 0..3 (A0..A3)
 VERSION_TAG = "v2"
 FIXES = ()                     # none -- v0's three known defects are all intact
 
+# --- bench status ---
+# I and D have never been on hardware, and neither term damps (versions.md).
+# Bench only with a scope on it, and change one term at a time.
+BENCH_STATUS = "untested"
+
 ENABLE_CHANNEL = [True, True, True, True]
 
 BIAS = np.array([0.25, 0.25, 0.25, 0.25])

@@ -1,5 +1,47 @@
 """
-v3 -- a proper PID, and the three known defects fixed.
+v4 -- modal (MIMO) damping on a basis learned from the hardware.
+==================================================================
+v0..v3 are four independent SISO loops: each OSEM drives only its own coil and
+knows nothing about the other three. report.pdf says so itself -- "this remains
+four independent single-input single-output loops rather than a true
+multi-degree-of-freedom controller."
+
+But the four OSEMs watch ONE suspended mass, so their readings are projections
+of far fewer real degrees of freedom and are heavily correlated. Four loops each
+fighting a plant the other three are also driving is the wrong decomposition of
+the problem.
+
+v4 controls the MOTION instead of the sensors. It does not need to be told the
+geometry -- no quadrant map, no axis assignment, no idea which OSEM is where.
+It measures both matrices it needs:
+
+  1. CALIBRATING, gain at zero, as before -- but it also accumulates the 4x4
+     covariance of the bandpassed sensor vector. Its eigenvectors ARE the
+     observed modes and its eigenvalues rank them by energy. Modes carrying
+     less than MODE_ENERGY_FRAC of the total are motion the mass cannot
+     actually make: that is the null space, and it is monitored, never driven.
+     This is where "how many degrees of freedom are there" gets answered by the
+     hardware rather than by an assumption in a config file.
+
+  2. SYSID, a new short state -- dither each coil in turn with a small sine and
+     measure which way the modes answer. That gives the actuation matrix B, and
+     with it the per-channel sign and authority. This is what makes v4 immune to
+     the STEADY_GAIN[2] = +0.010 problem: it DISCOVERS that ch2 pushes the other
+     way instead of having to be told, and it would discover a miswired channel
+     on any other axis just as readily.
+
+Damping then runs per MODE -- one velocity-feedback loop per real degree of
+freedom -- and the modal command is distributed to the four coils through the
+pseudo-inverse of B. Null-space modes are watched: a rising null-space signal
+means one sensor disagrees with the other three, which detects a blind OSEM
+from consistency alone, with no threshold in ADC counts.
+
+Everything else -- filters, slew limits, calibration timing, the state machine,
+logging, serial protocol, and all three v3 defect fixes -- is v3 unchanged.
+Set MODAL_ENABLE = False and it falls back to v3's per-channel PID exactly.
+See versions.md.
+
+Inherited from v3, unchanged:
 ==================================================================
 The correction pass that v0/v1/v2 deliberately deferred. Two kinds of
 change, kept separate on purpose:
@@ -99,6 +141,7 @@ verify a "locked" claim after the fact, which is exactly what the
 sweep-vs-scope mismatch showed we needed.
 """
 
+import math
 import os
 import sys
 import time
@@ -121,13 +164,57 @@ DAC_CHANNELS = [0, 2, 4, 6]   # coil DAC channel for sensor index 0..3 (A0..A3)
 # the bench (Table 1: tau = 4.55, 5.49, 3.58, 5.05 s for A0..A3), which is the
 # run v0 predates. Disabled channels are still filtered, rail-checked and logged,
 # and still trip the global interlock -- disabling one does not make it silent.
-VERSION_TAG = "v3"
-FIXES = ("saturation-latch", "rail-threshold", "runaway-baseline")
+VERSION_TAG = "v4"
+FIXES = ("saturation-latch", "rail-threshold", "runaway-baseline", "modal")
+
+# ---- modal control -------------------------------------------------------
+MODAL_ENABLE = True     # False -> behaves exactly like v3, per-channel PID
+
+# A mode carrying less than this fraction of the total observed energy is taken
+# to be null space -- motion the mass cannot make -- and is monitored, never
+# driven. Four sensors on a body with 2 real freedoms leave 2 such modes.
+MODE_ENERGY_FRAC = 0.005
+
+# Per-mode damping, in the same sign convention as STEADY_GAIN: negative is
+# damping. The modal basis is orthonormal and SYSID normalises the actuation
+# matrix, so ONE number covers every mode -- there is no per-channel table to
+# get wrong, which is the point.
+MODAL_STEADY_GAIN = -0.030
+MODAL_CAPTURE_GAIN = -0.035
+
+# SYSID: dither the coils and watch which way the modes answer.
+#
+# The excitation is a pseudo-random sign sequence per coil, NOT a sine. Two
+# reasons, both learned the hard way:
+#
+#   * A sine at the resonance cannot be told apart from the ambient motion at
+#     the resonance. The lab is already being driven near 1 Hz -- that is the
+#     whole problem being solved -- so a lock-in at that frequency measures the
+#     disturbance, identically for every coil, and reports four channels with
+#     the same sign and the same authority. Which is wrong, and wrong in the
+#     most misleading way: it looks like a successful measurement.
+#   * A PRBS is uncorrelated with ANY ambient tone, wherever it happens to sit,
+#     so nothing needs to be known about the disturbance in advance.
+#
+# Four mutually uncorrelated sequences also identify all four coils in ONE
+# window instead of four sequential ones, because the cross-correlation between
+# different sequences averages to zero. Same information, a quarter of the time.
+SYSID_DITHER_S = 10.0           # one window identifies the whole matrix
+SYSID_AMPL_V = 0.05             # dither amplitude in DAC volts, around BIAS
+SYSID_HOLD_S = 0.25             # per PRBS bit -> energy spread over ~0-2 Hz
+SYSID_MIN_RESPONSE = 1e-4       # below this a coil is considered dead
+
+# Null-space watchdog. A rigid body cannot produce null-space motion, so any is
+# a sensor disagreeing with its neighbours. This catches a blind OSEM by
+# CONSISTENCY rather than by an absolute threshold in counts, which is what the
+# rail check needs the noise floor to cooperate with.
+NULL_ALARM_RATIO = 4.0          # x the null level measured during calibration
+NULL_SUSTAIN_S = 1.0
 
 # --- bench status ---
-# Never been on hardware. The three defect fixes are verified against the
-# simulator only -- safe-looking, still unconfirmed.
-BENCH_STATUS = "untested"
+# DOES NOT DAMP. System identification does not converge (research.md item 2).
+# Do not flash this. Kept because the architecture is the deliverable.
+BENCH_STATUS = "broken"
 
 ENABLE_CHANNEL = [True, True, True, True]
 
@@ -285,6 +372,95 @@ class SlidingRMS:
         self.sq_sum = 0.0
 
 
+class ModalBasis:
+    """Learns, from the hardware, what the four sensors are actually watching.
+
+    Nothing here is told the geometry. During calibration it accumulates the
+    covariance of the bandpassed 4-vector; its eigenvectors are the observed
+    modes and its eigenvalues say how much motion each one carries. Modes below
+    MODE_ENERGY_FRAC of the total are the null space -- combinations no rigid
+    motion of the mass can produce -- and are reported, never driven.
+
+    Then SYSID dithers each coil and records how the modes respond, giving the
+    actuation matrix. Sensing basis and actuation matrix are measured
+    separately on purpose: assuming one is the transpose of the other is only
+    true if every channel's sensor and coil agree in sign, and on this hardware
+    one of them does not.
+    """
+
+    def __init__(self, n=4):
+        self.n = n
+        self.sum_outer = np.zeros((n, n))
+        self.n_samples = 0
+        self.modes = None          # (n, n) columns are unit mode vectors
+        self.energy = None         # eigenvalue per mode, descending
+        self.n_active = 0          # how many are real motion
+        self.null_baseline = 0.0
+        self.B = None              # (n_active, n) modal response per coil volt
+        self.B_pinv = None         # (n, n_active) modal command -> coil volts
+
+    # ---- learned from the calibration window ----
+    def accumulate(self, vec):
+        v = np.asarray(vec, dtype=float)
+        self.sum_outer += np.outer(v, v)
+        self.n_samples += 1
+
+    def solve(self):
+        """Eigendecompose. Returns a one-line human summary for the log."""
+        cov = self.sum_outer / max(self.n_samples, 1)
+        vals, vecs = np.linalg.eigh(cov)          # ascending, orthonormal
+        order = np.argsort(vals)[::-1]
+        self.energy = vals[order]
+        self.modes = vecs[:, order]
+        total = float(np.sum(np.clip(self.energy, 0, None))) or 1.0
+        frac = np.clip(self.energy, 0, None) / total
+        self.n_active = max(1, int(np.sum(frac >= MODE_ENERGY_FRAC)))
+        # how much lives in the null space right now, as the alarm reference
+        null_e = float(np.sum(np.clip(self.energy[self.n_active:], 0, None)))
+        self.null_baseline = max(np.sqrt(null_e), 1e-9)
+        return (f"{self.n_active} of {self.n} modes carry real motion "
+                f"(energy split " + " ".join(f"{f * 100:.1f}%" for f in frac) + ")")
+
+    def project(self, vec):
+        """Sensor vector -> modal coordinates, all n of them."""
+        return self.modes.T @ np.asarray(vec, dtype=float)
+
+    def null_rms(self, vec):
+        """How much of this reading no rigid motion could have produced."""
+        m = self.project(vec)
+        return float(np.sqrt(np.sum(m[self.n_active:] ** 2)))
+
+    # ---- learned from the dither ----
+    def set_actuation(self, columns):
+        """`columns[i]` is the modal response to a unit volt on coil i."""
+        B = np.array(columns, dtype=float).T          # (n_active, n_coils)
+        # Normalise by the typical column so a modal gain means the same thing
+        # a per-channel gain did in v0..v3 -- otherwise every gain constant in
+        # the file would silently change meaning between versions.
+        scale = float(np.mean(np.linalg.norm(B, axis=0))) or 1.0
+        B = B / scale
+        self.B = B
+        # Minimum-norm distribution of a modal command across the coils. Rows of
+        # B that are near-zero (a dead or disconnected coil) fall out of the
+        # pseudo-inverse on their own rather than needing a special case.
+        self.B_pinv = np.linalg.pinv(B, rcond=1e-3)
+        return B
+
+    def to_coils(self, modal_cmd):
+        return self.B_pinv @ np.asarray(modal_cmd, dtype=float)
+
+    def describe_actuation(self):
+        """Per-coil authority and sign, as measured -- not as configured."""
+        out = []
+        for i in range(self.B.shape[1]):
+            col = self.B[:, i]
+            mag = float(np.linalg.norm(col))
+            dominant = int(np.argmax(np.abs(col)))
+            sign = "+" if col[dominant] >= 0 else "-"
+            out.append(f"ch{i}: |B|={mag:.4f} {sign}mode{dominant}")
+        return ", ".join(out)
+
+
 class PID:
     """Parallel-form PID on the velocity error, in DAC volts.
 
@@ -410,6 +586,11 @@ class Channel:
         # slew-limited above); ki/kd are fixed per channel.
         self.pid = PID(ki, kd)
         self.clip_excess = 0.0        # carried to the next sample's anti-windup
+        # When the supervisor is running a modal law, the per-channel command
+        # comes from outside: this channel is one actuator serving several
+        # modes, not a loop of its own. None means "run your own PID" (v3
+        # behaviour), which is what MODAL_ENABLE = False leaves in place.
+        self.external_cmd = None
 
         self.hp = OnePoleFilter(BP_LOW_HZ, kind="high")
         self.lp = OnePoleFilter(BP_HIGH_HZ, kind="low")
@@ -581,7 +762,11 @@ class Channel:
             self.locked = False
 
     def actuate(self, dt, state):
-        if state == "DAMPING" and self.enabled:
+        if state in ("DAMPING", "SYSID") and self.enabled and self.external_cmd is not None:
+            unclipped = self.bias + self.external_cmd
+            target = float(np.clip(unclipped, VMIN, VMAX))
+            self.clip_excess = unclipped - target
+        elif state == "DAMPING" and self.enabled:
             u = self.pid.update(self.vel, dt, self.active_gain, self.clip_excess)
             unclipped = self.bias + u
             target = float(np.clip(unclipped, VMIN, VMAX))
@@ -592,6 +777,7 @@ class Channel:
             # derivative step across the gap.
             self.pid.reset()
             self.clip_excess = 0.0
+            self.external_cmd = None
             target = self.bias
         self.out = slew_limit(self.prev_out, target, dt, MAX_SLEW_PER_S)
         self.prev_out = self.out
@@ -650,6 +836,7 @@ class Channel:
     def reset_for_recalibration(self):
         self.calib_sq_sum, self.calib_n = 0.0, 0
         self.calib_windows = []
+        self.external_cmd = None
         self.baseline_rms = None
         self.active_gain = 0.0
         self.pid.reset()
@@ -725,6 +912,73 @@ class Controller:
         self.fault_count = 0
         self.events = []
 
+        # --- modal control state ---
+        self.basis = ModalBasis(4)
+        self.modal_pid = []            # one PID per active mode, built after solve()
+        self.modal_gain = 0.0          # scheduled and slew-limited, like active_gain
+        self.modal_cmd = np.zeros(4)
+        self.modal_vel = np.zeros(4)
+        self.sysid_start = None
+        self.sysid_lfsr = [0xACE1, 0xBEEF, 0x1234, 0x5A5A]   # one seed per coil
+        self.sysid_signs = [1.0, 1.0, 1.0, 1.0]
+        self.sysid_acc = None          # per-coil correlation accumulators
+        self.sysid_n = 0
+        self.sysid_next_flip = 0.0
+        self.sysid_cols = []
+        self.null_level = 0.0
+        self.null_since = None
+        self.null_alarm = False
+
+    # ---------------- modal helpers ----------------
+    def modal_ready(self):
+        return MODAL_ENABLE and self.basis.B_pinv is not None
+
+    @staticmethod
+    def _lfsr(state):
+        """Deterministic pseudo-random bit. Deterministic matters: a run has to
+        be reproducible, and the sequences have to be the same ones the
+        correlation is computed against."""
+        bit = ((state) ^ (state >> 2) ^ (state >> 3) ^ (state >> 5)) & 1
+        return ((state >> 1) | (bit << 15)) & 0xFFFF
+
+    def _sysid_step(self, t, dt):
+        """Excite all four coils with uncorrelated sign sequences and correlate
+        the modal response against each. Returns (coil volts, finished).
+
+        Correlates modal VELOCITY, not displacement. Driven near resonance,
+        displacement lags force by 90 degrees, so its in-phase component is
+        nearly zero and the measurement would be mostly noise -- with the sign
+        of that noise deciding which way each coil is wired. Velocity is in
+        phase with force at resonance, and it is also the transfer function
+        this controller actually uses, since the law is velocity feedback.
+        """
+        elapsed = t - self.sysid_start
+        volts = np.zeros(4)
+        if elapsed >= SYSID_DITHER_S:
+            n = max(self.sysid_n, 1)
+            cols = [self.sysid_acc[i] / n / (SYSID_AMPL_V ** 2) for i in range(4)]
+            self.sysid_cols = cols
+            return volts, True
+
+        # advance the sign sequences on the hold grid
+        if elapsed >= self.sysid_next_flip:
+            self.sysid_next_flip += SYSID_HOLD_S
+            for i in range(4):
+                self.sysid_lfsr[i] = self._lfsr(self.sysid_lfsr[i])
+                self.sysid_signs[i] = 1.0 if (self.sysid_lfsr[i] & 1) else -1.0
+
+        for i in range(4):
+            volts[i] = SYSID_AMPL_V * self.sysid_signs[i]
+
+        # let the first bit or two propagate before believing the response
+        if elapsed > 4 * SYSID_HOLD_S:
+            m = self.basis.project([ch.vel for ch in self.channels])
+            mv = m[:self.basis.n_active]
+            for i in range(4):
+                self.sysid_acc[i] += mv * (SYSID_AMPL_V * self.sysid_signs[i])
+            self.sysid_n += 1
+        return volts, False
+
     def drain_events(self):
         out, self.events = self.events, []
         return out
@@ -741,6 +995,9 @@ class Controller:
             frac_done = min((t - self.calib_start) / CALIBRATION_S, 1.0)
             for ch in channels:
                 ch.accumulate_calibration(frac_done)
+            # Same window, no extra time: learn what the sensors are watching.
+            if MODAL_ENABLE:
+                self.basis.accumulate([ch.bp_out for ch in channels])
             if any_rail:
                 self.events.append("\n!! sensor railed during calibration -- check alignment "
                                    "before continuing. Entering FAULT.\n")
@@ -750,13 +1007,57 @@ class Controller:
             elif t - self.calib_start >= CALIBRATION_S:
                 for ch in channels:
                     ch.finish_calibration()
+                baselines = ", ".join(f"ch{ch.idx}={ch.baseline_rms:.4f}V" for ch in channels)
+                self.locked_announced = False
+                if MODAL_ENABLE:
+                    summary = self.basis.solve()
+                    self.events.append(f"[CALIBRATED] baseline set ({baselines}).\n"
+                                       f"  {summary}\n")
+                    self.state = "SYSID"
+                    self.sysid_start = t
+                    self.sysid_cols = []
+                    self.sysid_n = 0
+                    self.sysid_next_flip = 0.0
+                    self.sysid_lfsr = [0xACE1, 0xBEEF, 0x1234, 0x5A5A]
+                    self.sysid_acc = [np.zeros(self.basis.n_active)
+                                      for _ in range(4)]
+                else:
+                    self.state = "DAMPING"
+                    self.damping_start = t
+                    self.events.append(f"[{self.state}] baseline set ({baselines}). "
+                                       f"Gain will schedule between {CAPTURE_GAIN[0]:+.3f} "
+                                       f"(large amplitude) and {STEADY_GAIN[0]:+.3f} (near lock)...\n")
+
+        elif self.state == "SYSID":
+            # Learn the actuation matrix. Gain stays at zero throughout; the only
+            # thing driving the coils is the dither itself.
+            for ch in channels:
+                ch.active_gain = 0.0
+            sysid_volts, done = self._sysid_step(t, dt)
+            if any_rail:
+                self.events.append("\n!! sensor railed during system id -- entering FAULT.\n")
+                self.state = "FAULT"
+                self.fault_clear_since = None
+                self.fault_count += 1
+            elif done or len(self.sysid_cols) >= 4:
+                cols = self.sysid_cols[:4]
+                while len(cols) < 4:                      # a coil that never answered
+                    cols.append(np.zeros(self.basis.n_active))
+                B = self.basis.set_actuation(cols)
+                dead = [i for i in range(4)
+                        if float(np.linalg.norm(B[:, i])) < SYSID_MIN_RESPONSE]
+                self.modal_pid = [PID(0.0, 0.0) for _ in range(self.basis.n_active)]
+                self.modal_gain = 0.0
+                self.events.append(
+                    f"[SYSID] actuation measured -- {self.basis.describe_actuation()}\n"
+                    + (f"  !! no response from ch{dead} -- excluded by the pseudo-inverse\n"
+                       if dead else "")
+                    + f"  damping {self.basis.n_active} mode(s); the remaining "
+                      f"{4 - self.basis.n_active} are null space and are watched, not driven.\n")
                 self.state = "DAMPING"
                 self.damping_start = t
-                self.locked_announced = False
-                baselines = ", ".join(f"ch{ch.idx}={ch.baseline_rms:.4f}V" for ch in channels)
-                self.events.append(f"[{self.state}] baseline set ({baselines}). "
-                                   f"Gain will schedule between {CAPTURE_GAIN[0]:+.3f} (large amplitude) "
-                                   f"and {STEADY_GAIN[0]:+.3f} (near lock)...\n")
+            for i, ch in enumerate(channels):
+                ch.external_cmd = float(sysid_volts[i]) if ch.enabled else None
 
         elif self.state == "DAMPING":
             if any_rail:
@@ -775,6 +1076,50 @@ class Controller:
                         tripped_any = True
                         self.events.append(f"\n!! ch{ch.idx} runaway/saturation -- freezing all "
                                            f"channels, entering FAULT.\n")
+                # ---- modal law: one loop per real degree of freedom ----
+                if self.modal_ready():
+                    n = self.basis.n_active
+                    # The basis is a constant linear map and every filter ahead
+                    # of it is linear, so projecting the per-channel velocity
+                    # estimates gives the modal velocities directly -- no second
+                    # differentiator, no extra phase lag.
+                    self.modal_vel = self.basis.project([ch.vel for ch in channels])
+                    ratio = max((ch.last_ratio for ch in channels if ch.enabled),
+                                default=0.0)
+                    frac = np.clip((ratio - CAPTURE_LOW_FRAC)
+                                   / (CAPTURE_HIGH_FRAC - CAPTURE_LOW_FRAC), 0.0, 1.0)
+                    target = MODAL_STEADY_GAIN + frac * (MODAL_CAPTURE_GAIN - MODAL_STEADY_GAIN)
+                    self.modal_gain = slew_limit(self.modal_gain, target, dt, GAIN_SLEW_PER_S)
+
+                    cmd = np.zeros(n)
+                    for m in range(n):
+                        cmd[m] = self.modal_pid[m].update(
+                            float(self.modal_vel[m]), dt, self.modal_gain)
+                    self.modal_cmd = cmd
+                    coil = self.basis.to_coils(cmd)
+                    for i, ch in enumerate(channels):
+                        ch.external_cmd = float(coil[i]) if ch.enabled else None
+
+                    # ---- null-space watchdog ----
+                    # A rigid body cannot make this motion, so any of it means a
+                    # sensor disagrees with the other three. Catches a blind OSEM
+                    # by consistency, with no absolute threshold in counts.
+                    self.null_level = self.basis.null_rms([ch.bp_out for ch in channels])
+                    if self.null_level > self.basis.null_baseline * NULL_ALARM_RATIO:
+                        if self.null_since is None:
+                            self.null_since = t
+                        elif t - self.null_since >= NULL_SUSTAIN_S and not self.null_alarm:
+                            self.null_alarm = True
+                            self.events.append(
+                                f"\n!! null-space alarm: {self.null_level:.4f}V of motion no "
+                                f"rigid body can make ({self.null_level / self.basis.null_baseline:.1f}x "
+                                f"the calibrated level). One sensor disagrees with the other "
+                                f"three -- suspect a blind or drifting OSEM.\n")
+                            tripped_any = True
+                    else:
+                        self.null_since = None
+                        self.null_alarm = False
+
                 if tripped_any:
                     self.state = "FAULT"
                     self.fault_clear_since = None
@@ -804,6 +1149,15 @@ class Controller:
                                        f"{FAULT_CLEAR_SUSTAIN_S:.0f}s -- re-calibrating and resuming.\n")
                     for ch in channels:
                         ch.reset_for_recalibration()
+                    # Re-learn the model from scratch: the reason we faulted may
+                    # be that the plant or a sensor is no longer what we
+                    # measured. A borrowed basis would be exactly the mistake
+                    # the borrowed-baseline rule already forbids.
+                    self.basis = ModalBasis(4)
+                    self.modal_pid = []
+                    self.modal_gain = 0.0
+                    self.null_since = None
+                    self.null_alarm = False
                     self.state = "CALIBRATING"
                     self.calib_start = t
                     self.fault_clear_since = None
