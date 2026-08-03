@@ -1,1 +1,14 @@
-__pycache__
+# Python
+__pycache__/
+*.py[cod]
+
+# arduino-cli sketch dir, recreated by `make arduino`
+build/
+
+# Run logs. The controller writes one CSV per run to ./data/, and they are large
+# -- 45 MB after a single afternoon on the bench. A run is only reproducible from
+# the hardware anyway, so keep the ones that matter somewhere deliberate.
+data/
+
+# macOS
+.DS_Store
