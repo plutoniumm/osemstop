@@ -6,7 +6,7 @@ four coils push back. The whole thing is one closed loop split across a language
 boundary:
 
 ```
-thing.c  (Arduino firmware)        <-- SPI --> AD5628 octal DAC --> coils
+arduino.ino (Arduino firmware)        <-- SPI --> AD5628 octal DAC --> coils
    ^  |                                                              |
    |  | serial @115200                                               v
    |  v                                                      suspended optic
@@ -56,9 +56,9 @@ converge; it drives the coils from a wrong actuation matrix.
 
 ## 1. Flash the Arduino
 
-`thing.c` is an Arduino **sketch**, not compilable C — it uses `SPI.h`, `String`
-and `Serial`, and arduino-cli will not look at it until it is named
-`<dir>/<dir>.ino`. One command does the copy, the compile and the upload:
+`arduino.ino` is the firmware that is actually on the board. arduino-cli will not
+look at a sketch until it is named `<dir>/<dir>.ino`, so one command does the copy,
+the compile and the upload:
 
 ```bash
 make arduino                                   # defaults to arduino:avr:mega
@@ -68,10 +68,10 @@ make arduino PORT=/dev/cu.usbmodem1401         # skip auto-detection
 
 Board is an Arduino **Mega or Due** — `CS` is on pin 53, which is Mega/Due
 specific. `arduino-cli` 1.5.1 with the `arduino:avr` core **is** installed on the
-dev machine (earlier revisions of this file said otherwise), and `thing.c`
-compiles clean for the Mega: 8424 bytes, 3% of flash, 302 bytes of RAM.
+dev machine (earlier revisions of this file said otherwise), and the firmware
+compiles clean for the Mega.
 
-`setup()` zeroes DAC channels 0, 2, 4, 6 before anything else runs, and enables
+`setup()` zeroes all eight DAC channels before anything else runs, and enables
 the DAC's internal 2.5 V reference with an `0x08` frame.
 
 ## 2. Host setup
@@ -188,7 +188,8 @@ damping all the way to −0.6. **The simulator cannot tell you a safe gain.**
 |---|---|
 | `osem.v0.py` … `osem.v4.py` | the controllers — complete and standalone, see `versions.md` |
 | `pyDAC.py` | serial transport (`DACController`) |
-| `thing.c` | Arduino sketch: ADC stream + AD5628 SPI |
+| `arduino.ino` | Arduino sketch: 8-column ADC stream + AD5628 SPI — **the firmware `make arduino` flashes** |
+| `thing.c` | the superseded 4-column original, kept for reference only |
 | `bench.py` | the on-hardware entry point: `make run`, `make arduino`, `make ports` |
 | `harness.py` | one entry point for everything off the bench |
 | `sim/`, `test/` | simulated plant + browser UI; interactive runner |
@@ -200,14 +201,14 @@ damping all the way to −0.6. **The simulator cannot tell you a safe gain.**
 
 # Serial protocol
 
-Changing any line here means editing `thing.c` and `pyDAC.py` together.
+Changing any line here means editing `arduino.ino` and `pyDAC.py` together.
 
 | Direction | Message | Meaning |
 |---|---|---|
 | MCU → host | `READY` | sent once after `setup()` |
 | host → MCU | `SET <ch> <volts>` | sets DAC channel 0–7; replies `OK ch=.. v=..` or `ERR ..` |
 | host → MCU | `STREAM` / `STOP` | toggles sampling; replies `STREAMING` / `STOPPED` |
-| MCU → host | `a0,a1,a2,a3` | free-running ADC counts 0–1023, one line per loop, only while streaming |
+| MCU → host | `a0,...,a7` | free-running ADC counts 0–1023, one line per loop, only while streaming. Eight columns; only A0–A3 are wired, so `read_sample` takes the leading four |
 
 `SET` and the stream share one wire — the firmware keeps streaming while it
 services commands, so an `OK` arrives buried in sample lines. `set_voltage` reads
@@ -221,4 +222,4 @@ up to 50 lines looking for it.
   restricts itself to 0–0.5 V around `BIAS = 0.25`.
 
 Sensor index `i` (0–3) → analog pin `A<i>` → DAC channel `DAC_CHANNELS[i] =
-[0, 2, 4, 6]`. Even channels only.
+[1, 3, 5, 7]`. Rewired 2026-08-03 — `ref.py:121` has the full eight-pair map.

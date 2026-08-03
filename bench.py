@@ -10,7 +10,7 @@ opposite number: it talks to the real Arduino and then hands control to a real
     python3 bench.py v0           # run that one
     python3 bench.py v0 --port /dev/cu.usbmodem1401
     python3 bench.py --ports      # just list candidate serial ports
-    python3 bench.py --flash      # compile and upload thing.c, nothing else
+    python3 bench.py --flash      # compile and upload arduino.ino, nothing else
 
 or through make, which is the intended form:
 
@@ -76,6 +76,8 @@ sys.path.insert(0, HERE)
 KNOWN_VIDS = {0x2341, 0x2A03, 0x1A86, 0x0403, 0x10C4}
 
 DEFAULT_FQBN = "arduino:avr:mega"       # CS on pin 53 is Mega/Due specific
+FIRMWARE = "arduino.ino"                # what is actually on the board.
+                                        # thing.c is the superseded 4-column original.
 
 
 # --------------------------------------------------------------------------
@@ -283,16 +285,23 @@ def run(path, port, force):
 # flashing
 # --------------------------------------------------------------------------
 def flash(port, fqbn):
-    """thing.c is an Arduino sketch, not compilable C: it has to be named
-    <dir>/<dir>.ino before arduino-cli will look at it."""
+    """The firmware is an Arduino sketch, not compilable C: arduino-cli will not
+    look at it until it is named <dir>/<dir>.ino.
+
+    FIRMWARE is the source of truth -- it is what is actually on the board.
+    thing.c is the superseded 4-column original, kept only for reference; flashing
+    it would narrow the stream back to A0..A3 and change what read_sample sees.
+    """
     if not shutil.which("arduino-cli"):
         sys.exit("  arduino-cli not on PATH. brew install arduino-cli, then\n"
                  "  arduino-cli core install arduino:avr")
+    src = os.path.join(HERE, FIRMWARE)
+    if not os.path.exists(src):
+        sys.exit("  no firmware at %s" % src)
     sketch = os.path.join(HERE, "build", "osem_stream")
     os.makedirs(sketch, exist_ok=True)
-    shutil.copyfile(os.path.join(HERE, "thing.c"),
-                    os.path.join(sketch, "osem_stream.ino"))
-    print("  sketch: %s (thing.c copied as osem_stream.ino)" % sketch, flush=True)
+    shutil.copyfile(src, os.path.join(sketch, "osem_stream.ino"))
+    print("  sketch: %s (%s copied as osem_stream.ino)" % (sketch, FIRMWARE), flush=True)
 
     if subprocess.run(["arduino-cli", "compile", "--fqbn", fqbn, sketch]).returncode:
         sys.exit("  compile failed. Wrong FQBN? Board is a Mega or a Due:\n"
@@ -301,7 +310,7 @@ def flash(port, fqbn):
     if subprocess.run(["arduino-cli", "upload", "--fqbn", fqbn,
                        "-p", port, sketch]).returncode:
         sys.exit("  upload failed on %s." % port)
-    print("\n  flashed. setup() has zeroed DAC channels 0/2/4/6 and enabled the\n"
+    print("\n  flashed. setup() has zeroed all eight DAC channels and enabled the\n"
           "  internal 2.5V reference. `make run` next.")
 
 
@@ -312,7 +321,7 @@ def main():
     ap.add_argument("version", nargs="?", default=None, help="v0, v1, ... (default: ask)")
     ap.add_argument("--port", default=os.environ.get("PORT") or None,
                     help="serial port (default: auto-detect, else ask)")
-    ap.add_argument("--flash", action="store_true", help="compile and upload thing.c, then exit")
+    ap.add_argument("--flash", action="store_true", help="compile and upload arduino.ino, then exit")
     ap.add_argument("--fqbn", default=DEFAULT_FQBN)
     ap.add_argument("--ports", action="store_true", help="list candidate ports and exit")
     ap.add_argument("--force", action="store_true", help="allow a 'broken' version")

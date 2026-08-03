@@ -102,7 +102,10 @@ PORT = "COM7"
 A_VCC = 5.02
 ADC_MAX_COUNTS = 1023
 
-DAC_CHANNELS = [0, 2, 4, 6]   # coil DAC channel for sensor index 0..3 (A0..A3)
+DAC_CHANNELS = [1, 3, 5, 7]   # coil DAC channel for sensor index 0..3 (A0..A3).
+                              # Rewired 2026-08-03; ref.py:121 is the full 8-pair
+                              # map [1,3,5,7,0,2,4,6]. The old [0,2,4,6] now points
+                              # at the coils for sensors 4..7.
 
 # Only ch0 (A0 -> DAC ch0) is experimentally validated. Flip these on one at
 # a time once you've confirmed clean, unclipped convergence on the scope for
@@ -273,9 +276,13 @@ def read_sample(ser):
     try:
         raw = ser.readline().decode("utf-8").strip()
         parts = raw.split(",")
-        if len(parts) != 4:
+        # The firmware streams one column per analog pin it samples. thing.c
+        # streams four (A0..A3); arduino.ino streams eight (A0..A7) but only
+        # A0..A3 carry OSEMs, so take the leading four. Exactly-four input is
+        # unaffected -- parts[:4] is a no-op there.
+        if len(parts) < 4:
             return None
-        counts = np.array([int(p) for p in parts])
+        counts = np.array([int(p) for p in parts[:4]])
         volts = counts * (A_VCC / ADC_MAX_COUNTS)
         return counts, volts
     except (ValueError, IndexError):
