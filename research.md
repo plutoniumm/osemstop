@@ -49,7 +49,7 @@ four-independent-oscillator plant. Until the test bed stopped lying, nothing
 else on this list could be validated.
 
 **Now:** 88 checks, **83 pass, 5 fail, ~120 s**. v0–v3 are green (18 / 16 / 18 /
-18). All 5 remaining failures are v4 and all are real: it does not damp (ratios
+18). The 5 remaining failures were all in v4, and all real: it did not damp (ratios
 0.24–0.77), never locks, faults once in a quiet lab, and its I term never
 accumulates so the P-dominance check has nothing to compare. That is item 2.
 
@@ -58,7 +58,7 @@ Three assertions were rewritten in `harness.py`; no controller was touched.
 - *"disabled channels stay at their baseline"* → split in two. A disabled
   channel must never actuate (peak `|out − bias|` is exactly 0), but its
   amplitude ratio must **fall** — one rigid body, so damping ch0 takes energy
-  out of the whole mass and all four OSEMs see it, which is `report.pdf` §3.
+  out of the whole mass and all four OSEMs see it, which is `provenance.md` §3.
   Measured on v0: driven ch0 = 0.197, undriven 0.265 / 0.323 / 0.355, and the
   driven channel is still the flattest, which is the report's other claim.
 - *"a runaway trip auto-recovers"* → the scenario it used (all four on, ch2's
@@ -68,7 +68,7 @@ Three assertions were rewritten in `harness.py`; no controller was touched.
   simply stays near full amplitude, where the velocity feedback asks for more
   than the ±0.25 V it is clipped to. It trips on **ch3 saturation** at t = 10.74 s
   (`sat_streak` = 31), which is defect #1 and latches. That is now asserted as
-  such, from the broken side for v0/v1/v2 and the fixed side for v3/v4. The
+  such, from the broken side for v0/v1/v2 and the fixed side for v3. The
   runaway path gets its own scenario — ch2 alone, wrong-signed at half
   magnitude, so the growth is slow enough to trip on amplitude ratio while the
   actuator peaks at 0.055–0.112 V of its 0.25 V clip — and every version must
@@ -77,18 +77,23 @@ Three assertions were rewritten in `harness.py`; no controller was touched.
 - *"KNOWN GAP / FIXED runaway-baseline"* → the 18% line was calibrated on the
   old plant and no longer separates anything. Re-measured: see the sweep table
   in `versions.md` § v3. One shock, swept across the calibration window, worst
-  case 45.3% (v0/v1/v2) against 25.0% (v3/v4); the line is now 35%. A single
+  case 45.3% (v0/v1/v2) against 25.0% (v3); the line is now 35%. A single
   fixed shock time ranks the two backwards for late shocks, so the check sweeps.
 
 All of that is simulator, on the rigid-body plant, **never hardware**.
 
 ---
 
-## 2. Replace v4's lock-in with subspace system ID (N4SID / ARX)
+## 2. Modal (MIMO) damping — what killed the last attempt
 
-**The diagnosis, already made.** v4 learns the modal basis correctly with no
-geometry input — it reports "2 of 4 modes carry real motion, 98.8% / 1.2%" from
-the calibration covariance alone. It fails at exactly one point: recovering the
+This is the main **beyond-PID** direction, and it has been tried once. `osem.v4.py`
+implemented it and was deleted on 2026-08-03 without ever damping; it survives in
+git history. Read this before starting again, because the failure was specific and
+is worth not repeating.
+
+**The diagnosis, already made.** v4 learned the modal basis correctly with no
+geometry input — it reported "2 of 4 modes carry real motion, 98.8% / 1.2%" from
+the calibration covariance alone. It failed at exactly one point: recovering the
 actuation matrix.
 
 Truth (LONG row, normalised): `[−0.59, −0.45, +2.45, −0.51]` — ch2 stands out at
@@ -96,7 +101,7 @@ Truth (LONG row, normalised): `[−0.59, −0.45, +2.45, −0.51]` — ch2 stand
 
 | scheme | result |
 |---|---|
-| velocity × PRBS (what v4 does) | `[2.0, 0.2, −0.53, −1.27]` |
+| velocity × PRBS (what v4 did) | `[2.0, 0.2, −0.53, −1.27]` |
 | acceleration × PRBS | `[−0.71, −0.47, −0.86, −1.96]` |
 
 Three compounding causes:
@@ -118,7 +123,13 @@ one coil at a time, both quadratures**, so magnitude and phase both fall out and
 the sign never depends on guessing a quadrature in advance.
 
 **Done when:** the recovered matrix matches ground truth in sign and to ~20% in
-magnitude, and v4 damps.
+magnitude, and the modal controller damps on the bench.
+
+**Note the cheaper option.** The actuation matrix does not have to be learned
+online at all. With the bench in front of you, drive one coil at a time with a
+stepped sine and record the response — that is a one-afternoon measurement that
+yields the same matrix with no convergence risk, and it is what v4's online
+system ID kept getting wrong.
 
 ---
 
@@ -128,7 +139,7 @@ magnitude, and v4 damps.
 
 Every gain in the repo rests on one sentence in `osem.v0.py`'s docstring:
 *"onset of instability/rail at gain=-0.04."* That number appears in no data
-anywhere. `report.pdf` — written two days later — never mentions it: no sweep,
+anywhere. `provenance.md` — written two days later — never mentions it: no sweep,
 no −0.04, no rail-onset trace. And the simulator provably cannot reproduce it,
 because the plant is linear: here, more negative Kp is monotonically more
 damping all the way to −0.6.
@@ -163,7 +174,7 @@ That is the one way to attack the 0.23 floor **without** the broadband gain
 increase that runs into −0.04.
 
 **Watch for:** a resonant stage adds phase, so it interacts with item 5, and it
-needs f₀ known. Note the repo has no frequency estimator — `report.pdf`'s block
+needs f₀ known. Note the repo has no frequency estimator — `provenance.md`'s block
 diagram specifies `zero-crossing → f̂` in Calibration and it was never
 implemented. This item is the reason to build it.
 
@@ -208,16 +219,16 @@ should not.
   would learn confidently that more gain is always better, which is the single
   lesson you least want it to learn.
 - **`ENABLE_CHANNEL` vs the report, and `auto-disable`.** Only the first is
-  written down: `versions.md` § v1 and `CLAUDE.md` § "Channel mapping" both spell
-  out that v0's "only ch0 is validated" predates `report.pdf` §4 by two days and
-  that v1–v4 ship all four channels on. `auto-disable` is documented nowhere in
+  written down: `versions.md` § v1 and `README.md` § "Channel mapping" both spell
+  out that v0's "only ch0 is validated" predates `provenance.md` §4 by two days and
+  that v1–v3 ship all four channels on. `auto-disable` is documented nowhere in
   this repo — it appears once, in the report's block-diagram Safety Checks box
   next to `lock detect`, and in no controller (`grep auto-disable osem.v*.py` is
   empty). Like the `zero-crossing → f̂` estimator in item 4, it was drawn and
   never implemented. This bullet used to also list "the report's 0.085 Hz error"
   and to credit all three to `versions.md`; both were wrong. `versions.md`
   contains neither `0.085` nor any mention of `auto-disable`, and `0.085` occurs
-  nowhere in the repo or in `report.pdf`'s text layer, so whatever that error was
+  nowhere in the repo or in `provenance.md`'s text layer, so whatever that error was
   has left no record — do not act on it without re-deriving it from the report.
   No action needed until wanted.
 

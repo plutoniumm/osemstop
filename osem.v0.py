@@ -103,9 +103,9 @@ A_VCC = 5.02
 ADC_MAX_COUNTS = 1023
 
 DAC_CHANNELS = [1, 3, 5, 7]   # coil DAC channel for sensor index 0..3 (A0..A3).
-                              # Rewired 2026-08-03; ref.py:121 is the full 8-pair
-                              # map [1,3,5,7,0,2,4,6]. The old [0,2,4,6] now points
-                              # at the coils for sensors 4..7.
+                              # Rewired 2026-08-03. Full 8-pair map is
+                              # [1,3,5,7,0,2,4,6] -- see provenance.md. The old
+                              # [0,2,4,6] now points at the coils for sensors 4..7.
 
 # Only ch0 (A0 -> DAC ch0) is experimentally validated. Flip these on one at
 # a time once you've confirmed clean, unclipped convergence on the scope for
@@ -276,10 +276,10 @@ def read_sample(ser):
     try:
         raw = ser.readline().decode("utf-8").strip()
         parts = raw.split(",")
-        # The firmware streams one column per analog pin it samples. thing.c
-        # streams four (A0..A3); arduino.ino streams eight (A0..A7) but only
-        # A0..A3 carry OSEMs, so take the leading four. Exactly-four input is
-        # unaffected -- parts[:4] is a no-op there.
+        # The firmware streams one column per analog pin it samples. arduino.ino
+        # streams eight (A0..A7) but only A0..A3 carry OSEMs, so take the
+        # leading four. Exactly-four input is unaffected -- parts[:4] is a
+        # no-op there, so older four-column firmware still works.
         if len(parts) < 4:
             return None
         counts = np.array([int(p) for p in parts[:4]])
@@ -612,7 +612,7 @@ class Controller:
         elif self.state == "FAULT":
             for ch in channels:
                 ch.active_gain = 0.0
-            # KNOWN BUG, left in deliberately (state.md hazard 1; fixed in v3):
+            # KNOWN BUG, left in deliberately (versions.md hazard 1; fixed in v3):
             # saturated_flag is only ever recomputed inside check_runaway(),
             # which does not run in this state. Once a saturation trip sets it,
             # all_clear can never become True again and FAULT is permanent until

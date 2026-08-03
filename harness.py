@@ -149,7 +149,7 @@ def run(label, seconds, enable, steady, ki=None, kd=None, occlude_at=None,
     `seconds` is an upper bound, not a duration: `stop_on_recover` cuts the run
     at the first FAULT -> CALIBRATING transition and `until_baseline` at the end
     of the first calibration. Both exist so a check that only cares about one
-    event does not pay for a version whose CALIBRATION_S is 20 s (v3/v4) as if
+    event does not pay for a version whose CALIBRATION_S is 20 s (v3) as if
     it were 8 s (v0..v2).
 
     `shock_at` is `(t, dv)`: one deterministic velocity impulse, the same one
@@ -185,8 +185,8 @@ def run(label, seconds, enable, steady, ki=None, kd=None, occlude_at=None,
     # `Channel.baseline_rms` after the run instead reports whatever the LAST
     # calibration produced, which for a version that faulted and re-calibrated
     # mid-run is a different window under different conditions -- that is what
-    # made v4 read 58.6% on the calibration-skew check while running v3's
-    # calibration code byte for byte.
+    # once made a version read 58.6% on the calibration-skew check while running
+    # v3's calibration code byte for byte.
     baseline0 = None
     # saturated_flag anywhere, any sample: a saturation trip is what latches
     # FAULT in v0/v1/v2, so "did this scenario saturate?" decides whether it is
@@ -297,7 +297,7 @@ def suite(path):
         # NOT "disabled channels stay at their baseline" any more. That assertion
         # encoded four independent oscillators; the plant is one rigid body, so
         # damping the driven corner takes energy out of the whole mass and every
-        # OSEM sees it decay. report.pdf section 3 measured exactly that on the
+        # OSEM sees it decay. provenance.md §3 measured exactly that on the
         # bench -- "although only one channel is being driven, all four visibly
         # decay" -- and it is why v1 turned the other three on. Measured here on
         # v0: driven ch0 = 0.197, undriven 0.265 / 0.323 / 0.355.
@@ -309,7 +309,7 @@ def suite(path):
         #   * it must still decay well below its own baseline -- fails if the
         #     rigid-body coupling is lost or the loop stops removing energy;
         #   * but it must decay LESS than the driven one, because it can only
-        #     lose energy indirectly through that coupling -- report.pdf section
+        #     lose energy indirectly through that coupling -- provenance.md section
         #     3 again, the targeted channel has "the best flatness".
         check("disabled channels never actuate -- output pinned to bias",
               all(a["out_dev"][i] < 1e-9 for i in off),
@@ -359,7 +359,7 @@ def suite(path):
     # 0.057 V, v3 0.055 V -- nowhere near pinned, so this is unambiguously the
     # runaway breaker firing. Every version must recover from it, including
     # v0/v1/v2: saturated_flag is never set, so nothing holds all_clear False.
-    # That is the exact claim README section 7, versions.md and state.md hazard 1
+    # That is the exact claim README section 7, versions.md and versions.md hazard 1
     # all make -- "a runaway trip recovers fine; only saturation deadlocks" --
     # and for the un-fixed versions recovery is itself the proof that no
     # actuator pinned, since one that did would latch FAULT forever.
@@ -449,10 +449,10 @@ def suite(path):
     # lands, and that is what is asserted here -- the WORST case over the sweep.
     #
     # The window swept is v0's 8 s one, which lies inside every longer window on
-    # the ladder (v3/v4 calibrate for 20 s), so every version is handed the same
+    # the ladder (v3 calibrates for 20 s), so every version is handed the same
     # transient at the same absolute time. Measured worst case over t = 2/4/6 s:
     #     v0 / v1 / v2  (one 8 s window, RMS)          45.3%
-    #     v3 / v4       (20 s, median of 5 windows)    25.0%
+    #     v3            (20 s, median of 5 windows)    25.0%
     # 35% separates them with ~1.3x margin either side. The 18% line this check
     # used before, and the 20.5% / 14.6% numbers behind it in versions.md, were
     # measured on the old four-independent-oscillator plant and do not survive
@@ -506,7 +506,7 @@ def main():
             print(f"{d['name']:<10} {d['bench']:<11} {d['n_enabled']}/4       "
                   f"{'live' if any(d['ki']) or any(d['kd']) else 'zeroed':<8} "
                   f"{', '.join(d['fixes']) or '-'}")
-        print("\n  validated = confirmed on hardware   reported = report.pdf only, this file untested")
+        print("\n  validated = confirmed on hardware   reported = provenance.md only, this file untested")
         print("  untested  = never on hardware       broken   = does not damp, do not flash")
         return 0
 

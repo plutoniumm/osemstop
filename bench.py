@@ -76,8 +76,7 @@ sys.path.insert(0, HERE)
 KNOWN_VIDS = {0x2341, 0x2A03, 0x1A86, 0x0403, 0x10C4}
 
 DEFAULT_FQBN = "arduino:avr:mega"       # CS on pin 53 is Mega/Due specific
-FIRMWARE = "arduino.ino"                # what is actually on the board.
-                                        # thing.c is the superseded 4-column original.
+FIRMWARE = "arduino.ino"                # the sketch that is on the board
 
 
 # --------------------------------------------------------------------------
@@ -97,7 +96,7 @@ def declared(path, name, default="unknown"):
     """Read a string constant out of a controller WITHOUT importing it.
 
     Building the menu must not execute five modules -- each one imports numpy
-    and pyDAC, and one of them (v4) is broken. A regex is enough for the two
+    and pyDAC, and a broken one must not execute. A regex is enough for the two
     string constants the menu needs.
     """
     with open(path) as f:
@@ -124,7 +123,7 @@ def resolve(name):
 
 STATUS_NOTE = {
     "validated": "confirmed on hardware with a scope",
-    "reported":  "report.pdf documents the behaviour, but THIS FILE has never run",
+    "reported":  "provenance.md documents the behaviour, but THIS FILE has never run",
     "untested":  "never been on hardware",
     "broken":    "does not damp -- DO NOT FLASH",
 }
@@ -289,8 +288,8 @@ def flash(port, fqbn):
     look at it until it is named <dir>/<dir>.ino.
 
     FIRMWARE is the source of truth -- it is what is actually on the board.
-    thing.c is the superseded 4-column original, kept only for reference; flashing
-    it would narrow the stream back to A0..A3 and change what read_sample sees.
+    Only A0..A3 carry OSEMs, but the sketch streams all eight columns; read_sample
+    takes the leading four.
     """
     if not shutil.which("arduino-cli"):
         sys.exit("  arduino-cli not on PATH. brew install arduino-cli, then\n"

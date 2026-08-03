@@ -98,7 +98,7 @@ COUNTS_PER_VOLT = None
 # so their readings are projections of the same few degrees of freedom and are
 # strongly correlated by construction.
 #
-# Quadrant layout from report.pdf p1: A1 top-left, A3 top-right, A0 bottom-left,
+# Quadrant layout from provenance.md p1: A1 top-left, A3 top-right, A0 bottom-left,
 # A2 bottom-right. Each OSEM measures longitudinal displacement at its own
 # corner, so with x = left/right and y = up/down, in units of the corner radius:
 GEOM = [(-1.0, -1.0),      # A0  bottom-left
@@ -125,7 +125,7 @@ SENSE = [[+0.25, +0.25, +0.25, +0.25],     # LONG
 MODE_NAMES = ["LONG", "PITCH", "YAW"]
 
 # One suspended mass has one pendulum frequency in longitudinal and separate
-# pitch/yaw resonances set by its inertia. They sit close together -- report.pdf
+# pitch/yaw resonances set by its inertia. They sit close together -- provenance.md
 # Fig. 2's ASD shows a single unresolved ~1 Hz feature, not three peaks -- and it
 # is that near-degeneracy, not four detuned oscillators, that makes the four
 # traces look alike but drift tens of degrees apart in phase.
@@ -134,7 +134,7 @@ MODE_DRIVE = [1.00, 0.55, 0.40]     # how strongly the ground drive couples in
 MODE_AUTHORITY = [1.00, 0.90, 0.90]  # coil force -> modal acceleration
 
 # Lumped loop gain per channel -- sign AND magnitude, relative to ch0. This is
-# an INFERENCE from report.pdf, not a measurement; the report characterises no
+# an INFERENCE from provenance.md, not a measurement; the report characterises no
 # actuator. It is derived because assuming all four identical contradicts the
 # bench outright.
 #
@@ -159,8 +159,7 @@ COIL_GAIN = [1.00, 0.76, -4.15, 0.86]
 # phase across the channels and differs only in how much each one picks up.
 HUM_SCALE = [1.00, 0.86, 1.12, 0.94]
 
-STATE_CODE = {"CALIBRATING": 0, "DAMPING": 1, "FAULT": 2, "IDLE": 3,
-              "SYSID": 4}   # v4 adds a system-identification phase
+STATE_CODE = {"CALIBRATING": 0, "DAMPING": 1, "FAULT": 2, "IDLE": 3}
 
 
 class FakeDAC:
