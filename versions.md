@@ -21,15 +21,26 @@ make sim V=v2                      # one of them in a browser
 
 | | channels | I / D | known defects | ch0 ratio | lock | suite |
 |---|---|---|---|---|---|---|
-| **v0** | ch0 only | zeroed | all 3 intact | 0.254 | 13.6 s | 15/15 |
-| **v1** | all four | zeroed | all 3 intact | 0.254 | 15.0 s | 14/14 |
-| **v2** | all four | **live** | all 3 intact | 0.232 | 14.0 s | 16/16 |
-| **v3** | all four | live | **all 3 fixed** | 0.230 | 14.1 s | 16/16 |
+| **v0** | ch0 only | zeroed | all 3 intact | 0.197 | 12.0 s | 18/18 |
+| **v1** | all four | zeroed | all 3 intact | 0.021 | 10.7 s | 16/16 |
+| **v2** | all four | **live** | all 3 intact | 0.024 | 10.5 s | 18/18 |
+| **v3** | all four | live | **all 3 fixed** | 0.024 | 10.6 s | 18/18 |
 
 "ratio" is the rolling 2 s RMS of the bandpassed signal over that channel's own
 calibrated baseline — 1.0 is undamped, the lock line is 0.35. Every number in
 this file was measured through `harness.py`, not estimated. The simulator's
 limits apply to all of them: see the bottom of this file.
+
+**Re-measured on the rigid-body plant.** These four rows, and the
+`runaway-baseline` table further down, were previously 0.254 / 13.6 s,
+0.254 / 15.0 s, 0.232 / 14.0 s, 0.230 / 14.1 s — measured when the plant was
+four independent oscillators. With one rigid body every coil pushes on the mass
+all four OSEMs watch, so the four-channel versions damp far harder than they
+used to and v0's single channel drags the other three down with it. Anything
+else in this file quoted per channel (the v1 section's 0.254 / 0.249 / 0.152 /
+0.275 and its "ch2 damps fastest") is from the same old plant and has **not**
+been re-measured; on the current one v1 reads 0.021 / 0.116 / 0.066 / 0.144 and
+ch0 is flattest. None of this is hardware — see the bottom of this file.
 
 ---
 
@@ -166,21 +177,36 @@ v0 measured the baseline as one RMS over a single 8 s window and compared a 2 s
 RMS against it for the rest of the run. v3 calibrates for 20 s and takes the
 **median of 5 sub-windows**, so one bad sub-window is outvoted.
 
-Measured, worst-channel baseline skew versus an undisturbed run:
+Measured on the **rigid-body plant** (simulator only, never hardware): one 6 V/s
+velocity impulse inside the calibration window, worst-channel baseline skew
+against an otherwise identical unshocked run, as a function of *when* it lands:
 
-| shocks landing in the calibration window | v0 | v3 |
-|---|---|---|
-| 1 (isolated transient) | 20.5% | **14.6%** |
-| 2–3 | 27.0% | 24.0% |
-| 6 (continuous shocking) | 27.0% | **33.2%** |
+| shock at | 1 s | 2 s | 3 s | 4 s | 5 s | 6 s | 7 s | **worst** |
+|---|---|---|---|---|---|---|---|---|
+| **v0/v1/v2** | 40.1% | 45.3% | 29.3% | 28.7% | 16.5% | 19.7% | 11.2% | **45.3%** |
+| **v3/v4** | 20.4% | 25.0% | 22.4% | 18.8% | 25.8% | 22.1% | 19.6% | **25.8%** |
 
-It helps against an isolated bump and **does not help** against sustained
-disturbance — gain is zero during calibration, so a shock rings down over
-`Q/f₀ ≈ 50 s`, longer than the whole window, and once several have landed there
-is no clean sub-window left to prefer. At 30 shocks/min v3 is slightly *worse*
-than v0, purely because a 20 s window catches more of them than an 8 s one.
-Arguably that is correct — a lab being hit that often really does have that
-noise floor — but this is a partial fix and is labelled as one in the code.
+Read the *spread*, not any one column. At t = 5 s or t = 7 s v0 comes out
+**better** than v3, so a single fixed shock time ranks them backwards. What the
+median actually buys is a **bound**: v0's damage depends entirely on where the
+transient lands and reaches 45%, v3's stays inside a 19–26% band. `harness.py`
+therefore sweeps the shock across the window and asserts the worst case, with
+the line at 35%.
+
+These numbers **replace** the 20.5% / 27.0% / 33.2% (v0) and 14.6% / 24.0% /
+33.2% (v3) table that stood here before. Those were measured on the old
+four-independent-oscillator plant, where a shock hit one channel; on one rigid
+body a single impulse moves all four OSEMs at once, so both the magnitudes and
+the v0-vs-v3 margin are different. The old numbers are not comparable and should
+not be quoted.
+
+The fix still helps against an isolated bump and **does not help** against
+sustained disturbance — gain is zero during calibration, so a shock rings down
+over `Q/f₀ ≈ 50 s`, longer than the whole window, and once several have landed
+there is no clean sub-window left to prefer. Under continuous shocking a 20 s
+window simply catches more of them than an 8 s one. Arguably that is correct —
+a lab being hit that often really does have that noise floor — but this is a
+partial fix and is labelled as one in the code.
 
 A real fix needs a baseline that tracks slowly rather than being sampled once,
 or a transient detector that restarts calibration. Neither is in v3.

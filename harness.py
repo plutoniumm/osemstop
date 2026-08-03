@@ -141,9 +141,23 @@ BASE_PLANT = dict(f_drive=1.0, drive_amp=0.8, seismic=0.8, Q=50.0, k_act=20.0,
 
 
 def run(label, seconds, enable, steady, ki=None, kd=None, occlude_at=None,
-        auto_kick=False, plant=None, quiet=True):
+        auto_kick=False, plant=None, quiet=True, shock_at=None,
+        stop_on_recover=False, until_baseline=False):
     """Step the loaded controller through the simulated plant. Returns the
-    observations the checks below read."""
+    observations the checks below read.
+
+    `seconds` is an upper bound, not a duration: `stop_on_recover` cuts the run
+    at the first FAULT -> CALIBRATING transition and `until_baseline` at the end
+    of the first calibration. Both exist so a check that only cares about one
+    event does not pay for a version whose CALIBRATION_S is 20 s (v3/v4) as if
+    it were 8 s (v0..v2).
+
+    `shock_at` is `(t, dv)`: one deterministic velocity impulse, the same one
+    `sim.kick()` applies from the TUI. Note it also draws two random numbers for
+    the pitch/yaw split, so a run with a shock and a run without diverge in the
+    noise stream after it -- the no-shock run is a reference, not an exact
+    counterfactual.
+    """
     sim = S.SIM
     sim.enable = [bool(v) for v in enable]
     sim.steady = list(steady)
@@ -166,6 +180,23 @@ def run(label, seconds, enable, steady, ki=None, kd=None, occlude_at=None,
     prev = sim.ctl.state
     peak = [0.0] * 4
     t_rail = None
+    shock_fired = False
+    # Baselines as they were at the END OF THE FIRST CALIBRATION. Reading
+    # `Channel.baseline_rms` after the run instead reports whatever the LAST
+    # calibration produced, which for a version that faulted and re-calibrated
+    # mid-run is a different window under different conditions -- that is what
+    # made v4 read 58.6% on the calibration-skew check while running v3's
+    # calibration code byte for byte.
+    baseline0 = None
+    # saturated_flag anywhere, any sample: a saturation trip is what latches
+    # FAULT in v0/v1/v2, so "did this scenario saturate?" decides whether it is
+    # testing the runaway path or the saturation path.
+    sat_ever = [False] * 4
+    # Peak |out - bias| per channel, against the +-0.25 V the controller clips
+    # to. Two uses: proving a disabled channel never actuates, and proving a
+    # runaway scenario tripped on amplitude rather than on a pinned actuator.
+    bias = [float(b) for b in S.osem.BIAS]
+    out_dev = [0.0] * 4
     # Capture the PID terms DURING the run. `sim` is a singleton and reset()
     # replaces sim.ctl, so reading them off sim afterwards reports whatever the
     # most recent run left behind -- which, if that run ended mid-FAULT, is a
@@ -178,6 +209,9 @@ def run(label, seconds, enable, steady, ki=None, kd=None, occlude_at=None,
     for n in range(int(seconds * S.SAMPLE_HZ)):
         if occlude_at is not None and sim.t >= occlude_at[1]:
             sim.occlude[occlude_at[0]] = True
+        if shock_at is not None and not shock_fired and sim.t >= shock_at[0]:
+            sim.kick(shock_at[1])
+            shock_fired = True
         # Kicks arrive from the TUI's input thread; apply them here so nothing
         # touches the plant's state concurrently with step().
         while PENDING_KICKS:
@@ -206,9 +240,19 @@ def run(label, seconds, enable, steady, ki=None, kd=None, occlude_at=None,
                     max_p = max(max_p, abs(float(c.p_term)))
                     max_i = max(max_i, abs(float(c.i_term)))
                     max_d = max(max_d, abs(float(c.d_term)))
+        for i, c in enumerate(sim.ctl.channels):
+            if c.saturated_flag:
+                sat_ever[i] = True
+            out_dev[i] = max(out_dev[i], abs(float(c.out) - bias[i]))
+        if baseline0 is None and all(c.baseline_rms for c in sim.ctl.channels):
+            baseline0 = [float(c.baseline_rms) for c in sim.ctl.channels]
+            if until_baseline:
+                break
         if sim.t > 12:
             for i in range(4):
                 peak[i] = max(peak[i], sim.diag_ratio[i])
+        if stop_on_recover and recovered:
+            break
 
     ratio = list(sim.diag_ratio)
     if not quiet:
@@ -219,9 +263,13 @@ def run(label, seconds, enable, steady, ki=None, kd=None, occlude_at=None,
     return dict(ratio=ratio, peak=peak, faults=faults, recovered=recovered,
                 lock=sim.ctl.lock_time, rail=rail_seen, frozen=frozen_on_rail,
                 t_rail=t_rail, sim=sim, max_p=max_p, max_i=max_i, max_d=max_d,
-                state=sim.ctl.state,
+                state=sim.ctl.state, sat_ever=sat_ever, out_dev=out_dev,
                 sat_flags=[bool(c.saturated_flag) for c in sim.ctl.channels],
-                baseline=[float(c.baseline_rms or 0) for c in sim.ctl.channels])
+                baseline=[float(c.baseline_rms or 0) for c in sim.ctl.channels],
+                # falls back to the end-of-run value only if calibration never
+                # completed, which is itself a failure the checks will show
+                baseline0=(baseline0 if baseline0 is not None
+                           else [float(c.baseline_rms or 0) for c in sim.ctl.channels]))
 
 
 def suite(path):
@@ -246,9 +294,31 @@ def suite(path):
     check("the run reports LOCKED", a["lock"] is not None,
           f"{a['lock']:.1f}s" if a["lock"] else "never")
     if off:
-        check("disabled channels stay at their baseline",
-              all(0.80 < a["ratio"][i] < 1.20 for i in off),
-              " ".join(f"ch{i}={a['ratio'][i]:.2f}" for i in off))
+        # NOT "disabled channels stay at their baseline" any more. That assertion
+        # encoded four independent oscillators; the plant is one rigid body, so
+        # damping the driven corner takes energy out of the whole mass and every
+        # OSEM sees it decay. report.pdf section 3 measured exactly that on the
+        # bench -- "although only one channel is being driven, all four visibly
+        # decay" -- and it is why v1 turned the other three on. Measured here on
+        # v0: driven ch0 = 0.197, undriven 0.265 / 0.323 / 0.355.
+        #
+        # What is still asserted, and what breaks it:
+        #   * a disabled channel must never actuate -- fails the moment
+        #     ENABLE_CHANNEL stops gating actuate(); measured, all four enabled
+        #     instead moves the other three by 0.047-0.099 V off bias;
+        #   * it must still decay well below its own baseline -- fails if the
+        #     rigid-body coupling is lost or the loop stops removing energy;
+        #   * but it must decay LESS than the driven one, because it can only
+        #     lose energy indirectly through that coupling -- report.pdf section
+        #     3 again, the targeted channel has "the best flatness".
+        check("disabled channels never actuate -- output pinned to bias",
+              all(a["out_dev"][i] < 1e-9 for i in off),
+              " ".join(f"ch{i}={a['out_dev'][i]:.1e}V" for i in off))
+        check("rigid body: undriven channels decay too, but less than the driven one",
+              all(a["ratio"][i] < 0.75 for i in off) and bool(on)
+              and min(a["ratio"][i] for i in off) > max(a["ratio"][i] for i in on),
+              "driven " + " ".join(f"ch{i}={a['ratio'][i]:.3f}" for i in on)
+              + " | undriven " + " ".join(f"ch{i}={a['ratio'][i]:.3f}" for i in off))
     check("no faults in a quiet lab", a["faults"] == 0, f"{a['faults']}")
 
     # ---- 2. a wrong-signed gain is caught by the interlock ------------------
@@ -260,8 +330,49 @@ def suite(path):
     check("a wrong-signed channel is pumped past the runaway line",
           b["peak"][2] > 1.8, f"ch2 peak={b['peak'][2]:.2f}")
     check("the global interlock trips on it", b["faults"] > 0, f"{b['faults']} fault(s)")
-    check("a runaway trip auto-recovers", b["recovered"] > 0,
-          f"{b['recovered']} recovery(ies)")
+    # On the rigid-body plant this scenario trips on a PINNED ACTUATOR, not on a
+    # runaway, and the distinction decides which defect it exercises. Inverting
+    # ch2 does not make the mass unstable -- the other three still out-damp it
+    # (sum of gain_i * COIL_GAIN_i goes from -0.1415 to -0.0419, so about a third
+    # of the damping survives) -- it just leaves the optic near full amplitude,
+    # where the velocity feedback demands more than the +-0.25 V it is clipped
+    # to. Measured: v0/v1 trip at t=10.74 s on ch3 with sat_streak=31 and
+    # saturated_flag set, v2 at t=17.23 s the same way. That is documented
+    # defect #1, so v0/v1/v2 latch and only a version that fixed it recovers.
+    # The pure-runaway path is exercised separately below.
+    stuck_b = b["state"] == "FAULT" and not b["recovered"]
+    if "saturation-latch" in fixed:
+        check("FIXED saturation-latch: the sign-error trip clears and the loop "
+              "recovers", b["recovered"] > 0, f"{b['recovered']} recovery(ies)")
+    else:
+        check("KNOWN BUG saturation-latch: the sign-error trip pins an actuator "
+              "and latches", stuck_b and any(b["sat_ever"]),
+              f"state={b['state']}, {b['recovered']} recovery(ies), "
+              f"saturated={[i for i, s in enumerate(b['sat_ever']) if s]}")
+
+    # A runaway with NO saturation, so the recovery path is tested on its own.
+    # Only the wrong-signed channel drives, at half the shipped magnitude: that
+    # halves the growth rate (so the 2 s RUNAWAY_SUSTAIN_S elapses before the
+    # amplitude has run far past the 1.8x line) and doubles the amplitude the
+    # actuator would need to clip, which is what keeps the two mechanisms apart.
+    # Measured peak |out - bias| against the 0.25 V clip: v0/v1 0.112 V, v2
+    # 0.057 V, v3 0.055 V -- nowhere near pinned, so this is unambiguously the
+    # runaway breaker firing. Every version must recover from it, including
+    # v0/v1/v2: saturated_flag is never set, so nothing holds all_clear False.
+    # That is the exact claim README section 7, versions.md and state.md hazard 1
+    # all make -- "a runaway trip recovers fine; only saturation deadlocks" --
+    # and for the un-fixed versions recovery is itself the proof that no
+    # actuator pinned, since one that did would latch FAULT forever.
+    solo = [False, False, True, False]
+    weak = list(shipped)
+    weak[2] = -abs(weak[2]) * 0.5
+    r = run("ch2 alone, wrong-signed at half magnitude", 60, solo, weak,
+            ki=info["ki"], kd=info["kd"], stop_on_recover=True)
+    check("the runaway breaker trips on a pumped resonance", r["faults"] > 0,
+          f"{r['faults']} fault(s), peak ch2 ratio={r['peak'][2]:.2f}")
+    check("a runaway trip auto-recovers", r["recovered"] > 0,
+          f"{r['recovered']} recovery(ies), peak |out-bias| = "
+          f"{max(r['out_dev']):.3f} V of the 0.25 V clip")
 
     # ---- 3. I and D behave as the physics says ------------------------------
     if any(info["ki"]):
@@ -326,28 +437,52 @@ def suite(path):
               "not silently patched -- see versions.md")
 
     # ---- 6. baseline robustness against a shock during calibration ----------
-    # 8 shocks/min lands exactly ONE inside the calibration window for every
-    # version on the ladder, despite v3 calibrating for 20 s against v0's 8 s,
-    # so this compares like with like. An isolated transient is the case the
-    # median-of-subwindows fix addresses; measured, v0 skews 20.5% and v3 14.6%,
-    # so 18% separates them. Under CONTINUOUS shocking neither is better and v3
-    # is slightly worse -- see versions.md, it is a partial fix and is labelled
-    # as one.
-    sh = run("one shock during calibration", 70, ship_en, shipped,
-             ki=info["ki"], kd=info["kd"],
-             plant={"shock_rate": 8, "shock_amp": 3.0})
-    clean = run("same run, no shocks", 70, ship_en, shipped,
-                ki=info["ki"], kd=info["kd"])
-    base, base0 = sh["baseline"], clean["baseline"]
-    skew = max(abs(base[i] / base0[i] - 1.0) for i in range(4) if base0[i] > 0)
+    # ONE deterministic velocity impulse inside the calibration window, SWEPT
+    # across the window, because where it lands dominates the answer and a
+    # single fixed shock time measures the sampling instant rather than the fix.
+    # Measured on this plant with a 6 V/s kick, v0's worst-channel skew against
+    # an unshocked reference: 40.1% at t=1 s, 45.3% at t=2, 29.3% at t=3, 28.7%
+    # at t=4, 16.5% at t=5, 19.7% at t=6, 11.2% at t=7. v3 over the same times
+    # stays inside 18.8-25.8%. So at t=5 or t=7 v0 looks BETTER than v3 and a
+    # one-shot comparison would rank them backwards; what the median of
+    # sub-windows actually buys is a bound on the damage wherever the transient
+    # lands, and that is what is asserted here -- the WORST case over the sweep.
+    #
+    # The window swept is v0's 8 s one, which lies inside every longer window on
+    # the ladder (v3/v4 calibrate for 20 s), so every version is handed the same
+    # transient at the same absolute time. Measured worst case over t = 2/4/6 s:
+    #     v0 / v1 / v2  (one 8 s window, RMS)          45.3%
+    #     v3 / v4       (20 s, median of 5 windows)    25.0%
+    # 35% separates them with ~1.3x margin either side. The 18% line this check
+    # used before, and the 20.5% / 14.6% numbers behind it in versions.md, were
+    # measured on the old four-independent-oscillator plant and do not survive
+    # the move to a rigid body -- one impulse now moves all four OSEMs at once.
+    # Simulator numbers, never hardware.
+    #
+    # Both runs stop at the end of the first calibration and read baseline0, not
+    # the end-of-run baseline: this is a claim about ONE calibration window, and
+    # a version that faults and re-calibrates later would otherwise be scored on
+    # a window this scenario never controlled.
+    clean = run("no shock, reference baseline", 40, ship_en, shipped,
+                ki=info["ki"], kd=info["kd"], until_baseline=True)
+    base0 = clean["baseline0"]
+    skew, worst_t = 0.0, None
+    for t_shock in (2.0, 4.0, 6.0):
+        sh = run(f"one shock at t={t_shock:.0f}s", 40, ship_en, shipped,
+                 ki=info["ki"], kd=info["kd"], shock_at=(t_shock, 6.0),
+                 until_baseline=True)
+        base = sh["baseline0"]
+        s = max(abs(base[i] / base0[i] - 1.0) for i in range(4) if base0[i] > 0)
+        if s > skew:
+            skew, worst_t = s, t_shock
+    where = f"worst {skew * 100:.1f}% (shock at t={worst_t:.0f}s)"
     if "runaway-baseline" in fixed:
-        check("FIXED runaway-baseline: an isolated shock is outvoted by the "
-              "median", skew < 0.18,
-              f"worst channel skewed {skew * 100:.1f}% (v0 skews 20.5% here)")
+        check("FIXED runaway-baseline: wherever the shock lands, the median "
+              "bounds the skew", skew < 0.35,
+              f"{where}; v0 reaches 45.3% on the same sweep")
     else:
         check("KNOWN GAP runaway-baseline: one shock in the calibration window "
-              "skews the baseline", skew > 0.18,
-              f"worst channel skewed {skew * 100:.1f}%")
+              "skews the baseline", skew > 0.35, where)
 
 
 # --------------------------------------------------------------------------

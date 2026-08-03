@@ -1,9 +1,10 @@
-# No build step -- this is Python and an Arduino sketch. These are the four
-# things you actually do with the repo.
+# No build step -- this is Python and an Arduino sketch. These are the things
+# you actually do with the repo. The first two touch hardware; the rest do not.
 
 PY ?= python3
+FQBN ?= arduino:avr:mega        # CS on pin 53 is Mega/Due specific
 
-.PHONY: test check sim list help
+.PHONY: run arduino ports test check sim list help
 .DEFAULT_GOAL := help
 
 help:                ## show this
@@ -12,6 +13,15 @@ help:                ## show this
 	@echo
 	@echo
 	@$(PY) harness.py --list
+
+run:                 ## ON HARDWARE: preflight the board, then run a controller (make run V=v0)
+	@$(PY) bench.py $(V) $(if $(PORT),--port $(PORT)) $(if $(FORCE),--force)
+
+arduino:             ## ON HARDWARE: compile thing.c and upload it (make arduino FQBN=...)
+	@$(PY) bench.py --flash $(if $(PORT),--port $(PORT)) --fqbn $(FQBN)
+
+ports:               ## which serial port is the board on
+	@$(PY) bench.py --ports
 
 test:                ## interactive runner: pick a version, watch it damp, press x to kick
 	@$(PY) test/tui.py

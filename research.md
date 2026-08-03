@@ -1,7 +1,8 @@
 # Research queue
 
 Ranked by impact × confidence × cost, **in dependency order** — each one is
-partly gated by the ones above it. Nothing here is started.
+partly gated by the ones above it. Item 1 is **done**; nothing below it is
+started.
 
 Everything below rests on measurements in this repo, not on estimates. Where a
 number appears, `harness.py` produced it.
@@ -40,20 +41,46 @@ One negative result worth keeping: the residual after the drive stops
 
 ---
 
-## 1. Fix the suite for the rigid-body plant
+## 1. Fix the suite for the rigid-body plant — **DONE**
 
-**Why first:** `make check` is red — 13 failures, of which 7 are *stale
-assertions*, not regressions. They encode the old four-independent-oscillator
-plant. The clearest example: "disabled channels stay at their baseline" now
-fails, because with one rigid body, damping one channel damps the whole mass —
-which is precisely what `report.pdf` §3 observed on the bench and the old plant
-could never reproduce.
+**Why it was first:** `make check` was red with 13 failures, 7 of them *stale
+assertions* rather than regressions — they encoded the old
+four-independent-oscillator plant. Until the test bed stopped lying, nothing
+else on this list could be validated.
 
-Until the test bed stops lying, nothing else on this list can be validated.
-Cheapest item here.
+**Now:** 88 checks, **83 pass, 5 fail, ~120 s**. v0–v3 are green (18 / 16 / 18 /
+18). All 5 remaining failures are v4 and all are real: it does not damp (ratios
+0.24–0.77), never locks, faults once in a quiet lab, and its I term never
+accumulates so the P-dominance check has nothing to compare. That is item 2.
 
-**Done when:** `make check` is green for v0–v3 and every remaining failure is a
-real defect rather than an obsolete expectation.
+Three assertions were rewritten in `harness.py`; no controller was touched.
+
+- *"disabled channels stay at their baseline"* → split in two. A disabled
+  channel must never actuate (peak `|out − bias|` is exactly 0), but its
+  amplitude ratio must **fall** — one rigid body, so damping ch0 takes energy
+  out of the whole mass and all four OSEMs see it, which is `report.pdf` §3.
+  Measured on v0: driven ch0 = 0.197, undriven 0.265 / 0.323 / 0.355, and the
+  driven channel is still the flattest, which is the report's other claim.
+- *"a runaway trip auto-recovers"* → the scenario it used (all four on, ch2's
+  sign inverted) no longer produces a runaway at all. Inverting ch2 leaves the
+  other three out-damping it — the net of `gain_i · COIL_GAIN_i` goes from
+  −0.1415 to −0.0419, so about a third of the damping survives — and the optic
+  simply stays near full amplitude, where the velocity feedback asks for more
+  than the ±0.25 V it is clipped to. It trips on **ch3 saturation** at t = 10.74 s
+  (`sat_streak` = 31), which is defect #1 and latches. That is now asserted as
+  such, from the broken side for v0/v1/v2 and the fixed side for v3/v4. The
+  runaway path gets its own scenario — ch2 alone, wrong-signed at half
+  magnitude, so the growth is slow enough to trip on amplitude ratio while the
+  actuator peaks at 0.055–0.112 V of its 0.25 V clip — and every version must
+  recover from it. For the un-fixed versions recovery *is* the proof that
+  nothing saturated, since a saturation trip would latch forever.
+- *"KNOWN GAP / FIXED runaway-baseline"* → the 18% line was calibrated on the
+  old plant and no longer separates anything. Re-measured: see the sweep table
+  in `versions.md` § v3. One shock, swept across the calibration window, worst
+  case 45.3% (v0/v1/v2) against 25.0% (v3/v4); the line is now 35%. A single
+  fixed shock time ranks the two backwards for late shocks, so the check sweeps.
+
+All of that is simulator, on the rigid-body plant, **never hardware**.
 
 ---
 
@@ -180,8 +207,19 @@ should not.
   documented blind spot is the −0.04 instability — so an agent trained on it
   would learn confidently that more gain is always better, which is the single
   lesson you least want it to learn.
-- **`ENABLE_CHANNEL` vs the report, the report's 0.085 Hz error, `auto-disable`.**
-  Documented in `versions.md`; no action needed until wanted.
+- **`ENABLE_CHANNEL` vs the report, and `auto-disable`.** Only the first is
+  written down: `versions.md` § v1 and `CLAUDE.md` § "Channel mapping" both spell
+  out that v0's "only ch0 is validated" predates `report.pdf` §4 by two days and
+  that v1–v4 ship all four channels on. `auto-disable` is documented nowhere in
+  this repo — it appears once, in the report's block-diagram Safety Checks box
+  next to `lock detect`, and in no controller (`grep auto-disable osem.v*.py` is
+  empty). Like the `zero-crossing → f̂` estimator in item 4, it was drawn and
+  never implemented. This bullet used to also list "the report's 0.085 Hz error"
+  and to credit all three to `versions.md`; both were wrong. `versions.md`
+  contains neither `0.085` nor any mention of `auto-disable`, and `0.085` occurs
+  nowhere in the repo or in `report.pdf`'s text layer, so whatever that error was
+  has left no record — do not act on it without re-deriving it from the report.
+  No action needed until wanted.
 
 ## Where learning belongs
 

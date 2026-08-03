@@ -224,15 +224,29 @@ purpose; the next sample resends.
 `dt` is clamped there to `[1e-4, 0.05]` s, so a stalled serial link cannot inject
 a huge timestep into the filters or the integrator.
 
-**One clock, injectable.** `Controller.step(counts, volts, t, dt)` takes its time
-from the caller, so every timer in the machine is driven by whatever clock the
-caller supplies. The single exception used to be `RateLimitedActuator`, which
-called `time.time()` directly: correct on hardware, where DAC writes really
-should be spaced in real milliseconds, but wrong for a simulation stepped faster
-than real time — sim samples advance while the 10 ms throttle holds the DAC on a
-stale value, and the damping quietly degrades in proportion to how fast the host
-runs. It now reads the module attribute `CLOCK`, which defaults to `time.time`
-(hardware behaviour unchanged) and which the simulator repoints at sim time.
+**One clock, supplied by the caller — with one exception.**
+`Controller.step(counts, volts, t, dt)` takes its time from the caller, so every
+timer in the machine is driven by whatever clock the caller supplies. The single
+exception is `RateLimitedActuator.send()`, which calls `time.time()` directly for
+its 10 ms throttle. That is correct on hardware, where DAC writes really should
+be spaced in real milliseconds, and wrong for a simulation stepped faster than
+real time — sim samples advance while the throttle holds the DAC on a stale
+value, so the damping degrades in proportion to how fast the host happens to run.
+
+There is **no `CLOCK` attribute in any controller**; the throttle is a plain
+`time.time()` call. The simulator solves it from the outside instead, by swapping
+the module object the controller resolves `time` through. `sim/server.py` defines
+`_SimTimeModule`, whose `time()` returns `Sim.t` and whose `__getattr__`
+delegates everything else to the real `time` module, and `Sim.reset()` installs
+it with
+
+```python
+osem.time = _SimTimeModule(self)
+```
+
+so `RateLimitedActuator.send`'s `time.time()` resolves to simulated seconds while
+the controller file on disk stays byte-for-byte what runs on the bench. `main()`
+is never called from the simulator, so its own `time.time()` calls are unaffected.
 
 ---
 
@@ -260,12 +274,22 @@ Things that are easy to get wrong when editing, and what the simulator checks.
    manual restart — contradicting the auto-recovery the module docstring promises.
 
    A *runaway* trip is different and recovers normally, because `saturated_flag`
-   was never set; only saturation deadlocks. The simulator reproduces both: enable
-   all four channels and the ch2 runaway trips and recovers repeatedly, while the
-   over-gain-plus-kick scenario trips once and stays in `FAULT` for the rest of the
-   run. The harness asserts the broken behaviour for v0/v1/v2 and the fixed behaviour for v3; the
-   two `KNOWN BUG` checks flip to a recovery assertion and the fix is verified
-   rather than assumed.
+   was never set; only saturation deadlocks. The simulator reproduces both, and
+   `harness.py` asserts the broken behaviour for v0/v1/v2 and the fixed behaviour
+   for v3/v4 — the `KNOWN BUG` checks flip to a recovery assertion, so the fix is
+   verified rather than assumed.
+
+   Which scenario produces which trip is **not** what it was before the plant
+   became one rigid body. Inverting ch2's sign with all four channels enabled no
+   longer runs away: the other three still out-damp it (the net of
+   `gain_i · COIL_GAIN_i` is −0.0419 against −0.1415 with the correct sign, so
+   about a third of the damping survives), the optic just stays near full
+   amplitude, and the velocity feedback then asks for more than the ±0.25 V it is
+   clipped to. It trips on **ch3 saturation** at t = 10.74 s with `sat_streak` = 31
+   and latches. To exercise the runaway path on its own the harness runs ch2
+   alone at half the shipped magnitude, wrong-signed: the growth is then slow
+   enough for the 2 s `RUNAWAY_SUSTAIN_S` to elapse while the actuator is still
+   at 0.055–0.112 V of its 0.25 V clip, and every version recovers from it.
 
    **Deliberately left in place.** Do not fix this without being asked.
 

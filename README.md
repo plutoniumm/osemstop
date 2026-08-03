@@ -57,17 +57,19 @@ converge; it drives the coils from a wrong actuation matrix.
 ## 1. Flash the Arduino
 
 `thing.c` is an Arduino **sketch**, not compilable C — it uses `SPI.h`, `String`
-and `Serial`. To build it:
+and `Serial`, and arduino-cli will not look at it until it is named
+`<dir>/<dir>.ino`. One command does the copy, the compile and the upload:
 
 ```bash
-mkdir -p osem_stream && cp thing.c osem_stream/osem_stream.ino
-arduino-cli compile --fqbn arduino:avr:mega osem_stream
-arduino-cli upload  --fqbn arduino:avr:mega -p /dev/ttyACM0 osem_stream
+make arduino                                   # defaults to arduino:avr:mega
+make arduino FQBN=arduino:sam:arduino_due_x    # if it is a Due
+make arduino PORT=/dev/cu.usbmodem1401         # skip auto-detection
 ```
 
 Board is an Arduino **Mega or Due** — `CS` is on pin 53, which is Mega/Due
-specific. Neither the IDE nor `arduino-cli` is installed on the dev machine, so
-this step happens on the lab machine.
+specific. `arduino-cli` 1.5.1 with the `arduino:avr` core **is** installed on the
+dev machine (earlier revisions of this file said otherwise), and `thing.c`
+compiles clean for the Mega: 8424 bytes, 3% of flash, 302 bytes of RAM.
 
 `setup()` zeroes DAC channels 0, 2, 4, 6 before anything else runs, and enables
 the DAC's internal 2.5 V reference with an `0x08` frame.
@@ -75,25 +77,30 @@ the DAC's internal 2.5 V reference with an `0x08` frame.
 ## 2. Host setup
 
 ```bash
-pip install numpy pyserial
+conda activate ligo        # numpy 2.5.1 + pyserial 3.5; the only env with both
 ```
 
-Then **edit the port** at the top of the version you are running:
-
-```python
-PORT = "COM7"          # Windows. On Linux/Mac: "/dev/ttyACM0", "/dev/ttyUSB0", ...
-```
+You do **not** need to edit `PORT` any more. It is still `COM7` (a Windows name)
+in all five files, but `make run` auto-detects the board and assigns the port on
+the loaded module, so every controller stays byte-for-byte what was validated.
+`make ports` shows what it can see; `make run PORT=...` overrides it.
 
 ## 3. Run
 
 ```bash
 cd /path/to/this/repo          # CSV goes to ./data/ RELATIVE TO CWD
-python osem.v0.py
+make run V=v0                  # or bare `make run` for a picker
 ```
 
-It prints `READY`, calibrates for 8 s with the gain held at zero, then engages.
-`DACController.__init__` raises if `READY` never arrives — that means the sketch
-is not running or the port is wrong.
+It resolves the port, **preflights** it — opening through the real
+`DACController`, which raises unless the sketch answers `READY`, so "wrong port"
+and "board not flashed" are distinguishable before the optic is swinging — then
+prints the bench status and the actual gain vectors it is about to apply, asks
+for confirmation on anything not `validated`, and hands over to that version's
+`main()`. From there it is the controller: calibrate with the gain at zero
+(8 s on v0–v2, 20 s on v3/v4), then engage.
+
+`make run V=v4` is refused outright; `FORCE=1` overrides.
 
 ## 4. What you should see
 
@@ -163,9 +170,11 @@ make check            # the behavioural suite, headless, every version
 make list             # what versions exist
 ```
 
-Only two things are faked: `serial` (so `pyDAC` imports without a port — nothing
-in the stub is ever called) and `DACController` → a `FakeDAC` with identical
-validation. Everything else is the shipping code executing.
+Three things are faked: `serial` (so `pyDAC` imports without a port — nothing in
+the stub is ever called), `DACController` → a `FakeDAC` with identical
+validation, and the `time` module inside the controller's namespace, so the
+actuator's 10 ms write throttle follows sim time instead of the wall clock.
+Everything else is the shipping code executing.
 
 **What it cannot tell you:** the plant is linear, so it will not reproduce the
 instability at Kp = −0.040. Here, more negative gain is monotonically more
@@ -180,6 +189,7 @@ damping all the way to −0.6. **The simulator cannot tell you a safe gain.**
 | `osem.v0.py` … `osem.v4.py` | the controllers — complete and standalone, see `versions.md` |
 | `pyDAC.py` | serial transport (`DACController`) |
 | `thing.c` | Arduino sketch: ADC stream + AD5628 SPI |
+| `bench.py` | the on-hardware entry point: `make run`, `make arduino`, `make ports` |
 | `harness.py` | one entry point for everything off the bench |
 | `sim/`, `test/` | simulated plant + browser UI; interactive runner |
 | `versions.md` | what each version changes, with measured before/after |
