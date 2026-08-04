@@ -6,9 +6,27 @@ class DACController:
     def __init__(self, port: str, baud: int = 115200, timeout: float = 2.0):
         self.ser = serial.Serial(port, baud, timeout=timeout)
         time.sleep(2)
-        ready = self.ser.readline().decode().strip()
-        if ready != "READY":
-            raise RuntimeError(f"Arduino did not send READY, got: '{ready}'")
+
+        # Scan for READY rather than demanding it on the first line. Opening the
+        # port toggles DTR and resets the board, but data the board sent BEFORE
+        # that reset is still buffered by the OS and arrives first -- so if the
+        # previous session left it streaming, line 1 is a stale half-sample and
+        # a healthy board looks dead. READY is emitted after the reset, so it is
+        # always at the end of that backlog. Same bounded-scan shape as
+        # set_voltage(), for the same reason: this wire carries two conversations.
+        for _ in range(200):
+            if self.ser.readline().decode(errors="replace").strip() == "READY":
+                break
+        else:
+            raise RuntimeError(
+                f"Arduino never sent READY on {port} (scanned 200 lines). "
+                "Wrong port, board not flashed, or wrong baud.")
+
+        # Land in a known state: the reset should have cleared `streaming`, but
+        # say so explicitly and drop anything still in flight.
+        self.ser.write(b"STOP\n")
+        time.sleep(0.2)
+        self.ser.reset_input_buffer()
         print(f"Connected on {port}")
 
     def set_voltage(self, channel: int, voltage: float) -> str:

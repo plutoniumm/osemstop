@@ -7,14 +7,14 @@ opposite number: it talks to the real Arduino and then hands control to a real
 `osem.vN.py`. Nothing in here simulates anything.
 
     python3 bench.py              # pick a version interactively, then run it
-    python3 bench.py v0           # run that one
-    python3 bench.py v0 --port /dev/cu.usbmodem1401
+    python3 bench.py v5           # run that one
+    python3 bench.py v5 --port /dev/cu.usbmodem1401
     python3 bench.py --ports      # just list candidate serial ports
     python3 bench.py --flash      # compile and upload arduino.ino, nothing else
 
 or through make, which is the intended form:
 
-    make run              make run V=v0              make run V=v0 PORT=COM7
+    make run              make run V=v5              make run V=v5 PORT=COM7
     make arduino          make arduino FQBN=arduino:sam:arduino_due_x
 
 What it does before anything reaches the coils:
@@ -24,20 +24,25 @@ What it does before anything reaches the coils:
      unless the sketch answers `READY`. A failure here means the board is not
      flashed or the port is wrong, and it costs nothing to find out now rather
      than after the optic is swinging;
-  3. prints what is about to be applied -- bench status, enabled channels, the
-     actual gain vectors -- because the gains are per-file constants and the
-     versions do NOT ship the same ones;
-  4. refuses `BENCH_STATUS = "broken"` outright and asks for confirmation on
-     anything that is not `validated`;
-  5. sets the module's PORT and calls its `main()`.
+  3. prints what is about to be applied -- enabled channels, the actual gain
+     vectors -- because the gains are per-file constants and the versions do NOT
+     ship the same ones;
+  4. sets the module's PORT and calls its `main()`.
 
-Step 5 is why this file exists rather than a shell wrapper around
-`python osem.vN.py`: PORT is a module-level constant in five separate files
+Step 4 is why this file exists rather than a shell wrapper around
+`python osem.vN.py`: PORT is a module-level constant in every controller
 (`COM7`, a Windows name), and rewriting it in each one before every run is how
 you end up flashing a controller whose diff you no longer trust. Loading the
 module and assigning `mod.PORT` leaves every controller byte-for-byte what was
 validated. `main()` is called explicitly since `__name__` is not `"__main__"`
 here; everything else about the run is identical to launching the file directly.
+
+There is no bench-status gate. It used to refuse `BENCH_STATUS = "broken"` and
+prompt for confirmation on anything not `validated`, but those constants went
+stale -- v1 still declares "never run" although it ran on 2026-08-03 -- and a
+gate whose data is wrong only teaches you to click through it. The preflight and
+the printed gain vectors are the checks that are actually load-bearing, because
+both are computed from the file that is about to run.
 """
 
 # The REAL pyserial, imported first and deliberately. `sim/server.py` installs a
@@ -78,30 +83,23 @@ KNOWN_VIDS = {0x2341, 0x2A03, 0x1A86, 0x0403, 0x10C4}
 DEFAULT_FQBN = "arduino:avr:mega"       # CS on pin 53 is Mega/Due specific
 FIRMWARE = "arduino.ino"                # the sketch that is on the board
 
+# Half-steps (osem.v5.5.py) sort between their neighbours. This pattern MUST
+# match harness.versions() -- when it did not, `make run` silently could not see
+# osem.v5.5.py at all while `make check` could.
+VERSION_RE = re.compile(r"osem\.v(\d+)(?:\.(\d+))?$")
+
 
 # --------------------------------------------------------------------------
 # versions
 # --------------------------------------------------------------------------
 def versions():
-    """Every osem.vN.py here, ordered by N."""
+    """Every osem.vN.py next to this file, in ladder order."""
     found = []
     for path in glob.glob(os.path.join(HERE, "osem.v*.py")):
-        m = re.match(r"osem\.v(\d+)$", os.path.basename(path)[:-3])
+        m = VERSION_RE.match(os.path.basename(path)[:-3])
         if m:
-            found.append((int(m.group(1)), path))
+            found.append(((int(m.group(1)), int(m.group(2) or 0)), path))
     return [p for _, p in sorted(found)]
-
-
-def declared(path, name, default="unknown"):
-    """Read a string constant out of a controller WITHOUT importing it.
-
-    Building the menu must not execute five modules -- each one imports numpy
-    and pyDAC, and a broken one must not execute. A regex is enough for the two
-    string constants the menu needs.
-    """
-    with open(path) as f:
-        m = re.search(r'^%s\s*=\s*["\']([^"\']*)["\']' % name, f.read(), re.M)
-    return m.group(1) if m else default
 
 
 def resolve(name):
@@ -121,24 +119,14 @@ def resolve(name):
         name, ", ".join(os.path.basename(p)[5:-3] for p in all_versions)))
 
 
-STATUS_NOTE = {
-    "validated": "confirmed on hardware with a scope",
-    "reported":  "provenance.md documents the behaviour, but THIS FILE has never run",
-    "untested":  "never been on hardware",
-    "broken":    "does not damp -- DO NOT FLASH",
-}
-
-
 def pick_version():
     """Numbered prompt rather than a curses picker: the controller prints to
     this same terminal the moment it starts, and its own `Press Enter` prompt
-    has to work afterwards."""
+    has to work afterwards. `harness.py --list` is where the detail lives."""
     paths = versions()
     print("\n  which controller?\n")
     for i, p in enumerate(paths):
-        tag = os.path.basename(p)[:-3]
-        st = declared(p, "BENCH_STATUS")
-        print("   %d) %-10s %-10s %s" % (i, tag, st, STATUS_NOTE.get(st, "")))
+        print("   %d) %s" % (i, os.path.basename(p)[:-3]))
     print()
     while True:
         try:
@@ -158,19 +146,14 @@ def pick_version():
 # serial port
 # --------------------------------------------------------------------------
 def rank(port):
+    """0 = a known board, 1 = some other USB serial device, 2 = no VID at all."""
     if port.vid in KNOWN_VIDS:
         return 0
-    if port.vid is not None:
-        return 1
-    return 2
-
-
-def candidates():
-    return sorted(list_ports.comports(), key=rank)
+    return 1 if port.vid is not None else 2
 
 
 def show_ports():
-    found = candidates()
+    found = sorted(list_ports.comports(), key=rank)
     if not found:
         print("  no serial ports at all -- is the board plugged in?")
         return
@@ -182,14 +165,14 @@ def show_ports():
 def choose_port(explicit):
     if explicit:
         return explicit
-    found = [p for p in candidates() if rank(p) < 2]
-    if len(found) == 1:
-        print("  port: %s (%s)" % (found[0].device, found[0].description or "?"))
-        return found[0].device
+    found = [p for p in list_ports.comports() if rank(p) < 2]
     if not found:
         print("\n  No USB serial device found. Ports visible:")
         show_ports()
         sys.exit("\n  Plug the board in, or pass PORT=... explicitly.")
+    if len(found) == 1:
+        print("  port: %s (%s)" % (found[0].device, found[0].description or "?"))
+        return found[0].device
     print("\n  more than one candidate:\n")
     for i, p in enumerate(found):
         print("   %d) %-24s %s" % (i, p.device, p.description or ""))
@@ -239,41 +222,38 @@ def gains(mod):
     return "\n".join(lines)
 
 
-def confirm(question):
-    try:
-        return input(question).strip().lower() in ("y", "yes")
-    except (EOFError, KeyboardInterrupt):
-        return False
-
-
-def run(path, port, force):
+def run(path, port):
     tag = os.path.basename(path)[:-3]
-    status = declared(path, "BENCH_STATUS")
-
-    # The gate comes before the port is touched: there is no reason to reset the
-    # board for a version that is not going to be allowed to drive it.
-    if status == "broken" and not force:
-        sys.exit("\n  %s is BENCH_STATUS = 'broken' -- %s\n"
-                 "  Refusing. Its system identification does not converge, so it\n"
-                 "  drives the coils from a wrong actuation matrix.\n"
-                 "  Override with `make run V=%s FORCE=1` if you really mean it."
-                 % (tag, STATUS_NOTE["broken"], tag[5:]))
-
     port = choose_port(port)
     preflight(port)
 
     mod = load(path)
-    fixes = ", ".join(getattr(mod, "FIXES", ())) or "none"
-    enabled = [i for i, v in enumerate(mod.ENABLE_CHANNEL) if v]
-    print("\n  %s   bench status: %s -- %s" % (tag, status, STATUS_NOTE.get(status, "")))
-    print("  channels driving: %s of 4   fixes claimed: %s   calibration: %.0fs"
-          % (",".join("ch%d" % i for i in enabled) or "none", fixes, mod.CALIBRATION_S))
-    print(gains(mod))
+    # osem.v6*.py are measurement tools, not controllers: they close no loop and
+    # have no gains to print. What matters before one of those runs is which
+    # coils it will drive, how hard, and for how long -- it is open loop, so
+    # nothing is damping the optic while it does.
+    if getattr(mod, "KIND", "controller") != "controller":
+        print("\n  %s   BENCH MEASUREMENT (%s) -- open loop, nothing is damping"
+              % (tag, mod.KIND))
+        print("  coils driven: %s   via DAC ch %s"
+              % (",".join("ch%d" % c for c in mod.COILS),
+                 ",".join(str(mod.DAC_MAP[c]) for c in mod.COILS)))
+        print("  drive amplitude: %.3f V on top of bias %.2f V (clamped to %.1f-%.1f)"
+              % (mod.AMP, __import__("sysid").BIAS_V, __import__("sysid").VMIN,
+                 __import__("sysid").VMAX))
+        print("  expecting rank %d -- %d coils drive %d DOF"
+              % (mod.EXPECTED_DOF, len(mod.COILS), mod.EXPECTED_DOF))
+    else:
+        fixes = ", ".join(getattr(mod, "FIXES", ())) or "none"
+        enabled = [i for i, v in enumerate(mod.ENABLE_CHANNEL) if v]
+        print("\n  %s   fixes claimed: %s   calibration: %.0fs"
+              % (tag, fixes, mod.CALIBRATION_S))
+        print("  channels driving: %s of %d"
+              % (",".join("ch%d" % i for i in enabled) or "none",
+                 len(mod.ENABLE_CHANNEL)))
+        print(gains(mod))
+        print("  coil map: %s" % (list(mod.DAC_CHANNELS),))
     print("  logging to ./data/ (cwd is %s)" % os.getcwd())
-
-    if status != "validated" and not confirm(
-            "\n  %s has never been confirmed on hardware. Continue? [y/N] " % tag):
-        sys.exit("  Cancelled.")
 
     mod.PORT = port                     # the whole reason this file loads the module
     print()
@@ -287,9 +267,8 @@ def flash(port, fqbn):
     """The firmware is an Arduino sketch, not compilable C: arduino-cli will not
     look at it until it is named <dir>/<dir>.ino.
 
-    FIRMWARE is the source of truth -- it is what is actually on the board.
-    Only A0..A3 carry OSEMs, but the sketch streams all eight columns; read_sample
-    takes the leading four.
+    FIRMWARE is the source of truth -- it is what is actually on the board. The
+    sketch streams all eight ADC columns; read_sample takes the leading N.
     """
     if not shutil.which("arduino-cli"):
         sys.exit("  arduino-cli not on PATH. brew install arduino-cli, then\n"
@@ -320,10 +299,10 @@ def main():
     ap.add_argument("version", nargs="?", default=None, help="v0, v1, ... (default: ask)")
     ap.add_argument("--port", default=os.environ.get("PORT") or None,
                     help="serial port (default: auto-detect, else ask)")
-    ap.add_argument("--flash", action="store_true", help="compile and upload arduino.ino, then exit")
+    ap.add_argument("--flash", action="store_true",
+                    help="compile and upload arduino.ino, then exit")
     ap.add_argument("--fqbn", default=DEFAULT_FQBN)
     ap.add_argument("--ports", action="store_true", help="list candidate ports and exit")
-    ap.add_argument("--force", action="store_true", help="allow a 'broken' version")
     args = ap.parse_args()
 
     if args.ports:
@@ -333,8 +312,7 @@ def main():
         flash(args.port, args.fqbn)
         return 0
 
-    path = resolve(args.version) or pick_version()
-    run(path, args.port, args.force)
+    run(resolve(args.version) or pick_version(), args.port)
     return 0
 
 

@@ -13,10 +13,21 @@ lets you interfere with it:
     enter          run the suite           +/- slower / faster
     r              re-run                  t   turbo (no pacing)
     v              back to the picker      q   quit
+    d              DAC transport: pyDAC's ack drain on / off
 
 Every curve is a forced damped oscillation: the plant is driven at ~1 Hz
 throughout every scenario in the suite, so all four axes are always ringing and
 what you are watching is whether the loop takes energy back out of them.
+
+The `loop` readout is the rate the controller is ACTUALLY iterating at, against
+the rate the serial wire delivers. They are not the same number on the hardware:
+every DAC write costs `pyDAC.set_voltage()` a burst of stream lines it reads and
+discards while it waits for an `OK`, so a loop that is driving coils runs at
+~24 Hz off a 348 Hz wire. The suite pins that drain to zero, because the checks
+are about the control law and not about pyDAC's ack round-trip; d turns it back
+on and holds it there for the rest of the run, and the rate collapses in front
+of you. That is the loop the hardware has, and it is not the one the checks you
+are watching pass are graded against.
 
     make test          # this
     make check         # the same suite, headless, all versions
@@ -42,12 +53,19 @@ from sim import server as S              # noqa: E402
 TRACE_N = 600
 SERIES = [1, 2, 3, 4]                    # curses colour pairs, one per channel
 STATE_PAIR = {"CALIBRATING": 6, "DAMPING": 5, "FAULT": 7, "IDLE": 8}
+# Stream samples one DAC write costs on pyDAC's transport, read off the server
+# so the two cannot drift apart. The fallback is the raw 2026-08-03 factor and
+# is nearly moot: a server with no ACK_DRAIN has no ack_drain to set either, and
+# the d key then does nothing at all.
+ACK_DRAIN = float(getattr(S, "ACK_DRAIN", 14.0))
 
 
 class App:
     def __init__(self):
         self.lock = threading.Lock()
-        self.versions = H.versions()
+        # Only what the simulator can drive: the bench tools (osem.v6*) close no
+        # loop, and the 8-channel builds do not fit a 4-OSEM plant.
+        self.versions = H.simulatable()
         # describe() loads the module, so do it once here rather than per frame
         self.info = [H.describe(p) for p in self.versions]
         self.sel = len(self.versions) - 1
@@ -64,6 +82,9 @@ class App:
         self.chan = []                       # per-channel readout dicts
         self.kick_flash = 0.0
         self.speed = 10.0
+        self.loop_hz = None                  # None until the first monitor call
+        self.drain = None                    # ack_drain as the plant reports it
+        self.drain_req = None                # what d asked for, None if untouched
         self.done = False
         self.error = None
         self.worker = None
@@ -106,7 +127,19 @@ class App:
                               gain=float(c.active_gain), out=float(c.out),
                               rail=bool(c.rail_fault), locked=bool(c.locked))
                          for i, c in enumerate(sim.ctl.channels)]
+            # How fast the loop is REALLY turning, and the transport setting
+            # that decides it. Both are absent on a server from before the ack
+            # drain was modelled, and the readout shows a dash for either.
+            self.loop_hz = getattr(sim, "loop_hz", None)
+            self.drain = sim.plant.get("ack_drain")
+            want, have = self.drain_req, self.drain
             speed = self.speed
+        # harness re-applies BASE_PLANT at the top of every scenario, so the
+        # toggle has to be re-asserted rather than set once. Safe from here:
+        # this is the worker thread, the one that owns the plant between steps.
+        if want is not None and have is not None and want != have:
+            with sim.lock:
+                sim.plant["ack_drain"] = want
         if speed > 0:
             target = self.run_wall0 + (sim.t - self.run_sim0) / speed
             delay = target - time.perf_counter()
@@ -149,6 +182,19 @@ class App:
             self.kick_flash = time.perf_counter()
             self.pending_mark = True
         return dv
+
+    def toggle_drain(self):
+        """Swap the DAC transport between the two real ones: `pyDAC`, whose
+        set_voltage() reads and discards up to 50 stream lines waiting for its
+        `OK`, and `pyDAC2.FastDAC`, which writes and returns. Only requested
+        here -- the monitor applies it on the worker thread, and does nothing at
+        all if the server has no ack_drain to set, so an old server ignores the
+        key rather than showing a rate it is not running at."""
+        with self.lock:
+            cur = self.drain_req if self.drain_req is not None else self.drain
+            if cur is not None:
+                self.drain_req = 0.0 if cur else ACK_DRAIN
+            return self.drain_req
 
 
 # --------------------------------------------------------------------------
@@ -270,6 +316,7 @@ def draw_run(win, app):
         notes = list(app.notes)
         done, error = app.done, app.error
         speed, flash = app.speed, app.kick_flash
+        loop_hz, drain = app.loop_hz, app.drain
         state = app.trace[-1][2] if app.trace else "IDLE"
     kicks = H.KICKS_APPLIED     # kicks that reached the plant, not keypresses
     npass = sum(1 for ok, _, _ in results if ok)
@@ -287,7 +334,24 @@ def draw_run(win, app):
     put(win, 1, 57, f"speed {speed_s}", curses.color_pair(9))
     if time.perf_counter() - flash < 0.6:
         put(win, 1, 70, " KICK ", curses.color_pair(7) | curses.A_REVERSE)
-    put(win, 2, 1, (label or "")[:w - 3], curses.color_pair(9))
+
+    # Loop rate against wire rate, right-aligned on the label row. The GAP is
+    # the reading: they agree while nothing is being written to the coils and
+    # separate the moment the loop starts driving them, because every write
+    # costs the transport a burst of samples the controller never sees. Red
+    # once more than half the wire rate has been lost.
+    wire = S.SAMPLE_HZ
+    loop_s = f"{loop_hz:5.1f}" if loop_hz is not None else f"{'--':>5}"
+    rate = f"loop {loop_s}/{wire:.0f} Hz"
+    drain_s = "drain " + (f"{drain:g}" if drain is not None else "--")
+    # Anchored on the rate, not on the pair: the drain is the only field here
+    # that changes width, and the readout should not jump when d is pressed.
+    rx = max(1, w - len(rate) - 13)
+    slow = loop_hz is not None and loop_hz < wire / 2.0
+    put(win, 2, rx, rate,
+        curses.color_pair(7) | curses.A_BOLD if slow else curses.color_pair(9))
+    put(win, 2, rx + len(rate) + 2, drain_s, curses.color_pair(9))
+    put(win, 2, 1, (label or "")[:max(0, rx - 3)], curses.color_pair(9))
 
     res_h = min(max(6, h // 3), 12)
     curve_top, curve_h = 3, h - res_h - 5
@@ -318,7 +382,7 @@ def draw_run(win, app):
         put(win, h - 2, 1, verdict,
             curses.color_pair(7 if nfail else 5) | curses.A_BOLD)
     put(win, h - 1, 1,
-        "x kick   +/- speed   t turbo   r re-run   v versions   q quit",
+        "x kick   +/- speed   t turbo   d drain   r re-run   v versions   q quit",
         curses.color_pair(9))
     win.noutrefresh()
 
@@ -381,6 +445,8 @@ def main(stdscr):
             elif key in (ord("t"), ord("T")):
                 with app.lock:
                     app.speed = 0.0 if app.speed > 0 else 10.0
+            elif key in (ord("d"), ord("D")):
+                app.toggle_drain()
             elif key in (ord("r"), ord("R")):
                 if app.done:
                     app.start()

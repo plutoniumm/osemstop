@@ -1,0 +1,48 @@
+==========================================================================
+  version   : v4 (untested)
+  fixes     : saturation-latch, rail-threshold, runaway-baseline, auto-disable
+  channels  : 1 on of 4 -- [True, False, False, False]
+  coil map  : [1, 3, 5, 7]
+  Kp        : steady [np.float64(-0.03), np.float64(-0.03), np.float64(0.01), np.float64(-0.03)]
+  Ki / Kd   : -0.04 / -0.0015
+  calib     : 20 s     run length: 90 s
+  kicks at  : [55.0]
+==========================================================================
+Connected on /dev/cu.usbserial-1120
+DAC biases set. Press Enter to start fast-lock damping (Ctrl+C to stop)...     STREAMING
+Logging to data/20260804_111504_fast_lock.csv
+
+[CALIBRATING] measuring baseline noise for 20s (outputs held at bias, no damping yet)...
+
+[    0.0s] CALIBRATING ch0:.... tr.. g=+0.0000 bp=+0.000V ratio=0.00  ch1:off  bp=+0.000V  ch2:off  bp=+0.000V  ch3:off  bp=+0.000V
+[    5.0s] CALIBRATING ch0:.... tr.. g=+0.0000 bp=+0.261V ratio=0.00  ch1:off  bp=+0.103V  ch2:off  bp=+0.131V  ch3:off  bp=+0.020V
+[   10.0s] CALIBRATING ch0:.... tr.. g=+0.0000 bp=+0.095V ratio=0.00  ch1:off  bp=+0.025V  ch2:off  bp=+0.445V  ch3:off  bp=+0.084V
+[   15.0s] CALIBRATING ch0:.... tr.. g=+0.0000 bp=+0.242V ratio=0.00  ch1:off  bp=+0.108V  ch2:off  bp=+0.167V  ch3:off  bp=+0.040V
+[DAMPING] baseline set (ch0=0.2288V, ch1=0.1071V, ch2=0.3322V, ch3=0.0869V). Gain will schedule between -0.035 (large amplitude) and -0.030 (near lock)...
+
+[   20.0s] DAMPING     ch0:.... tr.. g=-0.0003 bp=+0.125V ratio=0.54  ch1:off  bp=+0.057V  ch2:off  bp=+0.409V  ch3:off  bp=+0.099V
+[   25.0s] DAMPING     ch0:.... CAP g=-0.0350 bp=+0.002V ratio=0.63  ch1:off  bp=-0.012V  ch2:off  bp=+0.136V  ch3:off  bp=+0.025V
+[   30.0s] DAMPING     ch0:.... hold g=-0.0301 bp=+0.075V ratio=0.21  ch1:off  bp=+0.023V  ch2:off  bp=-0.051V  ch3:off  bp=-0.032V
+
+*** LOCKED -- 14.7s after gain was applied (t=34.7s total) ***
+
+[   35.0s] DAMPING     ch0:LOCK hold g=-0.0300 bp=-0.026V ratio=0.18  ch1:off  bp=-0.023V  ch2:off  bp=+0.021V  ch3:off  bp=+0.010V
+[   40.0s] DAMPING     ch0:LOCK hold g=-0.0300 bp=-0.007V ratio=0.08  ch1:off  bp=+0.002V  ch2:off  bp=-0.031V  ch3:off  bp=-0.008V
+[   45.0s] DAMPING     ch0:LOCK hold g=-0.0300 bp=-0.018V ratio=0.09  ch1:off  bp=-0.016V  ch2:off  bp=+0.004V  ch3:off  bp=-0.000V
+[   50.0s] DAMPING     ch0:LOCK hold g=-0.0300 bp=-0.037V ratio=0.09  ch1:off  bp=-0.005V  ch2:off  bp=-0.005V  ch3:off  bp=-0.005V
+
+>>> KICK 1/1 REQUESTED at t=55.0s <<<
+
+[   55.1s] DAMPING     ch0:LOCK hold g=-0.0300 bp=+0.034V ratio=0.09  ch1:off  bp=+0.005V  ch2:off  bp=+0.006V  ch3:off  bp=-0.001V
+[   60.1s] DAMPING     ch0:LOCK hold g=-0.0300 bp=+0.024V ratio=0.08  ch1:off  bp=+0.000V  ch2:off  bp=-0.001V  ch3:off  bp=-0.001V
+[   65.1s] DAMPING     ch0:LOCK hold g=-0.0300 bp=+0.021V ratio=0.08  ch1:off  bp=+0.006V  ch2:off  bp=-0.004V  ch3:off  bp=+0.002V
+[   70.1s] DAMPING     ch0:LOCK hold g=-0.0300 bp=-0.014V ratio=0.07  ch1:off  bp=-0.005V  ch2:off  bp=+0.004V  ch3:off  bp=+0.001V
+[   75.1s] DAMPING     ch0:LOCK hold g=-0.0300 bp=+0.008V ratio=0.08  ch1:off  bp=+0.001V  ch2:off  bp=-0.003V  ch3:off  bp=+0.000V
+[   80.1s] DAMPING     ch0:LOCK hold g=-0.0300 bp=+0.015V ratio=0.09  ch1:off  bp=+0.007V  ch2:off  bp=+0.006V  ch3:off  bp=+0.002V
+[   85.1s] DAMPING     ch0:LOCK hold g=-0.0300 bp=-0.013V ratio=0.07  ch1:off  bp=+0.006V  ch2:off  bp=-0.008V  ch3:off  bp=+0.004V
+
+Stopped by user.
+    
+Returning DAC outputs to bias voltages...
+Connection closed.
+Log saved to data/20260804_111504_fast_lock.csv

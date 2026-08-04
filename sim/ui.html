@@ -232,6 +232,13 @@ figcaption .sub { font-size: 12px; color: var(--ink-3); margin-top: 2px; }
           padding:14px 16px; margin-bottom:18px; color:var(--ink); display:none; }
 .banner.show { display:block; }
 .banner code { font-family:var(--mono); background:var(--surface); padding:2px 6px; border-radius:3px; }
+
+/* loop rate against wire rate: the gap is the point, so it is coloured when the
+   loop has fallen to less than half the rate the serial link delivers */
+.readout .v .wire { color:var(--ink-3); }
+.readout .v.slow { color:var(--serious); font-weight:640; }
+.ctl .ticks { grid-column:1 / -1; display:flex; justify-content:space-between; gap:10px;
+              font-family:var(--mono); font-size:10px; color:var(--ink-3); margin-top:2px; }
 </style>
 
 <div class="wrap">
@@ -261,6 +268,9 @@ figcaption .sub { font-size: 12px; color: var(--ink-3); margin-top: 2px; }
   <div class="readout"><span class="k">Faults</span><span class="v" id="faultCount">0</span></div>
   <div class="readout"><span class="k">Shocks</span><span class="v" id="shockCount">0</span></div>
   <div class="readout"><span class="k">Controller</span><span class="v" id="verName">—</span></div>
+  <div class="readout" id="rateReadout" style="display:none"
+       title="Left: the rate the control loop actually iterates at. Right: the rate the serial stream delivers samples. They differ because every coil write discards stream lines while it waits for its OK.">
+    <span class="k">Loop / wire</span><span class="v" id="loopRate">&mdash;</span></div>
   <div class="lamps" id="lamps"></div>
   <span class="conn" id="conn"><span class="bulb"></span><span id="connText">connecting</span></span>
 </div>
@@ -274,6 +284,7 @@ figcaption .sub { font-size: 12px; color: var(--ink-3); margin-top: 2px; }
         <button id="btnRun" class="primary">Start</button>
         <button id="btnReset">Reset</button>
         <button id="btnKick" disabled title="Runs only while the sim is running">Kick +6 V/s</button>
+        <button id="btnQuake" disabled title="A 30 V/s transient held for 3 s: rails the ADC and pins the actuator, which is what trips the saturation breaker">Earthquake</button>
       </div>
       <div class="ctl" style="margin-top:12px">
         <label for="speed">Speed</label><output id="speedOut">1.0&times;</output>
@@ -304,6 +315,30 @@ figcaption .sub { font-size: 12px; color: var(--ink-3); margin-top: 2px; }
         <tbody id="chanRows"></tbody>
       </table>
       </div>
+    </div>
+
+    <div class="card">
+      <h2>Serial transport</h2>
+      <div class="ctl">
+        <label for="ackDrain">Samples lost per coil write</label><output id="ackDrainOut">14 / write</output>
+        <input type="range" id="ackDrain" min="0" max="50" step="1" value="14" list="ackDrainTicks">
+        <datalist id="ackDrainTicks">
+          <option value="0" label="pyDAC2"></option>
+          <option value="14" label="pyDAC"></option>
+        </datalist>
+        <div class="ticks"><span>0 &mdash; pyDAC2, fire-and-forget</span><span>14 &mdash; bench (pyDAC)</span></div>
+      </div>
+      <div class="btnrow" style="margin-top:10px" role="group" aria-label="Transport model">
+        <button id="ackBench">14 &mdash; measured</button>
+        <button id="ackFast">0 &mdash; pyDAC2</button>
+      </div>
+      <p class="note" style="margin:10px 0 0"><code>pyDAC.set_voltage()</code> reads and discards up to
+      50 stream lines waiting for its <code>OK</code>, so every coil write throws away samples the
+      controller never sees. At <strong>14</strong> the loop iterates about <strong>14&times; slower
+      than the wire</strong> while it is damping &mdash; ~24&nbsp;Hz against ~348&nbsp;Hz. That is
+      measured, not assumed: on the 2026-08-03 logs the median inter-sample time is 2.80&nbsp;ms over a
+      whole run and 41&nbsp;ms between consecutive DAMPING rows. <code>pyDAC2.FastDAC</code> never waits
+      for the acknowledgement, which is drain&nbsp;0.</p>
     </div>
 
     <div class="card">
@@ -457,10 +492,14 @@ figcaption .sub { font-size: 12px; color: var(--ink-3); margin-top: 2px; }
       identically and remembers the last voltage per channel. That held voltage is what the
       simulated coil pulls on, so the controller's own 10&nbsp;ms throttle and 0.5&nbsp;mV deadband
       shape the force exactly as on the bench.</p>
-      <p><strong>No converter in the loop.</strong> The signal stays continuous volts end to end.
-      The controller's rail test is written against ADC counts, so the harness hands it counts as an
-      unrounded float: counts are a linear map of the signal, so the trip points are identical
-      without quantizing anything.</p>
+      <p><strong>The converter is modelled, and it is the one nonlinearity.</strong> Sensor volts are
+      offset to each channel's measured resting count, rounded to an integer and hard-clipped to
+      0&ndash;1023; the controller then scales those counts back to volts itself, exactly as
+      <code>read_sample()</code> does on the bench. The OSEMs rest well above mid-scale &mdash;
+      measured 2026-08-03 at 615&nbsp;/&nbsp;641&nbsp;/&nbsp;717&nbsp;/&nbsp;679 counts against a
+      mid-scale of 511.5 &mdash; so the headroom is asymmetric and large amplitude flat-tops the TOP
+      rail long before it reaches the bottom one. That is what the bench logs show: 2.19% of samples
+      railed on the v1 run, 10.40% on v2, none of them at zero.</p>
       <p><strong>Modelled, not measured:</strong> the plant &mdash; a second-order oscillator per axis
       at ~1&nbsp;Hz with adjustable Q, driven by a coherent tone plus broadband noise. Each axis has
       its own mode frequency (within &plusmn;1%) and its own lever arm, which is why the traces do not
@@ -521,6 +560,8 @@ let ROWS = [], cursor = 0, stripMode = "bp", connected = false;
 let status = { state: "IDLE", t: 0, lockTime: null, faults: 0, ch: [], events: [] };
 
 const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
+/* a field an older server does not send is absent, not zero */
+const num = v => (typeof v === "number" && Number.isFinite(v)) ? v : null;
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const SERIES = ["--s1", "--s2", "--s3", "--s4"];
 
@@ -877,6 +918,29 @@ speedEl.addEventListener("input", () => {
   post("/api/config", { speed: parseFloat(speedEl.value) });
 });
 
+/* ack drain -> server. How many stream samples a single coil write eats while it
+   waits for its OK: 14 is what the bench logs measured through pyDAC, 0 is
+   pyDAC2.FastDAC, which does not wait. It changes how fast the loop runs, so
+   unlike Speed it invalidates a loaded scenario. */
+const ackEl = document.getElementById("ackDrain"), ackOut = document.getElementById("ackDrainOut");
+const ackBench = document.getElementById("ackBench"), ackFast = document.getElementById("ackFast");
+let ackTouched = false;
+function paintAck() {
+  const v = parseInt(ackEl.value, 10) || 0;
+  ackOut.textContent = v + " / write";
+  ackBench.className = v === 14 ? "primary" : "";
+  ackFast.className = v === 0 ? "primary" : "";
+}
+function setAck(v, push) {
+  ackEl.value = String(clamp(Math.round(v), 0, 50));
+  paintAck();
+  if (push) { ackTouched = true; clearPreset(); post("/api/config", { ackDrain: parseInt(ackEl.value, 10) }); }
+}
+ackEl.addEventListener("input", () => setAck(parseInt(ackEl.value, 10) || 0, true));
+ackBench.addEventListener("click", () => setAck(14, true));
+ackFast.addEventListener("click", () => setAck(0, true));
+paintAck();
+
 /* presets. `what` says what was changed, `watch` says what to look for and what
    the numbers should come out as -- every figure below was measured off this
    simulator, not guessed. */
@@ -904,7 +968,7 @@ const PRESETS = {
   sat:      { enable: [1,0,0,0], steady: [-.600,-.030,.010,-.030], ki: [0,0,0,0], kd: [0,0,0,0],
               autoKick: true,
               title: "Over-gain ch0, then a disturbance — the FAULT that never clears",
-              what: "Kp = −0.600, twenty times the validated value, plus an automatic kick 4 s after damping starts. Velocity feedback self-limits, so gain alone will not saturate it — it needs the kick.",
+              what: "Kp = −0.600, twenty times the validated value, plus an automatic transient 4 s after damping starts — 9 V/s held for 2 s, the same thing the Earthquake button sends. Velocity feedback self-limits, so gain alone will not saturate it, and a single impulse no longer does either: at 348 Hz the breaker's 30 consecutive samples are 86 ms, longer than this gain lets one bump survive.",
               watch: "<b>The actuator pins against 0 V or 0.5 V</b>, 30 consecutive samples trip the saturation breaker, and the state badge goes red. It then <b>stays red forever</b> — a runaway trip recovers, a saturation trip does not. That is known bug #1, left in on purpose." },
   blind:    { enable: [1,0,0,0], steady: [-.030,-.030,.010,-.030], ki: [0,0,0,0], kd: [0,0,0,0],
               occlude: [0,1,0,0],
@@ -1005,6 +1069,20 @@ btnKick.addEventListener("click", async () => {
   setTimeout(() => { btnKick.textContent = "Kick +6 V/s"; }, 900);
 });
 
+/* An earthquake is the deliberate version: 30 V/s aimed at the whole body and
+   HELD for 3 s, rather than one impulse that rings down. That is the difference
+   between sweeping past the ADC rails and sitting on them, and it is the only
+   way to reach MAX_CONSECUTIVE_SATURATED — thirty CONSECUTIVE pinned samples,
+   86 ms at this sample rate. On v0/v1/v2 the resulting saturation fault latches
+   forever; v3 clears it 5 s after the shaking stops. */
+const btnQuake = document.getElementById("btnQuake");
+btnQuake.addEventListener("click", async () => {
+  if (btnQuake.disabled) return;
+  await post("/api/inject", { kind: "quake", dv: 30, duration: 3 });
+  btnQuake.textContent = "Shaking…";
+  setTimeout(() => { btnQuake.textContent = "Earthquake"; }, 3000);
+});
+
 /* ---------------- per-frame UI ---------------- */
 function updateUI() {
   const st = status.state || "IDLE";
@@ -1017,7 +1095,24 @@ function updateUI() {
   document.getElementById("shockCount").textContent = status.shocks || 0;
   document.getElementById("verName").textContent = status.version || "—";
   btnRun.textContent = status.running ? "Pause" : "Start";
+
+  /* Loop rate against wire rate. An older server sends neither, in which case the
+     readout stays hidden rather than reading "undefined". */
+  const wireHz = num(status.wireHz), loopHz = num(status.loopHz);
+  const rateEl = document.getElementById("rateReadout"), rateVal = document.getElementById("loopRate");
+  if (wireHz === null && loopHz === null) {
+    rateEl.style.display = "none";
+  } else {
+    rateEl.style.display = "";
+    rateVal.innerHTML = (loopHz === null ? "—" : loopHz.toFixed(0)) +
+      ` <span class="wire">/ ${wireHz === null ? "—" : wireHz.toFixed(0)} Hz</span>`;
+    rateVal.classList.toggle("slow", wireHz !== null && loopHz !== null && loopHz < 0.5 * wireHz);
+  }
+  /* The server owns the drain until somebody moves the control. */
+  const drain = num(status.ackDrain);
+  if (drain !== null && !ackTouched && parseInt(ackEl.value, 10) !== Math.round(drain)) setAck(drain, false);
   btnKick.disabled = !status.running;
+  btnQuake.disabled = !status.running;
 
   for (let i = 0; i < NCH; i++) {
     const c = status.ch[i]; if (!c) continue;

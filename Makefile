@@ -14,8 +14,8 @@ help:                ## show this
 	@echo
 	@$(PY) harness.py --list
 
-run:                 ## ON HARDWARE: preflight the board, then run a controller (make run V=v0)
-	@$(PY) bench.py $(V) $(if $(PORT),--port $(PORT)) $(if $(FORCE),--force)
+run:                 ## ON HARDWARE: preflight the board, then run a controller (make run V=v5)
+	@$(PY) bench.py $(V) $(if $(PORT),--port $(PORT))
 
 arduino:             ## ON HARDWARE: compile arduino.ino and upload it (make arduino FQBN=...)
 	@$(PY) bench.py --flash $(if $(PORT),--port $(PORT)) --fqbn $(FQBN)
