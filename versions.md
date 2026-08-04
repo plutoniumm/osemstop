@@ -4,15 +4,23 @@ Each `osem.vN.py` is a **complete, standalone controller**. None of them import
 from each other and none are patches — you can flash the Arduino, point any one
 of them at `COM7` and run it. That is deliberate: the bench comparison between
 two versions has to be a comparison of two things that both actually ran.
+(`osem.v6*.py` are the exception and are not controllers at all — see *Bench
+tools* below.)
 
-`v0` is the frozen baseline and does not change. Everything else is measured
-against it.
+**v0, v1, v2 and v3 were deleted from the working tree on 2026-08-04** and exist
+only in git history: `git show HEAD:osem.v0.py`, or `git checkout HEAD -- osem.v0.py`
+to bring one back. Their sections below are kept, because v4 is v3 plus one
+change, because the suite still measures itself against their behaviour, and
+because the hardware numbers in § *On the bench* were measured on them and are
+real. **v5 is the current starting point** — the newest thing that closes a loop
+on four channels, and what `README.md` § 0 tells you to run; v4 is the reference
+it is compared against.
 
 ```
-python3 harness.py --list          # what exists
+python3 harness.py --list          # what exists, controllers and bench tools
 make test                          # pick one, watch it run, press x to kick it
-make check                         # all four, headless, asserted
-make sim V=v2                      # one of them in a browser
+make check                         # every version the simulator can drive, asserted
+make sim V=v4                      # one of them in a browser
 ```
 
 ---
@@ -21,18 +29,46 @@ make sim V=v2                      # one of them in a browser
 
 | | channels | I / D | known defects | ch0 ratio | lock | suite |
 |---|---|---|---|---|---|---|
+| **v4** | all four | live | all 3 fixed, + auto-disable | 0.029 | 10.6 s | 33/33 |
+| **v5** | all four | live | + **fast-refault** | 0.029 | 10.6 s | 35/35 |
+| **v5.5** | **all eight** | live | same as v5 | — | — | *skipped* |
+| **v7** | all four | live | + **bias-trim** | 0.029 | 10.6 s | 35/35 |
+| **v8** | all four | live | + **fast-calib**, **warm-restart** | 0.029 | 10.5 s | 36/36 |
+| **v9** | all four | live | + **runaway-trend** | 0.029 | 10.5 s | 36/36 |
+
+**v9 is the one to run.** v7 and v8 are parallel branches off v5 — v7 adds the
+bias trim, v8 the calibration work — and v9 is v8 plus the fault fix. The bias
+trim is NOT in v9; folding v7 into v9 is unfinished business.
+
+`osem.v6.py`, `v6.1`, `v6.5`, `v6.6` are **bench tools**, not controllers: they
+drive coils and record, close no loop, and expose no `Controller`. The suite
+skips them loudly, with a reason printed, as it skips `v5.5` (eight channels
+against a four-OSEM plant).
+
+The rungs below v4 are gone from the tree. Their numbers, measured through
+`harness.py` while they were still present:
+
+| deleted 2026-08-04 | channels | I / D | known defects | ch0 ratio | lock | suite then |
+|---|---|---|---|---|---|---|
 | **v0** | ch0 only | zeroed | all 3 intact | 0.188 | 12.1 s | 18/18 |
 | **v1** | all four | zeroed | all 3 intact | 0.025 | 10.7 s | 16/16 |
 | **v2** | all four | **live** | all 3 intact | 0.028 | 10.5 s | 18/18 |
 | **v3** | all four | live | **all 3 fixed** | 0.029 | 10.6 s | 18/18 |
-| **v4** | all four | live | all 3 fixed, + auto-disable | 0.029 | 10.6 s | 28/28 |
-| **v5** | all four | live | + **fast-refault** | 0.029 | 10.6 s | 30/30 |
-| **v5.5** | **all eight** | live | same as v5 | — | — | *skipped* |
 
 "ratio" is the rolling 2 s RMS of the bandpassed signal over that channel's own
 calibrated baseline — 1.0 is undamped, the lock line is 0.35. Every number in
-this file was measured through `harness.py`, not estimated. The simulator's
+both tables was measured through `harness.py`, not estimated. The simulator's
 limits apply to all of them: see the bottom of this file.
+
+### Bench tools, not rungs
+
+`osem.v6.py`, `osem.v6.1.py`, `osem.v6.5.py` and `osem.v6.6.py` declare
+`KIND = "sysid"`, expose no `Controller` and damp nothing. They drive the coils
+with a known excitation and record what the OSEMs do, to recover the actuation
+matrix (`research.md` item 2, `CLAUDE.md` item 2b). `harness.py` and `bench.py`
+both check `KIND` and refuse to simulate them; the shared lock-in and reporting
+live in `sysid.py`. v6/v6.1 are the four-coil pair (stepped sine / interleaved
+multisine), v6.5/v6.6 the eight-coil pair.
 
 v4 and v5 give the **same numbers to three decimals** in a quiet lab, on two
 different plants — the rewrite is behaviour-preserving, and was verified so
@@ -53,82 +89,46 @@ this is hardware.
 
 ---
 
-## v0 — the frozen baseline
+## v0, v1, v2 — the deleted rungs
 
-What ran on the bench on 2026-07-15 and what `provenance.md` describes. Velocity
-feedback (cold damping), `u = -K·v`, P-only. `ENABLE_CHANNEL = [True, False,
-False, False]`.
+**All three deleted 2026-08-04; git history only** (`git show HEAD:osem.v0.py`).
+Their measured numbers are in the ladder table above. What is still load-bearing:
 
-It differs from the original `osem_fast_lock (2) (1).py` in exactly two ways,
-both behaviour-preserving:
+- **v0** — the 2026-07-15 bench configuration and what `provenance.md` describes.
+  P-only velocity feedback, `u = -K·v`, `ENABLE_CHANNEL = [True, False, False,
+  False]`. The only entry in this whole file ever confirmed against a scope.
+- **v1** — one line changed: all four channels on, because `provenance.md` §4
+  documents all four damping simultaneously (≈17 s against ≈70 s one at a time).
+  v0's docstring claim that only ch0 was validated was already two days out of
+  date when v0 was frozen.
+- **v2** — `KI_GAIN` and `KD_GAIN` given real values for the first time. It did
+  **not** damp better than v1, and on hardware it was worse: see § *On the bench,
+  2026-08-03*, where v2's integrator pushed a pinned-actuator streak from 28 to
+  31 samples against a threshold of 30 and latched a 50 s fault that v1 cleared
+  in 5 s.
 
-- the PID scaffolding (`KI_GAIN`, `KD_GAIN`, `D_SMOOTH_HZ`, `I_CLAMP_V`) is
-  present but **both gains are 0.0**, which collapses the sum to the P-only law
-  that was validated;
-- `Controller` is extracted from `main()`. Pure refactor. It is what lets the
-  simulator drive the real state machine instead of a copy of it.
+Two facts from these sections that everything since still depends on, kept here
+so deleting the files did not delete the reasoning:
 
-**Do not fix anything in v0.** Its three defects are the reference point that
-makes v3's fixes verifiable, and the suite asserts them from the broken side.
+**ch2's `STEADY_GAIN[2] = +0.010` is positive** where the others are negative,
+because that channel's coil or OSEM is mounted the other way round
+(`provenance.md` § *Table 1*). Confirmed on hardware 2026-08-04, where it came
+out the best-damping channel of the four. Do not "correct" it.
 
----
-
-## v1 — all four channels
-
-One line changed: `ENABLE_CHANNEL = [True, True, True, True]`.
-
-**Why.** `provenance.md` §4 documents all four channels damping simultaneously on
-the bench, with per-channel exponential fits (τ = 4.55, 5.49, 3.58, 5.05 s for
-A0–A3) and the optic settling in ≈17 s against ≈70 s for one channel at a time.
-v0 shipped with three of those disabled, which predates that run. v0's docstring
-claim that "only ch0 is experimentally validated" was two days out of date.
-
-**A2 keeps `STEADY_GAIN[2] = +0.010`,** positive where the others are negative.
-Not a typo. The report has A2 damping *fastest* of the four at that gain, which
-is only possible if its coil or OSEM is mounted the other way round. The
-simulator models this as `COIL_GAIN[2] < 0` (see below).
-
-Measured: all four damp (0.254 / 0.249 / 0.152 / 0.275), locks at 15.0 s, and
-ch2 damps fastest — the same ordering the report reports.
+**What P, I and D actually are here.** The process variable is *velocity*, not
+position, so the usual intuitions are shifted by one derivative: P is viscous
+damping and **the only term that removes energy**; I integrates velocity, which
+is displacement, so it is a spring that moves the resonance; D differentiates
+velocity, which is acceleration, so it is added mass and the noisiest term in
+the loop. All three are live from v2 onward — "P-only" describes v0 and v1 only.
 
 ---
 
-## v2 — I and D switched on
+## v3 — a proper PID, and the three defects fixed (deleted)
 
-`KI_GAIN` and `KD_GAIN` given real values. The structure was already there from
-v0; until now it was inert.
-
-```python
-KI_GAIN = np.array([-0.040, -0.040, +0.040, -0.040])
-KD_GAIN = np.array([-0.0015, -0.0015, +0.0015, -0.0015])
-```
-
-All three gains follow **one sign convention per channel**, because they share
-one loop — negative on ch0/1/3, positive on the inverted ch2. Flipping only Kp
-would make the spring repulsive and the mass negative on that channel.
-
-**What they actually are.** The process variable is velocity, so the names
-mislead:
-
-| term | on velocity | physically |
-|---|---|---|
-| P | proportional | cold damping — **the only term that removes energy** |
-| I | ∫velocity = displacement | an added **spring**; shifts the resonance |
-| D | d(velocity)/dt = acceleration | added **mass**; also differentiates the sensor twice |
-
-So do not expect v2 to damp better than v1 because it has "more PID." It damps
-slightly better (0.232 vs 0.254) and locks a second sooner, but neither new term
-dissipates; what they buy is a stiffer, heavier effective plant. Measured term
-sizes at full swing: **P = 0.154 V, I = 0.066 V, D = 0.045 V** — P still
-dominates, which the suite asserts.
-
-`kd` must stay far below `1/k_act`. The D term feeds acceleration back into
-acceleration; around kd ≈ 0.05 the effective mass goes to zero and the loop runs
-away.
-
----
-
-## v3 — a proper PID, and the three defects fixed
+**File deleted 2026-08-04; git history only.** Read this section anyway: v4 is
+v3 plus one change and v5 is v4 restated as arrays, so everything below is still
+what those two do.
 
 Two kinds of change, kept separate so a bench comparison can attribute an
 effect to one or the other.
@@ -205,12 +205,13 @@ before scripted shocks got their own RNG, so the shock *direction* depended on
 the sample rate and the sweep was not a clean counterfactual. The separation is
 intact and wider; the absolute numbers moved.)
 
-Read the *spread*, not any one column. At t = 5 s or t = 7 s v0 comes out
-**better** than v3, so a single fixed shock time ranks them backwards. What the
-median actually buys is a **bound**: v0's damage depends entirely on where the
-transient lands and reaches 45%, v3's stays inside a 19–26% band. `harness.py`
-therefore sweeps the shock across the window and asserts the worst case, with
-the line at 35%.
+Read the *spread*, not any one column. On the retired seven-column sweep v0 came
+out **better** than v3 at t = 5 s and t = 7 s, so a single fixed shock time can
+rank them backwards. What the median actually buys is a **bound** on the damage
+wherever the transient lands: over the t = 2/4/6 s sweep the suite runs, v0/v1/v2
+reach **39.3%** and v3/v4/v5 stay at **19.7%**. `harness.py` therefore sweeps the
+shock across the window and asserts the worst case, with the line at 35% —
+~1.1× margin on the un-fixed side, ~1.8× on the fixed side.
 
 These numbers **replace** the 20.5% / 27.0% / 33.2% (v0) and 14.6% / 24.0% /
 33.2% (v3) table that stood here before. Those were measured on the old
@@ -228,16 +229,20 @@ a lab being hit that often really does have that noise floor — but this is a
 partial fix and is labelled as one in the code.
 
 A real fix needs a baseline that tracks slowly rather than being sampled once,
-or a transient detector that restarts calibration. Neither is in v3.
+or a transient detector that restarts calibration. Neither is in v3, and neither
+is in v4 or v5 — they inherit this fix unchanged. `research.md` item 6 is the
+work.
 
 ---
 
 ## v4 — graceful degradation
 
-v3 with **one** behavioural change and nothing else touched, so a bench
-comparison isolates it. `FIXES` gains `auto-disable`. Identical damping
-(ch0 = 0.024, lock 10.6 s) because in a quiet lab nothing ever demotes — the
-whole change is dormant until something goes wrong.
+**The oldest controller still in the tree.** v3 with **one** behavioural change
+and nothing else touched, so a bench comparison isolates it — and since v3 was
+deleted on 2026-08-04, that diff is now `git diff HEAD:osem.v3.py osem.v4.py`.
+`FIXES` gains `auto-disable`. Identical damping to v3 (ch0 = 0.029, lock 10.6 s)
+because in a quiet lab nothing ever demotes — the whole change is dormant until
+something goes wrong.
 
 **The problem.** Hazard 3 below: v3 reads `any_rail = any(ch.rail_fault ...)`
 and freezes all four channels. One OSEM losing its flag stops *all* damping, at
@@ -343,8 +348,9 @@ OSEM rest points is the fix for that, and it is a separate problem — see *On t
 bench* below and README § *Known open problem*.
 
 This is also the `auto-disable` block drawn in the original report's
-safety-checks diagram and never implemented in any version (`provenance.md`,
-*What the report does NOT contain*).
+safety-checks diagram and never implemented in v0–v3 — v4 is the first version
+to build it (`provenance.md`, *What the report does NOT contain*, and
+`research.md` § *Deliberately cut*, where it was ruled out before it was built).
 
 ---
 
@@ -443,9 +449,13 @@ problem, not a control problem, and no supervisor policy rescues it.
 
 ### v4 or v5?
 
-v4 is the reference: its structure matches v0–v3, so a diff against v3 shows
-exactly what auto-disable cost, and it is the pre-`fast-refault` behaviour.
-**v5 is the one to run and to modify.** Neither has been on hardware.
+v4 is the reference: its structure matches the deleted v0–v3, so a diff against
+`HEAD:osem.v3.py` shows exactly what auto-disable cost, and it is the
+pre-`fast-refault` behaviour. **v5 is the one to run and to modify.**
+
+Both have since run on the bench — 2026-08-04, logs in `bench/20260804/` and CSVs
+in `data/`, each reporting `LOCKED`. Those runs are not written up here yet and
+`BENCH_STATUS` still reads `untested` in both files.
 
 ---
 
@@ -466,7 +476,11 @@ with exactly four OSEMs: `GEOM` is four corners and `SENSE` is a 4×4 modal
 projection. There is no measured geometry or coil gain for channels 4–7, and
 inventing them would mean validating against fabricated physics — so `make check`
 **skips** it and says so. It is a bench artefact until the stepped-sine
-measurement in `CLAUDE.md` §2b produces the real numbers.
+measurement in `CLAUDE.md` item 2b produces the real numbers; `osem.v6.5.py` and
+`osem.v6.6.py` are the tools that take it.
+
+**It has never locked.** Nothing in the ladder table's v5.5 row is measured
+because there is nothing here that can measure it.
 
 **Channels 4–7 ship disabled.** Their sign is unknown, and a wrong-signed channel
 pumps its mode rather than damping it — ch2 is mounted the other way round and
@@ -493,8 +507,13 @@ in `FIXES`, and the harness picks it up with no other changes — `--list`,
 
 `FIXES` is load-bearing, not documentation. The suite reads it and **inverts the
 corresponding check**: claim `rail-threshold` and you must now arm the interlock
-at 20 mV of noise, where v0 is asserted never to. A version that claims a fix it
+at 20 mV of noise, where v0 was asserted never to. A version that claims a fix it
 did not make fails.
+
+A file that is **not** a controller declares `KIND = "sysid"` instead. `harness.py`
+reads that out of the source text without importing the module, lists it as a
+bench tool and never hands it to the simulator; `bench.py` prints its excitation
+parameters rather than gain vectors. That is what the four `osem.v6*.py` are.
 
 To be runnable a controller must expose:
 
@@ -512,8 +531,10 @@ and `Controller` must offer `.step(counts, volts, t, dt) -> state`,
 
 ## What the simulator can and cannot tell you
 
-It runs the **real** controller — every version above is imported and stepped,
-not reimplemented. Only `serial` and `DACController` are stubbed.
+It runs the **real** controller — every four-channel controller above is imported
+and stepped, not reimplemented. Only `serial` and `DACController` are stubbed.
+`osem.v5.5.py` and the `osem.v6*.py` tools are outside its reach and are skipped
+rather than approximated.
 
 **The control loop is not stepped at the wire rate.** `SAMPLE_HZ = 347.2` is what
 the serial link delivers, but `pyDAC.set_voltage()` discards up to 50 stream
@@ -553,17 +574,19 @@ reached long before the bottom one, ch2 first. So:
 - Q and drive amplitude are sliders because neither was characterised on the
   bench.
 
-Two of the three v3 fixes are still unconfirmed on hardware -- see the bench
-section below for exactly which. They are verified against a model of the plant
-and a faithful copy of the controller, which is enough to say the logic is right
-and not enough to say the suspension agrees.
+Two of the three v3 fixes — now carried by v4, v5 and v5.5 — are still unconfirmed
+on hardware; see the bench section below for exactly which, and `CLAUDE.md` item 4
+for the runs that would confirm them. They are verified against a model of the
+plant and a faithful copy of the controller, which is enough to say the logic is
+right and not enough to say the suspension agrees.
 
 ---
 
 ## Runtime state and hazards
 
-Condensed from `versions.md`, which was removed on 2026-08-03 — most of it restated
-what the code already shows. What survives is the state machine and the hazards.
+Condensed from `state.md`, which was removed on 2026-08-03 (git history) — most of
+it restated what the code already shows. What survives is the state machine and
+the hazards.
 
 ### The state machine
 
@@ -581,7 +604,8 @@ code rather than a copy. It gates actuation and is written to every CSV row.
 | `FAULT` | `CALIBRATING` | `all_clear` held `FAULT_CLEAR_SUSTAIN_S` (5 s) | `reset_for_recalibration()` all |
 
 - **`CALIBRATING`** — all gains forced to zero, outputs held at `BIAS`, accumulating
-  `bp_out²` per channel. `CALIBRATION_S` is 8 s on v0–v2, 20 s on v3. On exit it sets
+  `bp_out²` per channel. `CALIBRATION_S` was 8 s on v0–v2 and is **20 s on v3 onward**,
+  so 20 s on every controller in the tree (v4, v5, v5.5). On exit it sets
   `baseline_rms`, the reference *both* the runaway breaker and the lock detector use
   for the rest of the run. Re-measured on every entry, never carried over.
 - **`DAMPING`** — the only state that actuates. Per sample: schedule gains → check
@@ -637,7 +661,12 @@ bias and closes the log.
 
 ---
 
-## On the bench, 2026-08-03
+## On the bench, 2026-08-03 — measured on v1, v2 and v3
+
+**Those three files were deleted on 2026-08-04 and are in git history only. The
+measurements below are not:** they came off the hardware, they are the only
+hardware evidence in this file, and they are why v4 and v5 carry the fixes they
+do. Nothing here can be re-derived from the simulator.
 
 First hardware runs since v0. Board on `/dev/cu.usbserial-1120` (CH340), firmware
 `arduino.ino` streaming 8 ADC columns at ~348 Hz, coils on the remapped
@@ -708,3 +737,176 @@ transients. A shadow sensor pegged at either end is outside its linear range: th
 bandpass sees a flat top, the derivative sees a step, and the velocity estimate
 spikes exactly when the loop is asked to push hardest. Worth fixing before any
 more control work.
+
+---
+
+## On the bench, 2026-08-04
+
+Board on `/dev/cu.usbserial-1120` (CH340), firmware `arduino.ino` streaming eight
+ADC columns at ~348 Hz, coils on the rewired `DAC_CHANNELS = [1, 3, 5, 7]`.
+Console logs in `bench/20260804/`, CSVs in `data/` (gitignored).
+
+### Four channels, confirmed
+
+v4's first four-channel run closed the loop on coils 3, 5 and 7 for the first
+time since the rewiring, and settled three open questions at once:
+
+- **The coil map `[1, 3, 5, 7]` is correct for all four.** Only ch0 → DAC 1 had
+  ever been driven before.
+- **ch2's `+0.010` is confirmed on hardware.** It ran positive while the others
+  sat at `-0.030` and came out the *best-damping* channel of the four, ratio
+  0.01–0.03 against ch0's 0.08 — exactly what `provenance.md` Table 1 predicted,
+  and the fact the deleted modal v4 failed to rediscover automatically.
+- **Four channels lock faster than one**: 11.4 s against 14.7 s on the same rig
+  twenty minutes earlier.
+
+### The fault thrash, and the fix (v9)
+
+The runaway breaker was a **level** test — `env > 1.8 x baseline` sustained 2 s.
+A runaway is the loop pumping energy *in*, which means the envelope **growing**;
+a large but decaying envelope is the loop succeeding. The level test cannot tell
+them apart, so after a kick it trips on a timer all the way down the ringdown.
+
+Measured on v8, 240 s, three kicks — ten faults, envelope falling through every
+one of them:
+
+```
+re-engage t=71.0:  5.97 -> 5.25 -> 4.61 -> 4.84 -> [FAULT, ratio frozen]
+re-engage t=78.2:  3.00 -> 4.29 -> 4.28 -> 3.14 -> [FAULT]
+re-engage t=85.3:  2.72 -> 2.48 -> 2.07 -> 1.19 -> [FAULT]
+re-engage t=92.3:  1.64 -> 1.37 -> 0.85 -> ... -> 0.21   LOCKED
+```
+
+Only the re-engagement that happened to start at 1.64, just under the line,
+survived. **This defect was in every version back to v0**; v8 merely re-engaged
+fast enough to hit it repeatedly.
+
+v9's `runaway-trend` keeps the level test and adds a growth test: the envelope
+must also exceed itself `RUNAWAY_TREND_LAG_S` ago by `RUNAWAY_GROWTH_FRAC`.
+Both, sustained. Same three-kick schedule:
+
+| | DAMPING | FAULT | CALIB | faults | locks |
+|---|---|---|---|---|---|
+| v5 (control) | 23.9% | 8.3% | **67.7%** | 1 | 2 |
+| v8 | 15.1% | **60.5%** | 24.4% | **10** | 3 |
+| **v9** | **26.6%** | 36.4% | 37.0% | **4** | **4** |
+
+v9 re-locked after *every* kick (t = 31.3 / 83.8 / 151.3 / 205.3 s). The suite
+confirms it still trips on a genuinely pumped resonance, so the growth gate
+rejects ringdowns without letting a real runaway through.
+
+### v8 on hardware: one of two mechanisms transferred
+
+`warm-restart` fired repeatedly and correctly. **`fast-calib` did not** — it
+printed *"ran the full 20 s ceiling — the floor never settled"*. `CALIB_AGREE_TOL
+= 1.20` was tuned against simulator noise on one RNG seed and the bench floor
+does not satisfy it. It degrades safely to v5's estimator, which is the designed
+fallback, but the simulator's 20 s → 6 s saving **has not been demonstrated on
+hardware**.
+
+### Sensor centering: measured, and mostly not fixable with bias
+
+No OSEM rests at mid-scale. At bias 0.25 V: **600 / 631 / 708 / 677** counts
+against 511.5, so every channel clips its *top* rail first.
+
+Coil bias exerts a DC force, so it moves the rest position. Per-coil DC matrix,
+one coil stepped at a time, counts per volt:
+
+```
+         coil0  coil1  coil2  coil3  coil4  coil5  coil6  coil7
+   a0     -105   -107    -48    +19    -29    -21    -28    -26
+   a1      -49    -68    -33    +18     +5     +7     +4     +8
+   a2      +35    +66   +213   -141    -25    -22    -13    -26
+   a3      +36    +14    +58    -51     -1     -2     +2     -1
+   a4       +0     +2     +2     +1     +8     +8     +2     +1
+   a5       +4     +0     +0     -6     -0     -7     -1     +8
+   a6       +1     +4     +2     +3     +3     +3     +4     +6
+   a7       -0     +3     +1     +0     +1     -1     +6     +7
+```
+
+Two things fall out of that matrix:
+
+1. **Bias cannot centre these sensors.** The least-squares solution wants
+   −1.93 … **+3.77 V** of bias change and the DAC has 2.5 V total. Clamped and
+   quantised it gets total offset 570 → 320 counts. The rest is mechanical or
+   TIA offset.
+2. **Sensors a4–a7 are not connected.** No coil moves them by more than 8
+   counts/V — mean |response| is 4 within the 4–7 block against 66 within 0–3.
+   Coils 4–7 *do* work (they move a0–a3 by ~25 counts/V). Confirmed off the
+   bench: those OSEMs are not wired. **All eight-channel work is blocked on
+   that, not on code.** It is also why `v5.5` has never locked.
+
+Note a3: the common-mode sweep (all four coils together) read **+43** counts/V,
+but coil3 → a3 alone is **−51**. Opposite sign. Common-mode slopes are not
+per-coil slopes.
+
+### v7's bias trim, on hardware
+
+v7 trims each channel's bias one 0.25 V quantum at a time and keeps the step only
+if the *total* offset across all channels improved. Against a v5 control run with
+an identical kick schedule:
+
+| | start offset | end offset |
+|---|---|---|
+| **v7 (trim)** | 565 | **455** counts |
+| v5 (control) | 566 | 546 (drift) |
+
+Per channel, v7 start → end: a0 591 → **549**, a1 630 → **603**, a2 712 → **670**,
+a3 679 → 679. Lock times 11.2 / 11.0 / 12.4 s — the trim costs nothing.
+
+**Two steps were rejected and frozen**, both by the total-offset test: ch1 → 0.50 V
+(486 → 528) and ch3 → 1.25 V (538 → 561). Each helped its own channel and hurt the
+rig, which is the four-coils-two-DOF coupling the v6 rank check measured. That
+accept/revert is also what made a wrong `SLOPE_SIGN` survivable — see a3 above.
+
+### Actuation matrix
+
+`osem.v6.py` (stepped sine, one coil at a time) **passed its own rank check**:
+
+```
+singular values  1.000  0.154  0.058  0.043
+directions above 10%: 2      expected 2
+```
+
+Four coils drive two DOF, as the geometry says. But only **4 of 12 frequencies
+were usable** — ch2 railed in 17 of 48 steps — and of those four, the columns at
+0.3797 and 0.4805 Hz are near-identical across coils, i.e. ambient-dominated
+rather than drive-dominated. It is a valid measurement on a quarter of the sweep,
+not yet a matrix to build a modal controller on.
+
+`osem.v6.1.py` (multisine, all coils at once) **failed**: ch2 railed in all four
+passes, so `RANK CHECK` reported *"no frequency had all channels clean — nothing
+to check."* Its pass 1 also ran at 14.8 Hz effective against ~252 Hz for the
+others, which is why that pass's bins report ~4700 V/V against ~70 elsewhere —
+an aliasing artifact, not physics.
+
+Both failures share one cause: **open loop, nothing damping, so the optic rings
+up and a2 clips.** Closed-loop dither — the loop holding the optic in range while
+a known signal is injected on top — is the way past it, and `sysid.run()` already
+divides by the actually-commanded `u` rather than the intended amplitude, which is
+most of what that needs.
+
+### Transport defects found and fixed
+
+- **`DACController` demanded `READY` on the first line.** Opening the port resets
+  the board via DTR, but data sent *before* that reset is still buffered by the
+  OS and arrives first — so a board left streaming made a healthy rig fail
+  preflight with "did not send READY". Now scans up to 200 lines for it, the same
+  bounded-scan shape `set_voltage` already used, then issues `STOP` to land in a
+  known state.
+- **`sysid.Recorder` wrote 14 fields against a 21-field header** on the stepped
+  tools. `stepped()` hands `acquire()` a single coil, so `u` arrived length 1
+  while the header had one column per coil, shifting every sensor column left by
+  seven on read-back. It now scatters the driven value into its own slot and
+  holds the rest at bias. Multisine was never affected. The `v6_stepped4` and
+  `v65_stepped8` raw files recorded before this fix are misaligned; the in-run
+  reports are not, since the lock-in runs off in-memory arrays.
+
+### Still open
+
+1. **Connect a4–a7.** Everything eight-channel waits on it, including modal.
+2. **v9's remaining 36% in FAULT** is `FAULT_CLEAR_SUSTAIN_S = 5 s` x 4 recoveries
+   plus the gain ramp — no longer thrash. Gating re-engagement on amplitude rather
+   than a fixed 5 s would cut it further.
+3. **Bench-tune `CALIB_AGREE_TOL`** from the nine logs already recorded.
+4. **v7's bias trim is not in v9.** They are parallel branches off v5.

@@ -219,11 +219,17 @@ VERSION_TAG = "v4"
 FIXES = ("saturation-latch", "rail-threshold", "runaway-baseline", "auto-disable")
 
 # --- bench status ---
-# Never been on hardware. The three inherited fixes and the new auto-disable
-# are verified against the simulator only -- safe-looking, still unconfirmed.
-# Note the simulator CAN exercise auto-disable honestly (occluding one OSEM is
-# a thing it models directly), unlike the -0.040 instability which it cannot.
-BENCH_STATUS = "untested"
+# Ran on hardware 2026-08-04. ch0 alone locked in 14.7 s; all four locked in
+# 11.1 s and rode three kicks, faulting and RECOVERING every time -- which is
+# the saturation-latch fix confirmed under a real disturbance, the thing v2
+# latched on. The rewired coil map [1,3,5,7] was validated on the same run, and
+# ch2's +0.010 came out the best-damping channel of the four, as Table 1 said.
+#
+# Still unconfirmed: auto-disable itself. It triggers on a RAILED sensor, and a
+# kick produces runaway/saturation, which is deliberately still global -- so no
+# bench run has demoted a channel yet. Verified against the simulator only,
+# which models occlusion directly. See versions.md section "On the bench".
+BENCH_STATUS = "validated"
 
 ENABLE_CHANNEL = [True, True, True, True]
 

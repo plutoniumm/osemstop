@@ -218,7 +218,10 @@ def run(label, seconds, enable, steady, ki=None, kd=None, occlude_at=None,
     `sim.kick()` applies from the TUI. Note it also draws two random numbers for
     the pitch/yaw split, so a run with a shock and a run without diverge in the
     noise stream after it -- the no-shock run is a reference, not an exact
-    counterfactual.
+    counterfactual. A LIST of `(t, dv)` pairs, in time order, schedules several:
+    the baseline-reuse checks need a second kick after the loop has recovered
+    from the first, because "it re-engaged" and "the interlocks still work
+    against the baseline it re-engaged on" are separate claims.
 
     `occlude_at` is `(idx, t)`: blind one OSEM from `t` to the end of the run.
     `occlusions` is the general form, `[(idx, t_on, t_off_or_None), ...]`, and
@@ -250,7 +253,10 @@ def run(label, seconds, enable, steady, ki=None, kd=None, occlude_at=None,
     prev = sim.ctl.state
     peak = [0.0] * 4
     t_rail = None
-    shock_fired = False
+    # one (t, dv) pair or a list of them, consumed in time order
+    sched = ([] if shock_at is None
+             else [tuple(shock_at)] if not isinstance(shock_at[0], (list, tuple))
+             else [tuple(s) for s in shock_at])
     # Baselines as they were at the END OF THE FIRST CALIBRATION. Reading
     # `Channel.baseline_rms` after the run instead reports whatever the LAST
     # calibration produced, which for a version that faulted and re-calibrated
@@ -258,6 +264,10 @@ def run(label, seconds, enable, steady, ki=None, kd=None, occlude_at=None,
     # once made a version read 58.6% on the calibration-skew check while running
     # v3's calibration code byte for byte.
     baseline0 = None
+    # When that first calibration ENDED. `CALIBRATION_S` is a fixed duration on
+    # v4/v5 and a ceiling on a version claiming `fast-calib`, so how long
+    # calibration actually took is an observation now, not a constant.
+    t_calib = None
     # saturated_flag anywhere, any sample: a saturation trip is what latches
     # FAULT in v0/v1/v2, so "did this scenario saturate?" decides whether it is
     # testing the runaway path or the saturation path.
@@ -295,9 +305,8 @@ def run(label, seconds, enable, steady, ki=None, kd=None, occlude_at=None,
             sim.occlude[occlude_at[0]] = True
         for oi, t_on, t_off in occlusions:
             sim.occlude[oi] = sim.t >= t_on and (t_off is None or sim.t < t_off)
-        if shock_at is not None and not shock_fired and sim.t >= shock_at[0]:
-            sim.kick(shock_at[1])
-            shock_fired = True
+        while sched and sim.t >= sched[0][0]:
+            sim.kick(sched.pop(0)[1])
         # Kicks arrive from the TUI's input thread; apply them here so nothing
         # touches the plant's state concurrently with step().
         while PENDING_KICKS:
@@ -362,6 +371,7 @@ def run(label, seconds, enable, steady, ki=None, kd=None, occlude_at=None,
                     dev_blind[i] = max(dev_blind[i], abs(float(c.out) - bias[i]))
         if baseline0 is None and all(c.baseline_rms for c in sim.ctl.channels):
             baseline0 = [float(c.baseline_rms) for c in sim.ctl.channels]
+            t_calib = sim.t
             if until_baseline:
                 break
         if sim.t > 12:
@@ -382,6 +392,7 @@ def run(label, seconds, enable, steady, ki=None, kd=None, occlude_at=None,
                 state=sim.ctl.state, sat_ever=sat_ever, out_dev=out_dev,
                 reengaged=reengaged,
                 pct_damping=100.0 * state_n.get('DAMPING', 0) / max(sum(state_n.values()), 1),
+                t_calib=t_calib,
                 rearms=rearms, t_demote=t_demote, t_rearm=t_rearm,
                 min_actuating=min_actuating, dev_blind=dev_blind,
                 demotes=int(getattr(sim.ctl, "demote_count", 0)),
@@ -621,11 +632,13 @@ def suite(path):
                 ki=info["ki"], kd=info["kd"], until_baseline=True)
     base0 = clean["baseline0"]
     skew, worst_t = 0.0, None
+    took = {}
     for t_shock in (2.0, 4.0, 6.0):
         sh = run(f"one shock at t={t_shock:.0f}s", 40, ship_en, shipped,
                  ki=info["ki"], kd=info["kd"], shock_at=(t_shock, 6.0),
                  until_baseline=True)
         base = sh["baseline0"]
+        took[t_shock] = sh["t_calib"]
         s = max(abs(base[i] / base0[i] - 1.0) for i in range(4) if base0[i] > 0)
         if s > skew:
             skew, worst_t = s, t_shock
@@ -637,6 +650,43 @@ def suite(path):
     else:
         check("KNOWN GAP runaway-baseline: one shock in the calibration window "
               "skews the baseline", skew > 0.35, where)
+
+    # ---- 6b. what that calibration COSTS ------------------------------------
+    # Time-to-lock is calibration + lock-after-gain, and on v4/v5 the first term
+    # is a fixed CALIBRATION_S = 20 s with the gain forced to zero -- about 65%
+    # of the wall clock, measured on the bench 2026-08-03/04 (lock at t ~ 31 s on
+    # four channels, 20 s of it calibrating). `fast-calib` makes CALIBRATION_S a
+    # CEILING: sub-windows accumulate and calibration ends as soon as the
+    # trailing ones say the floor has stopped moving.
+    #
+    # Both runs are already in hand from the sweep above, so these two checks are
+    # free. They are the two halves of the claim and neither is sufficient alone:
+    # stopping early is worthless if it stops early on a transient, and refusing
+    # to stop early is what v4/v5 already do.
+    calib_s = float(S.osem.CALIBRATION_S)
+    if "fast-calib" in fixed:
+        check("FIXED fast-calib: a quiet lab does not pay the whole calibration "
+              "window", clean["t_calib"] is not None and clean["t_calib"] <= calib_s * 0.5,
+              f"{clean['t_calib']:.2f}s of a {calib_s:.0f}s ceiling"
+              if clean["t_calib"] else "never calibrated")
+    else:
+        check("calibration always costs the full CALIBRATION_S",
+              clean["t_calib"] is not None and clean["t_calib"] >= calib_s - 0.2,
+              f"{clean['t_calib']:.2f}s of {calib_s:.0f}s"
+              if clean["t_calib"] else "never calibrated")
+    # The safety half, asserted for EVERY version: a shock inside the window must
+    # never be mistaken for a settled noise floor. t = 2 s and t = 4 s are the two
+    # sweep points that land before the earliest exit any version can take, so
+    # this is the same transient in the same place for all of them. A version
+    # that stopped early here would be storing the ringdown as its floor, which
+    # de-sensitises the runaway breaker AND makes LOCKED easier to declare.
+    early_on_shock = [t for t in (2.0, 4.0)
+                      if took[t] is None or took[t] < calib_s - 0.2]
+    check("a transient inside the window is never read as a settled floor",
+          not early_on_shock,
+          " ".join(f"shock@{t:.0f}s -> {took[t]:.2f}s" for t in (2.0, 4.0)
+                   if took[t] is not None)
+          + f" of a {calib_s:.0f}s window")
 
     # ---- 7. graceful degradation: a blind axis drops out, the rest carry on --
     # Only v4 claims this, and only v4 has the `healthy` attribute the run()
@@ -755,6 +805,89 @@ def suite(path):
               f"{hard['pct_damping']:.0f}% of samples in DAMPING, "
               f"{hard['faults']} fault(s), lock "
               f"{'%.1fs' % hard['lock'] if hard['lock'] else 'never'}")
+
+    # ---- 9. what coming back from a fault costs ------------------------------
+    # Section 8 is the fault that keeps happening. This is the other one: a large
+    # transient after the loop has been damping happily for a long time. Every
+    # version faults on it; what differs is the price of coming back.
+    #
+    #   v0..v5        FAULT_CLEAR_SUSTAIN_S + CALIBRATION_S = 25 s of open loop,
+    #                 and the window it then measures is full of the ringdown the
+    #                 kick left behind (tau = Q/(pi*f0) ~ 16 s, comparable to the
+    #                 window), so the new floor comes out INFLATED. That is not
+    #                 only slow: an inflated floor de-sensitises the runaway
+    #                 breaker and makes LOCKED -- the run's deliverable -- easier
+    #                 to declare.
+    #   warm-restart  re-engage on the baseline in hand, which the loop had just
+    #                 spent the whole engagement demonstrating was right.
+    #
+    # TWO kicks, not one, because "it re-engaged" and "the interlocks still work
+    # against the baseline it re-engaged on" are separate claims and the second
+    # one needs a disturbance after the recovery. t = 45 s and t = 90 s leave
+    # every version on the ladder an engagement of at least FAST_REFAULT_S before
+    # each fault, so this is the healthy-engagement case for all of them and not
+    # v5's `fast-refault` under another name.
+    w = run("two 15 V/s kicks, at t=45s and t=90s", 115, ship_en, shipped,
+            ki=info["ki"], kd=info["kd"], shock_at=[(45.0, 15.0), (90.0, 15.0)])
+    if "warm-restart" in fixed:
+        check("FIXED warm-restart: a fault after a healthy engagement re-engages "
+              "instead of re-measuring", w["reengaged"] >= 2,
+              f"{w['reengaged']} straight-to-DAMPING of {w['recovered']} "
+              f"recovery(ies), {w['faults']} fault(s)")
+        check("FIXED warm-restart: the carried baseline still arms the breaker "
+              "and still gates LOCKED",
+              w["faults"] >= 2 and w["lock"] is not None,
+              f"the second kick still tripped it ({w['faults']} faults) and it "
+              f"re-locked in {w['lock']:.1f}s on the carried baseline"
+              if w["lock"] else f"{w['faults']} fault(s), never re-locked")
+    else:
+        check("every fault pays a full re-calibration, transient or not",
+              w["reengaged"] == 0 and w["recovered"] >= 2,
+              f"{w['recovered']} recovery(ies), {w['reengaged']} of them straight "
+              f"to DAMPING, lock {'%.1fs' % w['lock'] if w['lock'] else 'never'}")
+
+    # A RAIL is the exception, and it has to be: the interlock fires because the
+    # SENSOR stopped reporting, and a floor measured through a sensor that has
+    # since failed is suspect with it -- the OSEM's DC operating point may simply
+    # have moved, which changes the floor without changing anything about the
+    # lab. All four blind and then back is the one scenario that faults the rig
+    # on a rail and still lets it recover, so the path is reachable at all.
+    rr = run("all four blind t=30..45s, then back", 75, ship_en, shipped,
+             ki=info["ki"], kd=info["kd"],
+             occlusions=[(i, 30.0, 45.0) for i in range(4)])
+    if "warm-restart" in fixed:
+        check("FIXED warm-restart: a RAIL-caused fault still re-calibrates from "
+              "scratch", rr["reengaged"] == 0 and rr["recovered"] > 0,
+              f"{rr['recovered']} recovery(ies), {rr['reengaged']} of them "
+              f"straight to DAMPING")
+    elif "fast-refault" in fixed:
+        # Not hypothetical. v5's fast-refault keys only on how long the last
+        # engagement lasted, so a rail 10 s after engaging reuses the floor
+        # measured through the sensor that has just failed. Asserted from the
+        # broken side, like every other defect here, so it is visible rather than
+        # argued -- it is what `warm-restart` had to carve out.
+        check("KNOWN GAP fast-refault: it reuses the baseline even after a RAIL",
+              rr["reengaged"] > 0,
+              f"{rr['reengaged']} straight-to-DAMPING of {rr['recovered']} "
+              f"recovery(ies) -- the failed sensor's floor is kept")
+    else:
+        check("without fast-refault a rail fault re-calibrates like any other",
+              rr["reengaged"] == 0 and rr["recovered"] > 0,
+              f"{rr['recovered']} recovery(ies)")
+
+    # And the reuse budget is a real bound. drive_amp 3.5 clips over half the
+    # samples -- a sensor problem no supervisor policy rescues -- so the loop
+    # faults on contact, runs MAX_BASELINE_REUSE out and pays for a window
+    # anyway. Without this, "it re-engages" would also pass for a version that
+    # could never be made to re-measure at all.
+    if "fast-refault" in fixed:
+        bud = run("drive_amp=3.5, a disturbance it cannot damp", 120, ship_en,
+                  shipped, ki=info["ki"], kd=info["kd"], plant={"drive_amp": 3.5})
+        check("the baseline-reuse budget is a bound -- it does re-calibrate in "
+              "the end",
+              bud["reengaged"] >= 1 and bud["recovered"] > bud["reengaged"],
+              f"{bud['reengaged']} reuse(s) of {bud['recovered']} recovery(ies), "
+              f"MAX_BASELINE_REUSE={getattr(S.osem, 'MAX_BASELINE_REUSE', '-')}")
 
 
 # --------------------------------------------------------------------------

@@ -246,8 +246,14 @@ def run(path, port):
     else:
         fixes = ", ".join(getattr(mod, "FIXES", ())) or "none"
         enabled = [i for i, v in enumerate(mod.ENABLE_CHANNEL) if v]
-        print("\n  %s   fixes claimed: %s   calibration: %.0fs"
-              % (tag, fixes, mod.CALIBRATION_S))
+        # CALIBRATION_S is a fixed duration on v4/v5 and a CEILING on a version
+        # claiming `fast-calib`, which stops as soon as the noise floor settles.
+        # Printing the same "20s" for both tells an operator to expect a quiet
+        # stretch that may not come, so say which one this is.
+        print("\n  %s   fixes claimed: %s   calibration: %s%.0fs"
+              % (tag, fixes,
+                 "up to " if "fast-calib" in getattr(mod, "FIXES", ()) else "",
+                 mod.CALIBRATION_S))
         print("  channels driving: %s of %d"
               % (",".join("ch%d" % i for i in enabled) or "none",
                  len(mod.ENABLE_CHANNEL)))

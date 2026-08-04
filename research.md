@@ -1,7 +1,16 @@
 # Research queue
 
 Ranked by impact × confidence × cost, **in dependency order** — each item gated by the ones
-above. Item 1 is **done**; nothing below it is started. Every number came from `harness.py`.
+above. Item 1 is **done**. Item 2's one unmet prerequisite — measuring the actuation matrix —
+is now **built**: `sysid.py` plus the four `osem.v6*.py` bench tools implement exactly the
+stepped-sine / interleaved-multisine measurement this file recommends below, and they have
+been run on the bench (raw records in `data/`, 2026-08-04). Nothing else below item 1 is
+started. Every number here came from `harness.py` unless it says otherwise.
+
+Note on version references throughout: **`osem.v0.py` … `osem.v3.py` were deleted from the
+working tree on 2026-08-04** and survive only in git history (`git show HEAD:osem.v0.py`).
+Numbers attributed to them below were measured while they were still present and are kept
+because they are the reference point everything after them is measured against.
 
 
 ## The measurement everything else follows from
@@ -35,17 +44,24 @@ injection — 0.0089 / 0.0087 / 0.0094 at 20 / 5 / 0 mV of sensor noise. It is
 ## 1. Fix the suite for the rigid-body plant — **DONE**
 
 Was 13 failures, 7 of them *stale assertions* encoding the old four-independent-oscillator
-plant; nothing else could be validated while the test bed lied. Now 88 checks, **83 pass,
-5 fail, ~120 s**; v0–v3 green (18 / 16 / 18 / 18). All 5 failures were the since-deleted
-modal v4, all real: no damping (ratios 0.24–0.77), never locks, one fault in a quiet lab,
-I term never accumulates so P-dominance has nothing to compare — item 2. Three assertions
-rewritten in `harness.py`; no controller touched.
+plant; nothing else could be validated while the test bed lied. Three assertions rewritten
+in `harness.py`; no controller touched.
+
+When the fix landed the suite was 88 checks, **83 pass, 5 fail**, with v0–v3 green
+(18 / 16 / 18 / 18) and all 5 failures on the since-deleted modal v4, all real: no damping
+(ratios 0.24–0.77), never locks, one fault in a quiet lab, I term never accumulates so
+P-dominance has nothing to compare — item 2.
+
+**Today `make check` is 175 passed, 0 failed.** v0–v3 are gone, so the suite now runs only
+what the simulator can drive: v4 (29 checks) and v5 (30). `osem.v5.5.py` is skipped — eight
+channels against a 4-OSEM plant — and the four `osem.v6*.py` are skipped as bench tools that
+close no loop.
 
 | Stale assertion | Replaced by |
 |---|---|
-| *disabled channels stay at their baseline* | Split: a disabled channel never actuates (peak `\|out − bias\|` = 0), but its ratio must **fall** — one rigid body, so damping ch0 drains the whole mass (`provenance.md` §3). v0: driven ch0 0.197, undriven 0.265 / 0.323 / 0.355, driven still flattest. |
+| *disabled channels stay at their baseline* | Split: a disabled channel never actuates (peak `\|out − bias\|` = 0), but its ratio must **fall** — one rigid body, so damping ch0 drains the whole mass (`provenance.md` §3). Measured on v0, since deleted: driven ch0 **0.188**, undriven 0.333 / 0.316 / 0.253, driven still flattest (`versions.md` § *The ladder*, re-measured 2026-08-03; the pre-re-measurement figures were 0.197 and 0.265 / 0.323 / 0.355). |
 | *a runaway trip auto-recovers* | Four on with ch2 inverted no longer runs away: the other three out-damp it (net `gain_i · COIL_GAIN_i` −0.1415 → −0.0419, a third of the damping surviving), so the optic sits near full amplitude asking more than its ±0.25 V clip and trips on **ch3 saturation**, t = 10.74 s, `sat_streak` = 31 — defect #1, which latches. Asserted broken-side for v0/v1/v2, fixed-side for v3. Runaway gets its own scenario (ch2 alone, wrong-signed at half magnitude: slow enough to trip on ratio, actuator peaking 0.055–0.112 V of its 0.25 V clip) that every version must recover from — for un-fixed ones that recovery *is* proof nothing saturated. |
-| *KNOWN GAP / FIXED runaway-baseline* | The 18% line was calibrated on the old plant and separates nothing. Swept one shock across the calibration window: worst case 45.3% (v0/v1/v2) vs 25.0% (v3), line now 35% (`versions.md` § v3). One fixed shock time ranks them backwards for late shocks, so the check sweeps. |
+| *KNOWN GAP / FIXED runaway-baseline* | The 18% line was calibrated on the old plant and separates nothing. Swept one shock across the calibration window: worst case **39.3%** (v0/v1/v2) vs **19.7%** (v3, and v4/v5 which inherit the fix), line now 35% (`versions.md` § v3). One fixed shock time ranks them backwards for late shocks, so the check sweeps. (Those two numbers were re-measured 2026-08-03 once scripted shocks got their own RNG; the 45.3% / 25.0% pair this row used to quote came from runs where the shock *direction* depended on the sample rate and is retired.) |
 
 All simulator, rigid-body plant, **never hardware**.
 
@@ -54,7 +70,7 @@ All simulator, rigid-body plant, **never hardware**.
 
 The main **beyond-PID** direction, tried once — by the *original* `osem.v4.py`, the modal
 controller **deleted 2026-08-03**, in git history only (today's `osem.v4.py` is a different
-file: v3 plus `auto-disable`). It never damped. It learned the modal basis with no geometry
+file: v3 plus `auto-disable`, v3 itself having been deleted a day later). It never damped. It learned the modal basis with no geometry
 input ("2 of 4 modes carry real motion, 98.8% / 1.2%", from the calibration covariance) and
 failed at one point: recovering the actuation matrix. Truth (LONG row, normalised)
 `[−0.59, −0.45, +2.45, −0.51]` — ch2 4× the others, opposite sign.
@@ -82,6 +98,25 @@ fall out, so the sign never depends on guessing a quadrature. It need not be onl
 on the bench that is one afternoon's measurement with no convergence risk, and it is what
 the online system ID kept getting wrong.
 
+**Status: the measurement is built and has been run; the modal controller has not.**
+`sysid.py` holds the lock-in and the reporting, and four thin front-ends drive it — none of
+them a controller, all declaring `KIND = "sysid"`, so `harness.py` and `bench.py` skip them:
+
+| | excitation | coils |
+|---|---|---|
+| `osem.v6.py` | stepped sine, one coil at a time | 4 |
+| `osem.v6.1.py` | continuous multisine, interleaved frequency bins, rotated over 4 passes | 4 |
+| `osem.v6.5.py` | stepped sine | 8 |
+| `osem.v6.6.py` | continuous multisine, rotated over 8 passes | 8 |
+
+Both methods measure magnitude *and* phase from the lock-in, so nothing depends on guessing
+a quadrature — cause 1 above. The multisine pair addresses cause 2 differently: each coil
+owns its own comb of exact frequency bins, so the input cross-spectrum is diagonal by
+construction and there is no near-singular matrix to invert. `report()` checks the rank of
+the result (2 DOF for four coils, 4 for eight), which is an independent test of the
+measurement rather than of the optic. Raw records from the bench are in `data/`
+(2026-08-04); the recovered matrices are not written up in this file yet.
+
 **Done when:** the recovered matrix matches ground truth in sign and to ~20% in magnitude,
 and the modal controller damps on the bench.
 
@@ -90,7 +125,8 @@ and the modal controller damps on the bench.
 
 **The only item that needs hardware, and it gates 4 and 5.**
 
-Every gain in the repo rests on one sentence in `osem.v0.py`'s docstring: *"onset of
+Every gain in the repo rests on one sentence in the docstring of `osem.v0.py` — a file
+deleted on 2026-08-04 and now readable only as `git show HEAD:osem.v0.py`: *"onset of
 instability/rail at gain=-0.04."* No data records it; `provenance.md`, two days later, never
 mentions it — no sweep, no −0.04, no rail-onset trace. The simulator provably cannot
 reproduce it, the plant being linear: more negative Kp is monotonically more damping to
@@ -156,8 +192,8 @@ one shock inside the window. Worst-channel skew from a single 6 V/s kick:
 | 15 s | 3.0 s | 57.9% |
 | **20 s** | **4.0 s** | **20.1%** |
 
-The harness asserts < 35% and v0 un-fixed reaches 39.3%, so every shorter window fails, some
-worse than the defect being fixed.
+The harness asserts < 35% and the un-fixed baseline — measured on v0 before it was deleted —
+reaches 39.3%, so every shorter window fails, some worse than the defect being fixed.
 
 Cause: **ringdown**. At Q = 50, f0 ~ 1 Hz, tau = Q/(pi*f0) ~ **16 s**. Median-of-sub-windows
 helps only when *some* sub-windows are clean, i.e. window comparable to tau; at 10 s the
@@ -204,20 +240,31 @@ be the existing accumulator left running. Three that work:
 |---|---|
 | **Actuator deadband / rate-limit fix** | Sets the current floor (0.009 V above; identical at 0 / 5 / 20 mV sensor noise, so not the sensor). Cheap, firmware-only — but it only matters near 0.009 and you are at 0.23. Premature. |
 | **Safe Bayesian optimisation for gain tuning** | Good fit: expensive trials, few parameters, a hard safety constraint (SafeOpt-style methods explore without violating one). The right tool *after* item 3 says where the constraint is. |
-| **CUSUM / change-point interlocks** | Principled fix for both threshold defects — #2 "3 counts, 250 consecutive samples", #3 "2 s RMS > 1.8 × an 8 s baseline" — which test an instantaneous threshold instead of accumulating evidence. v3's are better *thresholds*; this is the better *kind of thing*. Not urgent. |
+| **CUSUM / change-point interlocks** | Principled fix for both threshold defects — #2 "3 counts, 250 consecutive samples", #3 "2 s RMS > 1.8 × an 8 s baseline" — which test an instantaneous threshold instead of accumulating evidence. The v3 replacements now carried by v4/v5/v5.5 are better *thresholds*; this is the better *kind of thing*. Not urgent. |
 | **Feedforward / Wiener filtering, LQG / H∞, adaptive notch (LMS), ICA** | Wait on a validated plant model = item 2. Wiener feedforward from a seismometer is the detector standard, and strongest of these once a witness sensor exists. |
 | **Reinforcement learning for the damping law** | Sample-hungry on hardware, no stability guarantee, hard safety constraint. Sim-to-real is the usual escape, but this simulator's one documented blind spot is the −0.04 instability — an agent trained on it would learn that more gain is always better, the lesson you least want it to learn. |
 
 **`ENABLE_CHANNEL` vs the report, and `auto-disable`.** Only the first is written down —
-`versions.md` § v1 and `README.md` § "Channel mapping": v0's "only ch0 is validated"
-predates `provenance.md` §4 by two days, and v1–v3 ship all four channels on.
-`auto-disable` appears once in the report's block-diagram Safety Checks box next to `lock
-detect`, and in no controller (`grep auto-disable osem.v*.py` is empty) — drawn and never
-implemented, like `zero-crossing → f̂` (item 4). Correction: this entry once listed "the
-report's 0.085 Hz error" and credited all three to `versions.md`; both wrong. `versions.md`
-contains neither `0.085` nor `auto-disable`, and `0.085` occurs nowhere in the repo or in
-`provenance.md`'s text layer — that error has left no record, so re-derive it from the report
-before acting. No action needed until wanted.
+`versions.md` § v1: v0's "only ch0 is validated" predates `provenance.md` §4 by two days,
+and v1 onward ship all four channels on.
+
+`auto-disable` was cut here on the grounds that it appeared once in the report's
+block-diagram Safety Checks box next to `lock detect` and nowhere else — drawn and never
+implemented, like `zero-crossing → f̂` (item 4). **That entry is out of date: it was ruled
+out then and has since been built.** `osem.v4.py` implements it — a rail demotes that
+channel alone and a global `FAULT` is reserved for dropping below
+`MIN_HEALTHY_CHANNELS = 1` — and `osem.v5.py` and `osem.v5.5.py` inherit it; all three list
+`auto-disable` in `FIXES`. `harness.py` reads that string and gates a whole section of
+checks on it (a blind axis demoted rather than escalated, the quorum, per-channel re-arming,
+and a rail during calibration still being global). It is written up in `versions.md` § v4,
+and `CLAUDE.md` item 4 is the bench test it still needs — no version has exercised it on
+hardware. `zero-crossing → f̂` is now the only drawn-and-never-implemented block left.
+
+Correction: this entry once listed "the report's 0.085 Hz error" and credited all three to
+`versions.md`; both wrong. `0.085` occurs nowhere in the repo or in `provenance.md`'s text
+layer — that error has left no record, so re-derive it from the report before acting.
+(`auto-disable` was also absent from `versions.md` when this correction was written; it is
+documented there now, as § v4 above records.) No action needed until wanted.
 
 ## Where learning belongs
 

@@ -23,21 +23,44 @@ osem.vN.py  (control law, safety, logging)  <-- analogRead ------------'
 
 ## 0. Which version to run
 
-Six controllers, `osem.v0.py` … `osem.v5.py`. They are **not** patches — each is
-a complete standalone program, and a higher number does **not** automatically mean
-better. `make list` prints the table; `versions.md` § *The ladder* has the numbers.
+Three controllers — `osem.v4.py`, `osem.v5.py`, `osem.v5.5.py` — plus four
+`osem.v6*.py` **bench tools that are not controllers at all**. The controllers are
+**not** patches: each is a complete standalone program, and a higher number does
+**not** automatically mean better. `make list` prints the table; `versions.md`
+§ *The ladder* has the numbers.
 
-- **`osem.v5.py` — run this one.** Same behaviour as v4 plus `fast-refault`, which
-  keeps it damping instead of re-calibrating under a disturbance that is still there.
-- **`osem.v4.py`** — the pre-`fast-refault` reference; its structure matches v0–v3.
-- **`osem.v0.py`** — the frozen baseline: one channel, P-only, the 2026-07-15
-  configuration (ch0 at Kp = −0.030, real damping, no rail clipping).
+- **`osem.v9.py` — run this one.** Four channels, full PID, all three defects
+  fixed, plus `auto-disable`, `fast-refault`, `fast-calib`, `warm-restart` and
+  `runaway-trend`. That last one matters most: the runaway breaker was a *level*
+  test, so it tripped over and over on a decaying post-kick ringdown — a defect
+  present in every version back to v0. On the bench 2026-08-04 the fix took three
+  kicks from 10 faults to 4, and it re-locked after every one.
+- **`osem.v8.py`** — v9 without `runaway-trend`. Keep for A/B; it thrashes.
+- **`osem.v7.py`** — a parallel branch off v5 carrying **`bias-trim`**, which is
+  *not* in v8/v9. It trims per-channel coil bias toward mid-scale and took total
+  sensor offset 570 → 449 counts on hardware. Folding it into v9 is open work.
+- **`osem.v5.py`** — the base v7 and v8 both branched from.
+- **`osem.v4.py`** — the pre-`fast-refault` reference. Same law, one behavioural
+  difference, and the structure that the deleted v0–v3 had.
+- **`osem.v5.5.py`** — the eight-OSEM commissioning build. Channels 4–7 ship
+  disabled and their sign is unknown; `CLAUDE.md` item 2 is the bring-up order.
+  It has never locked, and the simulator cannot test it.
+- **`osem.v6.py` / `v6.1` / `v6.5` / `v6.6`** — actuation-matrix measurement, four
+  or eight coils, stepped sine or multisine. They damp nothing and close no loop.
 
-Each version declares a bench status and `make run` **asks for confirmation on
-anything not `validated`**: v0 is `validated` (confirmed on hardware with a scope),
-v1 is `reported` (documented, but that file has never run), v2–v5 are `untested`.
-Those statuses are stale — v1, v2 and v3 have all since run on ch0, 2026-08-03; see
-`versions.md` § *On the bench*.
+**`osem.v0.py` … `osem.v3.py` were deleted on 2026-08-04** and are in git history
+only (`git show HEAD:osem.v0.py`). v0 was the frozen, scope-validated baseline —
+one channel, P-only, the 2026-07-15 configuration — so anything telling you to
+"run v0" is out of date; v5 is the starting point now, and the v0-era hardware
+evidence is in `versions.md` § *On the bench, 2026-08-03*.
+
+Each controller still declares a `BENCH_STATUS` (`untested` on v4, v5 and v5.5)
+and `make list` prints it, but **`bench.py` no longer gates on it** — the statuses
+went stale faster than they were updated, and a gate whose data is wrong only
+teaches you to click through it. The preflight and the printed gain vectors are
+the load-bearing checks, because both come from the file that is about to run.
+Treat the constants as history: v1/v2/v3 ran 2026-08-03 and v4/v5 ran 2026-08-04
+while still declaring otherwise (`versions.md` § *On the bench*).
 
 ## 1. Flash the Arduino
 
@@ -82,10 +105,10 @@ make run V=v5                  # or bare `make run` for a picker
 `make run` **preflights** the port — opening it through the real `DACController`,
 which raises unless the sketch answers `READY`, so "wrong port" and "board not
 flashed" are distinguishable before the optic is swinging — then prints the bench
-status and the gain vectors it is about to apply, asks for confirmation on anything
-not `validated`, and hands over to that version's `main()`. The controller then
-calibrates with the gain at zero (**8 s on v0–v2, 20 s on v3–v5**) before engaging:
-the long quiet stretch at the start of a v3+ run is that calibration, not a hang.
+status and the gain vectors it is about to apply, and hands over to that version's
+`main()`. The controller then calibrates with the gain at zero — **20 s on every
+controller in the tree** — before engaging: the long quiet stretch at the start of
+a run is that calibration, not a hang. (The deleted v0–v2 calibrated for 8 s.)
 
 ## 4. What you should see
 
@@ -98,8 +121,9 @@ the long quiet stretch at the start of a v3+ run is that calibration, not a hang
 The **lock time is the deliverable**. A run that never prints `LOCKED` did not
 work, whatever the traces look like.
 
-`data/<YYYYMMDD_HHMMSS>_fast_lock.csv` gets 12 columns per channel plus `time_s`
-and `state` — 13 on v4/v5, which add `healthy`. It is line-buffered and flushed
+`data/<YYYYMMDD_HHMMSS>_fast_lock.csv` gets 13 columns per channel plus `time_s`
+and `state` — the 13th is `healthy`, added by v4 and kept by v5 and v5.5; the
+deleted v0–v3 wrote 12. It is line-buffered and flushed
 every 200 rows, so it **survives an unclean kill** and is enough to reconstruct the
 run offline. `data/` is gitignored.
 
@@ -137,9 +161,11 @@ cleanly; `-0.040` does not. **Do not raise gain past `-0.035`** (the `CAPTURE_GA
 already in use, itself not independently validated) **unattended.**
 
 Be aware: **that −0.04 limit has no recorded evidence anywhere.** It is one
-sentence in `osem.v0.py`'s docstring, written two days before a report that never
-mentions it, and the simulator provably cannot reproduce it. Treat it as real and
-uncharacterised — `research.md` item 3 is the bench task to characterise it.
+sentence in the docstring of `osem.v0.py` — deleted 2026-08-04, readable as
+`git show HEAD:osem.v0.py` — written two days before a report that never mentions
+it, and the simulator provably cannot reproduce it. Treat it as real and
+uncharacterised — `research.md` item 3 and `CLAUDE.md` item 5 are the bench task
+to characterise it.
 
 **`STEADY_GAIN[2] = +0.010` is positive** where the others are negative. That is not
 a typo: A2 damped *fastest* of the four at that gain, which only holds if its coil or
@@ -160,14 +186,18 @@ The state machine is `CALIBRATING → DAMPING → FAULT → (auto-recover) →
 CALIBRATING`. A fault zeroes all gains and holds every output at bias. If
 everything stays clear for 5 s it re-calibrates and resumes on its own.
 
-**In v0–v3 a rail on any one OSEM faults the whole rig.** v4 and v5 demote that
-channel only (`ch1:DOWN`), keep the rest damping, and re-arm it 2 s after the sensor
-comes back — a global fault needs *every* channel blind. A rail during `CALIBRATING`
-is global in every version; you cannot calibrate a blind sensor.
+**Every controller in the tree demotes one blind OSEM rather than freezing the
+rig.** v4, v5 and v5.5 park that channel (`ch1:DOWN`), keep the rest damping, and
+re-arm it 2 s after the sensor comes back — a global fault needs *every* channel
+blind. A rail during `CALIBRATING` is global in all of them; you cannot calibrate a
+blind sensor. The deleted v0–v3 froze all four on any one rail.
 
-**One exception, in v0/v1/v2:** a *saturation* trip latches `FAULT` permanently and
-needs a manual restart, while a runaway trip recovers fine. Deliberate, fixed in v3,
-reproduced on hardware 2026-08-03 — `versions.md` § *Hazards*.
+**Two things that no longer bite, but that the docs and the suite are written
+around:** in v0/v1/v2 a *saturation* trip latched `FAULT` permanently and needed a
+manual restart while a runaway trip recovered fine (deliberate, fixed in v3,
+reproduced on hardware 2026-08-03), and v0–v3 froze the whole rig on one rail.
+Both are `versions.md` § *Hazards*, and both are behaviour you would get back by
+restoring one of those files from git.
 
 ---
 
@@ -178,16 +208,20 @@ checked without hardware.
 
 ```bash
 make sim              # browser simulator, http://localhost:8770
-make sim V=v0         # a specific version
+make sim V=v4         # a specific version
 make test             # interactive terminal runner: pick a version, watch it
                       # damp, press x to kick the optic
 make check            # the behavioural suite, headless, every version
 make list             # what versions exist
 ```
 
-`make check` is currently **133 passed, 0 failed**. What is stubbed and what is
-modelled is in `versions.md` § *What the simulator can and cannot tell you*. What it
-**cannot** tell you, and neither can the interlocks:
+`make check` is currently **175 passed, 0 failed** — v4 33, v5 35, v7 35, v8 36, v9 36.
+Those are the only two files the simulator can drive: `osem.v5.5.py` is skipped
+because `sim/server.py` models a four-OSEM body, and the four `osem.v6*.py` are
+skipped because they are measurement tools with no `Controller` in them. Both
+skips print their reason. What is stubbed and what is modelled is in `versions.md`
+§ *What the simulator can and cannot tell you*. What it **cannot** tell you, and
+neither can the interlocks:
 
 - **A safe gain.** The plant is linear apart from the ADC, so it will not reproduce
   the instability at Kp = −0.040 — here, more negative gain is monotonically more
@@ -202,12 +236,16 @@ modelled is in `versions.md` § *What the simulator can and cannot tell you*. Wh
 
 | | |
 |---|---|
-| `osem.v0.py` … `osem.v5.py` | the controllers — complete and standalone, see `versions.md` |
-| `pyDAC.py` | serial transport (`DACController`) |
+| `osem.v4.py`, `osem.v5.py`, `osem.v5.5.py` | the controllers — complete and standalone, see `versions.md`. v0–v3 were deleted 2026-08-04 and are in git history |
+| `osem.v6.py`, `v6.1`, `v6.5`, `v6.6` | actuation-matrix measurement tools — `KIND = "sysid"`, no control loop |
+| `sysid.py` | the lock-in, rank check and recording behind those four |
+| `pyDAC.py` | serial transport (`DACController`) — waits for its `OK` ack |
+| `pyDAC2.py` | `FastDAC`: writes and returns, for the continuous-excitation tools |
 | `arduino.ino` | Arduino sketch: ADC stream + AD5628 SPI |
 | `bench.py` | the on-hardware entry point: `make run`, `make arduino`, `make ports` |
 | `harness.py` | one entry point for everything off the bench |
 | `sim/`, `test/` | simulated plant + browser UI; interactive runner |
+| `bench/`, `data/` | bench-session scripts and console logs; raw CSV/JSON from every run |
 | `versions.md` | what each version changes, the state machine and hazards, and the bench results |
 | `provenance.md` | where the constants came from, and the coil wiring map |
 | `research.md` | ranked queue of what to try next, and what was ruled out |
