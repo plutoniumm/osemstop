@@ -23,44 +23,73 @@ osem.vN.py  (control law, safety, logging)  <-- analogRead ------------'
 
 ## 0. Which version to run
 
-Three controllers — `osem.v4.py`, `osem.v5.py`, `osem.v5.5.py` — plus four
-`osem.v6*.py` **bench tools that are not controllers at all**. The controllers are
+Four controllers — `osem.v3.py`, `osem.v7.py`, `osem.v9.py`, `osem.v10.py` —
+plus `osem.v6.py`, a **bench tool that is not a controller at all**. They are
 **not** patches: each is a complete standalone program, and a higher number does
 **not** automatically mean better. `make list` prints the table; `versions.md`
 § *The ladder* has the numbers.
 
-- **`osem.v9.py` — run this one.** Four channels, full PID, all three defects
-  fixed, plus `auto-disable`, `fast-refault`, `fast-calib`, `warm-restart` and
-  `runaway-trend`. That last one matters most: the runaway breaker was a *level*
-  test, so it tripped over and over on a decaying post-kick ringdown — a defect
-  present in every version back to v0. On the bench 2026-08-04 the fix took three
-  kicks from 10 faults to 4, and it re-locked after every one.
-- **`osem.v8.py`** — v9 without `runaway-trend`. Keep for A/B; it thrashes.
-- **`osem.v7.py`** — a parallel branch off v5 carrying **`bias-trim`**, which is
-  *not* in v8/v9. It trims per-channel coil bias toward mid-scale and took total
-  sensor offset 570 → 449 counts on hardware. Folding it into v9 is open work.
-- **`osem.v5.py`** — the base v7 and v8 both branched from.
-- **`osem.v4.py`** — the pre-`fast-refault` reference. Same law, one behavioural
-  difference, and the structure that the deleted v0–v3 had.
-- **`osem.v5.5.py`** — the eight-OSEM commissioning build. Channels 4–7 ship
-  disabled and their sign is unknown; `CLAUDE.md` item 2 is the bring-up order.
-  It has never locked, and the simulator cannot test it.
-- **`osem.v6.py` / `v6.1` / `v6.5` / `v6.6`** — actuation-matrix measurement, four
-  or eight coils, stepped sine or multisine. They damp nothing and close no loop.
+All four run the **same control law** — four independent SISO velocity-feedback
+PID loops, identical `STEADY_GAIN` / `KI_GAIN` / `KD_GAIN` including ch2's
+deliberate `+0.010`. They differ only in the supervisor wrapped around it.
 
-**`osem.v0.py` … `osem.v3.py` were deleted on 2026-08-04** and are in git history
-only (`git show HEAD:osem.v0.py`). v0 was the frozen, scope-validated baseline —
-one channel, P-only, the 2026-07-15 configuration — so anything telling you to
-"run v0" is out of date; v5 is the starting point now, and the v0-era hardware
-evidence is in `versions.md` § *On the bench, 2026-08-03*.
+- **`osem.v10.py` — develop against this one.** v9 plus v7's `bias-trim` plus
+  **`soft-saturation`**: a pinned actuator is no longer a fault on its own. It
+  only faults if the envelope also stops falling — because clipping removes
+  authority in one direction only, so a clipped loop is a weakened loop, not a
+  broken one. On the suite's over-gain scenario, v9 faults and the optic peaks at
+  1.527; v10 does not fault and peaks at **0.853**. 37/37 in the simulator,
+  **never run on hardware**.
+- **`osem.v9.py` — run this one on hardware.** The newest rung with a bench
+  result behind it. All three defects fixed, plus `auto-disable`,
+  `fast-refault`, `fast-calib`, `warm-restart` and `runaway-trend`. That last one
+  matters most: the runaway breaker was a *level* test, so it tripped over and
+  over on a decaying post-kick ringdown — a defect present in every version back
+  to v0. On the bench 2026-08-04 the fix took three kicks from 10 faults to 4, and
+  it re-locked after every one.
+- **`osem.v7.py`** — a parallel branch off v5 carrying **`bias-trim`**. It trims
+  per-channel coil bias toward mid-scale and took total sensor offset 565 → 455
+  counts on hardware, at no cost in lock time. Now folded into v10, but kept
+  because it is the only *hardware-validated* version carrying the trim.
+- **`osem.v3.py`** — the **minimal PID baseline**. Same law, none of the
+  supervisory machinery, so it is the reference to A/B against when you want to
+  know whether a supervisor change helped or merely moved the problem.
+- **`osem.v6.py`** — stepped-sine actuation-matrix measurement, four coils. It
+  damps nothing and closes no loop.
 
-Each controller still declares a `BENCH_STATUS` (`untested` on v4, v5 and v5.5)
-and `make list` prints it, but **`bench.py` no longer gates on it** — the statuses
-went stale faster than they were updated, and a gate whose data is wrong only
-teaches you to click through it. The preflight and the printed gain vectors are
-the load-bearing checks, because both come from the file that is about to run.
-Treat the constants as history: v1/v2/v3 ran 2026-08-03 and v4/v5 ran 2026-08-04
-while still declaring otherwise (`versions.md` § *On the bench*).
+**Deleted 2026-08-04 and 2026-08-06**, in git history only (`git show
+HEAD~1:osem.v5.py`): v0, v1, v2 (pre-fix rungs), v4 and v5 (superseded by v7/v9,
+which contain them), v8 (v9 without `runaway-trend` — it thrashes), v5.5 (the
+eight-OSEM build; it never locked, see below), and v6.1 / v6.5 / v6.6 (sysid
+variants — the multisine one failed on hardware, and the 8-coil ones expect
+4 DOF, which cannot be seen until a4–a7 are wired).
+
+**All eight OSEMs are connected** — confirmed on an oscilloscope. Earlier notes
+in this repo said a4–a7 were unwired; that was wrong. The real split is
+**in-band vs out-of-band**:
+
+| | senses suspension motion | dominated by |
+|---|---|---|
+| a0–a3 | **yes**, 77–99% of power in 0.4–3 Hz | the 1.01 / 1.66 Hz modes |
+| a5 | **yes**, 22–71% in band | 1.046 Hz, at ~1/12 of a0's gain |
+| a4, a6, a7 | **no**, 0.1–9% in band | a 6.19 Hz interference line |
+
+a4, a6 and a7 carry real signal (raw std 13–105 counts) but 91–99% of it is at
+3–20 Hz, with a narrow 6.19 Hz line carrying most of that. **The flags are
+outside the linear partial-shadow region** — an alignment job, not a wiring job.
+Details and the scripts in `versions.md` § *Sensor centering* and `analysis/`.
+
+Methodological note worth keeping: the original call came from a DC-response
+threshold and raw time-domain correlation, and **both are blind to a small
+coherent signal**. Test for a peak at the known mechanical resonance instead.
+
+Each controller declares a `BENCH_STATUS` and `make list` prints it, but
+**`bench.py` does not gate on it** — the statuses went stale faster than they were
+updated, and a gate whose data is wrong only teaches you to click through it. The
+preflight and the printed gain vectors are the load-bearing checks, because both
+come from the file that is about to run. All three surviving controllers now read
+`validated`: v3 ran 2026-08-03, v7 and v9 ran 2026-08-04 (`versions.md` § *On the
+bench*, console logs in `bench/20260804/`).
 
 ## 1. Flash the Arduino
 
@@ -99,16 +128,19 @@ shows what it can see; `make run PORT=...` overrides it.
 
 ```bash
 cd /path/to/this/repo          # CSV goes to ./data/ RELATIVE TO CWD
-make run V=v5                  # or bare `make run` for a picker
+make run V=v9                  # or bare `make run` for a picker
 ```
 
 `make run` **preflights** the port — opening it through the real `DACController`,
 which raises unless the sketch answers `READY`, so "wrong port" and "board not
 flashed" are distinguishable before the optic is swinging — then prints the bench
 status and the gain vectors it is about to apply, and hands over to that version's
-`main()`. The controller then calibrates with the gain at zero — **20 s on every
-controller in the tree** — before engaging: the long quiet stretch at the start of
-a run is that calibration, not a hang. (The deleted v0–v2 calibrated for 8 s.)
+`main()`. The controller then calibrates with the gain at zero before engaging:
+the long quiet stretch at the start of a run is that calibration, not a hang.
+**20 s on v3 and v7.** On v9 the 20 s is a *ceiling* — `fast-calib` exits as soon
+as the floor settles — but that has only ever paid off in the simulator; on the
+bench it ran the full ceiling every time and fell back to v7's estimator, which is
+the designed failure mode. See `versions.md`. (The deleted v0–v2 calibrated 8 s.)
 
 ## 4. What you should see
 
@@ -122,8 +154,8 @@ The **lock time is the deliverable**. A run that never prints `LOCKED` did not
 work, whatever the traces look like.
 
 `data/<YYYYMMDD_HHMMSS>_fast_lock.csv` gets 13 columns per channel plus `time_s`
-and `state` — the 13th is `healthy`, added by v4 and kept by v5 and v5.5; the
-deleted v0–v3 wrote 12. It is line-buffered and flushed
+and `state` — the 13th is `healthy`, added by v4 and kept by v7 and v9; v3 wrote
+12, since it has no per-channel health. It is line-buffered and flushed
 every 200 rows, so it **survives an unclean kill** and is enough to reconstruct the
 run offline. `data/` is gitignored.
 
@@ -186,18 +218,26 @@ The state machine is `CALIBRATING → DAMPING → FAULT → (auto-recover) →
 CALIBRATING`. A fault zeroes all gains and holds every output at bias. If
 everything stays clear for 5 s it re-calibrates and resumes on its own.
 
-**Every controller in the tree demotes one blind OSEM rather than freezing the
-rig.** v4, v5 and v5.5 park that channel (`ch1:DOWN`), keep the rest damping, and
-re-arm it 2 s after the sensor comes back — a global fault needs *every* channel
-blind. A rail during `CALIBRATING` is global in all of them; you cannot calibrate a
-blind sensor. The deleted v0–v3 froze all four on any one rail.
+**v7 and v9 demote one blind OSEM rather than freezing the rig.** They park that
+channel (`ch1:DOWN`), keep the rest damping, and re-arm it 2 s after the sensor
+comes back — a global fault needs *every* channel blind. A rail during
+`CALIBRATING` is global in both; you cannot calibrate a blind sensor. **v3 has no
+`auto-disable` and freezes all four on any one rail** — expected, and one of the
+things it is the baseline for.
 
-**Two things that no longer bite, but that the docs and the suite are written
+**A blind channel is still not fully handled, in any version.** `auto-disable`
+keys on *rail*, and a disconnected OSEM does not rail — it sits mid-scale and
+flat. It then calibrates a near-zero baseline, so any noise reads as a runaway and
+trips the *global* interlock. That is what killed the eight-channel v5.5 run:
+ch0–ch3 were damping at ratio 0.07–0.26 while ch4–ch7, calibrated at ~0.002 V,
+faulted the whole rig six times in 120 s. A minimum-plausible-baseline check is
+the missing guard.
+
+**One thing that no longer bites, but that the docs and the suite are written
 around:** in v0/v1/v2 a *saturation* trip latched `FAULT` permanently and needed a
 manual restart while a runaway trip recovered fine (deliberate, fixed in v3,
-reproduced on hardware 2026-08-03), and v0–v3 froze the whole rig on one rail.
-Both are `versions.md` § *Hazards*, and both are behaviour you would get back by
-restoring one of those files from git.
+reproduced on hardware 2026-08-03). See `versions.md` § *Hazards*; it is behaviour
+you would get back by restoring one of those files from git.
 
 ---
 
@@ -208,18 +248,17 @@ checked without hardware.
 
 ```bash
 make sim              # browser simulator, http://localhost:8770
-make sim V=v4         # a specific version
+make sim V=v9         # a specific version
 make test             # interactive terminal runner: pick a version, watch it
                       # damp, press x to kick the optic
 make check            # the behavioural suite, headless, every version
 make list             # what versions exist
 ```
 
-`make check` is currently **175 passed, 0 failed** — v4 33, v5 35, v7 35, v8 36, v9 36.
-Those are the only two files the simulator can drive: `osem.v5.5.py` is skipped
-because `sim/server.py` models a four-OSEM body, and the four `osem.v6*.py` are
-skipped because they are measurement tools with no `Controller` in them. Both
-skips print their reason. What is stubbed and what is modelled is in `versions.md`
+`make check` runs every controller; `osem.v6.py` is skipped because it is a
+measurement tool with no `Controller` in it, and the skip prints its reason. An
+eight-channel controller would be skipped too — `sim/server.py` models a
+four-OSEM body, so there is no honest way to score one against it. What is stubbed and what is modelled is in `versions.md`
 § *What the simulator can and cannot tell you*. What it **cannot** tell you, and
 neither can the interlocks:
 
@@ -236,9 +275,9 @@ neither can the interlocks:
 
 | | |
 |---|---|
-| `osem.v4.py`, `osem.v5.py`, `osem.v5.5.py` | the controllers — complete and standalone, see `versions.md`. v0–v3 were deleted 2026-08-04 and are in git history |
-| `osem.v6.py`, `v6.1`, `v6.5`, `v6.6` | actuation-matrix measurement tools — `KIND = "sysid"`, no control loop |
-| `sysid.py` | the lock-in, rank check and recording behind those four |
+| `osem.v3.py`, `osem.v7.py`, `osem.v9.py`, `osem.v10.py` | the controllers — complete and standalone, see `versions.md`. v0–v2, v4, v5, v5.5 and v8 are in git history |
+| `osem.v6.py` | stepped-sine actuation-matrix measurement tool — `KIND = "sysid"`, no control loop |
+| `sysid.py` | the lock-in, rank check and recording behind it |
 | `pyDAC.py` | serial transport (`DACController`) — waits for its `OK` ack |
 | `pyDAC2.py` | `FastDAC`: writes and returns, for the continuous-excitation tools |
 | `arduino.ino` | Arduino sketch: ADC stream + AD5628 SPI |

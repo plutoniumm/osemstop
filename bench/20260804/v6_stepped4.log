@@ -1,0 +1,181 @@
+Connected on /dev/cu.usbserial-1120 at 115200 baud (fire-and-forget)
+
+  v6: stepped sine, 4 coils x 12 frequencies, amp 0.050 V
+  estimated 20 min. Nothing is damping while this runs.
+  Press Enter to start (Ctrl+C to stop)...   raw samples -> data/20260804_121820_v6_stepped4_raw.csv
+  [1/48] coil 0 (DAC ch1) @ 0.300 Hz  settle 5s + dwell 20s
+  [2/48] coil 0 (DAC ch1) @ 0.380 Hz  settle 5s + dwell 20s
+  [3/48] coil 0 (DAC ch1) @ 0.480 Hz  settle 5s + dwell 20s
+  [4/48] coil 0 (DAC ch1) @ 0.608 Hz  settle 5s + dwell 20s
+  [5/48] coil 0 (DAC ch1) @ 0.769 Hz  settle 5s + dwell 20s
+  [6/48] coil 0 (DAC ch1) @ 0.974 Hz  settle 5s + dwell 20s
+      !! railed: ch2
+  [7/48] coil 0 (DAC ch1) @ 1.232 Hz  settle 5s + dwell 20s
+      !! railed: ch2
+  [8/48] coil 0 (DAC ch1) @ 1.560 Hz  settle 5s + dwell 20s
+      !! railed: ch2
+  [9/48] coil 0 (DAC ch1) @ 1.974 Hz  settle 5s + dwell 20s
+      !! railed: ch2
+  [10/48] coil 0 (DAC ch1) @ 2.498 Hz  settle 5s + dwell 20s
+      !! railed: ch2
+  [11/48] coil 0 (DAC ch1) @ 3.161 Hz  settle 5s + dwell 20s
+      !! railed: ch2
+  [12/48] coil 0 (DAC ch1) @ 4.000 Hz  settle 5s + dwell 20s
+  [13/48] coil 1 (DAC ch3) @ 0.300 Hz  settle 5s + dwell 20s
+  [14/48] coil 1 (DAC ch3) @ 0.380 Hz  settle 5s + dwell 20s
+  [15/48] coil 1 (DAC ch3) @ 0.480 Hz  settle 5s + dwell 20s
+  [16/48] coil 1 (DAC ch3) @ 0.608 Hz  settle 5s + dwell 20s
+      !! railed: ch2
+  [17/48] coil 1 (DAC ch3) @ 0.769 Hz  settle 5s + dwell 20s
+      !! railed: ch2
+  [18/48] coil 1 (DAC ch3) @ 0.974 Hz  settle 5s + dwell 20s
+  [19/48] coil 1 (DAC ch3) @ 1.232 Hz  settle 5s + dwell 20s
+  [20/48] coil 1 (DAC ch3) @ 1.560 Hz  settle 5s + dwell 20s
+  [21/48] coil 1 (DAC ch3) @ 1.974 Hz  settle 5s + dwell 20s
+  [22/48] coil 1 (DAC ch3) @ 2.498 Hz  settle 5s + dwell 20s
+  [23/48] coil 1 (DAC ch3) @ 3.161 Hz  settle 5s + dwell 20s
+  [24/48] coil 1 (DAC ch3) @ 4.000 Hz  settle 5s + dwell 20s
+  [25/48] coil 2 (DAC ch5) @ 0.300 Hz  settle 5s + dwell 20s
+  [26/48] coil 2 (DAC ch5) @ 0.380 Hz  settle 5s + dwell 20s
+  [27/48] coil 2 (DAC ch5) @ 0.480 Hz  settle 5s + dwell 20s
+  [28/48] coil 2 (DAC ch5) @ 0.608 Hz  settle 5s + dwell 20s
+  [29/48] coil 2 (DAC ch5) @ 0.769 Hz  settle 5s + dwell 20s
+  [30/48] coil 2 (DAC ch5) @ 0.974 Hz  settle 5s + dwell 20s
+      !! railed: ch2
+  [31/48] coil 2 (DAC ch5) @ 1.232 Hz  settle 5s + dwell 20s
+      !! railed: ch2
+  [32/48] coil 2 (DAC ch5) @ 1.560 Hz  settle 5s + dwell 20s
+      !! railed: ch2
+  [33/48] coil 2 (DAC ch5) @ 1.974 Hz  settle 5s + dwell 20s
+      !! railed: ch2
+  [34/48] coil 2 (DAC ch5) @ 2.498 Hz  settle 5s + dwell 20s
+      !! railed: ch2
+  [35/48] coil 2 (DAC ch5) @ 3.161 Hz  settle 5s + dwell 20s
+  [36/48] coil 2 (DAC ch5) @ 4.000 Hz  settle 5s + dwell 20s
+  [37/48] coil 3 (DAC ch7) @ 0.300 Hz  settle 5s + dwell 20s
+  [38/48] coil 3 (DAC ch7) @ 0.380 Hz  settle 5s + dwell 20s
+  [39/48] coil 3 (DAC ch7) @ 0.480 Hz  settle 5s + dwell 20s
+  [40/48] coil 3 (DAC ch7) @ 0.608 Hz  settle 5s + dwell 20s
+  [41/48] coil 3 (DAC ch7) @ 0.769 Hz  settle 5s + dwell 20s
+  [42/48] coil 3 (DAC ch7) @ 0.974 Hz  settle 5s + dwell 20s
+      !! railed: ch2
+  [43/48] coil 3 (DAC ch7) @ 1.232 Hz  settle 5s + dwell 20s
+      !! railed: ch2
+  [44/48] coil 3 (DAC ch7) @ 1.560 Hz  settle 5s + dwell 20s
+      !! railed: ch2
+  [45/48] coil 3 (DAC ch7) @ 1.974 Hz  settle 5s + dwell 20s
+      !! railed: ch2
+  [46/48] coil 3 (DAC ch7) @ 2.498 Hz  settle 5s + dwell 20s
+  [47/48] coil 3 (DAC ch7) @ 3.161 Hz  settle 5s + dwell 20s
+  [48/48] coil 3 (DAC ch7) @ 4.000 Hz  settle 5s + dwell 20s
+
+========================================================================
+
+  0.300 Hz    magnitude (V/V), phase (deg)
+          coil 0               coil 1               coil 2               coil 3             
+   ch0     1.0894 / -170.3    1.9506 / -176.1    0.5175 / +173.8    0.7132 /   -5.9
+   ch1     0.4071 / -175.4    0.6233 / -169.8    0.2931 / -168.9    0.1768 /  +14.5
+   ch2     0.3700 /   -7.6    1.3277 /  -16.6    1.4539 /  +10.6    0.7461 / +168.5
+   ch3     0.2056 /  +19.1    0.0189 /  -11.5    0.3616 /  +10.6    0.3436 / -173.2
+
+  0.380 Hz    magnitude (V/V), phase (deg)
+          coil 0               coil 1               coil 2               coil 3             
+   ch0     4.2467 /  -32.2    4.1613 /  -24.3    4.4908 /  -19.2    5.2421 /  -18.5
+   ch1     4.6541 /  -23.1    4.5665 /  -21.0    4.7361 /  -19.4    5.1912 /  -17.0
+   ch2     6.1732 /   -6.2    6.2625 /   -4.0    7.1048 /   -2.6    4.9598 /  -27.8
+   ch3     5.6774 /  -11.2    5.4430 /  -12.3    5.7772 /  -11.8    5.0544 /  -19.5
+
+  0.480 Hz    magnitude (V/V), phase (deg)
+          coil 0               coil 1               coil 2               coil 3             
+   ch0     3.0598 /  -24.9    3.2457 /  -12.1    3.5879 /  -16.1    3.9936 /  -16.3
+   ch1     3.5584 /  -18.0    3.3909 /  -17.8    3.6529 /  -19.3    3.9753 /  -16.5
+   ch2     4.6825 /  -26.7    5.0584 /   -9.7    5.7747 /   -7.5    3.8067 /  -39.9
+   ch3     4.3737 /  -19.5    4.3971 /  -16.5    4.5697 /  -15.9    3.8743 /  -25.1
+
+  0.608 Hz    magnitude (V/V), phase (deg)
+          coil 0               coil 1               coil 2               coil 3             
+   ch0     0.9272 / -132.4    0.9230 / +153.9    0.3844 /  +77.8    2.7025 /  +50.1
+   ch1     0.4862 /  +95.6    0.8424 / +103.4    0.7353 /  +84.9    2.1456 /  +52.0
+   ch2     3.8968 /  +66.0        --  railed    5.6209 /  +50.6    1.6065 / -162.2
+   ch3     2.5880 /  +61.3    2.3134 /  +64.7    2.7699 /  +54.1    0.8644 / +103.9
+
+  0.769 Hz    magnitude (V/V), phase (deg)
+          coil 0               coil 1               coil 2               coil 3             
+   ch0     4.8922 /   -0.2    6.1160 /  +16.7    6.0265 /  +16.7    1.1361 / -173.0
+   ch1     3.8700 /   +5.1    4.3177 /  +13.1    4.2451 /  +13.1    0.5808 /  +58.8
+   ch2     3.2929 / +170.5        --  railed    1.2839 /  +89.4    4.6294 /  +33.6
+   ch3     1.3244 /  +61.1    1.1468 /  +55.5    1.7105 /  +36.4    3.2490 /  +24.0
+
+  0.974 Hz    magnitude (V/V), phase (deg)
+          coil 0               coil 1               coil 2               coil 3             
+   ch0    12.5200 / -177.2    1.1330 /  -16.2   16.5490 /   -6.1   14.0078 / +142.0
+   ch1     3.5937 / +164.6    1.4949 /   +0.4    7.6431 /   -9.6    5.0055 / +126.4
+   ch2         --  railed    2.6398 /  -81.8        --  railed        --  railed
+   ch3     3.1551 / +178.4    1.5601 /  -21.0    6.7986 /  -13.7    4.3732 / +115.5
+
+  1.232 Hz    magnitude (V/V), phase (deg)
+          coil 0               coil 1               coil 2               coil 3             
+   ch0     2.2470 /  -22.1    2.0041 /   +8.0    1.6398 /  -11.4    1.6612 /  -41.4
+   ch1     1.8606 /  -13.8    1.4690 /  -20.6    1.4343 /  -22.8    1.3584 /  -46.5
+   ch2         --  railed    1.6204 /   +6.3        --  railed        --  railed
+   ch3     1.6632 /  -17.4    1.3138 /  -30.3    1.4317 /  -28.8    1.5535 /  -32.1
+
+  1.560 Hz    magnitude (V/V), phase (deg)
+          coil 0               coil 1               coil 2               coil 3             
+   ch0     1.0812 / -115.9    3.6485 /  +60.1    2.5409 /  +52.7    2.9642 /  +44.6
+   ch1     2.0632 /  +51.8    1.2513 / -137.9    0.6316 / -164.3    1.4786 / -128.1
+   ch2         --  railed    4.6760 /  +53.7        --  railed        --  railed
+   ch3     1.8549 /  +55.2    1.1873 / -137.9    0.5796 / -155.1    1.1418 / -128.3
+
+  1.974 Hz    magnitude (V/V), phase (deg)
+          coil 0               coil 1               coil 2               coil 3             
+   ch0     3.5719 / +151.0    0.2413 / +110.1    3.4997 / +141.0    5.4484 / +165.1
+   ch1     0.7247 /  +16.4    0.5883 /  +14.9    2.6638 /  -32.8    1.2348 /  +32.3
+   ch2         --  railed    0.1255 / -156.6        --  railed        --  railed
+   ch3     1.0220 /   +5.3    0.5239 /  +19.7    3.4807 /  -36.8    1.8604 /  +21.5
+
+  2.498 Hz    magnitude (V/V), phase (deg)
+          coil 0               coil 1               coil 2               coil 3             
+   ch0     0.3815 /  +42.6    0.1392 /  -39.5    0.3827 /  -77.6    0.2130 /  +26.9
+   ch1     0.0824 /  -56.8    0.2692 /  +24.1    0.1041 /   -5.7    0.6209 /  +52.6
+   ch2         --  railed    0.3952 / -115.2        --  railed    0.5367 /  +44.6
+   ch3     0.1817 / -102.0    0.1391 /   -4.2    0.1350 /  -49.5    0.7554 /  +51.5
+
+  3.161 Hz    magnitude (V/V), phase (deg)
+          coil 0               coil 1               coil 2               coil 3             
+   ch0     0.7292 /  +69.7    0.4105 /  +60.0    0.5379 / +107.4    0.2284 /  +83.5
+   ch1     0.4599 /  +63.5    0.6019 /  +59.9    0.6505 /  +69.0    0.5134 /  +66.5
+   ch2         --  railed    0.2815 /  +67.2    0.2986 / +104.7    0.5864 /  +69.4
+   ch3     0.4046 /  +69.9    0.5228 /  +64.5    0.6074 /  +67.3    0.6049 /  +60.1
+
+  4.000 Hz    magnitude (V/V), phase (deg)
+          coil 0               coil 1               coil 2               coil 3             
+   ch0     0.3661 /  +17.6    0.0502 /  +63.6    0.1537 / -135.6    0.4121 /  +93.5
+   ch1     0.0475 /  +77.3    0.1359 /  +53.7    0.0694 /  +49.6    0.5730 /  +87.7
+   ch2     0.0997 /  +71.7    0.1319 / -126.0    0.2357 / -119.2    0.5963 /  +86.5
+   ch3     0.0288 /  -86.8    0.0645 /  +72.1    0.0506 /  -20.6    0.6426 /  +79.9
+
+========================================================================
+  RANK CHECK -- 4 coils should drive 2 DOF
+  stacked over 4 usable frequencies:
+   singular values  1.000  0.154  0.058  0.043
+   directions above 10%: 2      above 3%: 4      expected 2
+
+  Read this as a diagnostic, not a verdict. A DOF only appears if the
+  sweep excited it, so an UNDER-count usually means the frequency list
+  missed a resonance -- widen it and re-run before doubting the rig.
+  An OVER-count is the informative failure: it means energy is arriving
+  by a path the model does not have -- crosstalk between coils, drift,
+  or one coil's tones leaking into another's bins.
+
+  per frequency (diagnostic only -- rank drops to 1 near a resonance,
+  where one mode dominates, and that is correct rather than a fault):
+    0.300 Hz   1.000  0.324  0.096  0.044   rank~2
+    0.380 Hz   1.000  0.121  0.027  0.002   rank~2
+    0.480 Hz   1.000  0.128  0.043  0.006   rank~2
+    4.000 Hz   1.000  0.336  0.224  0.043   rank~3
+
+  saved data/20260804_123821_v6_stepped4.json
+
+  raw data: 391636 samples -> data/20260804_121820_v6_stepped4_raw.csv
+Connection closed. 54557 DAC writes.

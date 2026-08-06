@@ -1,0 +1,2865 @@
+% ===========================================================================
+%  OSEMa bin-laden -- OSEM suspension damping, v0 through v10
+%
+%  Build:   tectonic talk.tex
+%
+%  Speaker notes are written with \note{} on every slide but are NOT shown by
+%  default. To present with notes on a second screen, uncomment the
+%  \setbeameroption line below and rebuild; each page then becomes slide+notes.
+%  For a notes-only handout use \setbeameroption{show only notes}.
+% ===========================================================================
+\documentclass[aspectratio=169]{beamer}
+
+% \setbeameroption{show notes on second screen=right}
+
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{positioning,arrows.meta,automata,calc,fit,shapes.geometric}
+
+\pgfplotsset{
+  every axis/.append style={
+    tick label style={font=\scriptsize},
+    label style={font=\scriptsize},
+    legend style={font=\scriptsize},
+    title style={font=\small},
+  },
+}
+
+\tikzset{
+  blk/.style={draw, rounded corners, align=center, font=\scriptsize,
+              minimum height=0.8cm, inner sep=3pt},
+  every state/.style={rectangle, rounded corners, draw, align=center,
+                      font=\scriptsize, minimum width=2.4cm, minimum height=0.8cm,
+                      inner sep=2pt},
+  flow/.style={-{Stealth[length=2mm]}, thick},
+}
+
+\newcommand{\src}[1]{{\scriptsize\textit{#1}}}
+
+\title{OSEMa bin-laden}
+\subtitle{Ten rungs of a suspended-optic damping loop: v0 to v10}
+\date{6 August 2026}
+
+\begin{document}
+
+% ---------------------------------------------------------------- 1
+\begin{frame}
+  \titlepage
+  \begin{center}
+    \scriptsize Four OSEM shadow sensors, four coils, one suspended mirror,\\
+    and eleven attempts at the supervisor around them.
+  \end{center}
+\end{frame}
+\note{Title slide. The name is the project's own pun on OSEM. What this talk
+covers: a single control law that has barely changed since v2, wrapped in
+eleven successive supervisors, and what each one taught us. Everything
+quantitative in this deck comes out of the repository -- versions.md,
+provenance.md, research.md, the controller sources, and the bench logs in
+bench/20260804. Nothing is invented; where a number is a simulator number
+rather than a hardware number, the slide says so.}
+
+% ================================================================ PART I
+\section{The plant and the loop}
+
+% ---------------------------------------------------------------- 2
+\begin{frame}{What is actually on the bench}
+  \centering
+  \begin{tikzpicture}[font=\scriptsize]
+    % --- suspension -------------------------------------------------------
+    \draw[thick] (-1.5,2.2) -- (0.9,2.2);
+    \foreach \x in {-1.3,-0.9,...,0.8} \draw (\x,2.2) -- ++(-0.16,-0.2);
+    \draw[thick] (-1.1,2.2) -- (-1.1,1.25);
+    \draw[thick] (0.5,2.2) -- (0.5,1.25);
+    \draw[thick, fill=gray!12] (-1.25,0.15) rectangle (0.65,1.25);
+    \node[align=center] at (-0.3,0.7) {suspended\\optic};
+    \node at (-0.3,-0.35) {$f_0 \approx 1$\,Hz, $Q \approx 50$};
+
+    % --- blocks -----------------------------------------------------------
+    \node[blk, minimum width=1.6cm] (osem) at (2.7,0.7) {OSEM $\times$8\\(A0--A7)};
+    \node[blk, minimum width=2.2cm] (adc)  at (5.4,0.7) {Arduino Mega\\ADC A0--A7};
+    \node[blk, minimum width=2.4cm] (host) at (9.1,0.7) {host\\\texttt{pyDAC.py}\\\texttt{osem.vN.py}};
+    \node[blk, minimum width=2.2cm] (dac)  at (5.4,-1.5) {AD5628\\octal DAC};
+    \node[blk, minimum width=1.6cm] (coil) at (2.7,-1.5) {coils $\times$8};
+
+    % --- sense path -------------------------------------------------------
+    \draw[flow] (0.7,0.7) -- (osem);
+    \draw[flow] (osem) -- (adc);
+    \draw[flow] (adc) -- node[above, align=center, font=\tiny]
+      {\texttt{a0..a7}\\348\,Hz} (host);
+    % --- actuate path -----------------------------------------------------
+    \draw[flow] (host) |- node[pos=0.78, above, font=\tiny] {\texttt{SET ch v}} (dac);
+    \draw[flow] (dac) -- (coil);
+    \draw[flow] (coil.west) -| (-0.3,0.15);
+  \end{tikzpicture}
+
+  \vspace{2mm}
+  \begin{minipage}{0.88\textwidth}\centering
+  {\scriptsize Sensor index $i$ $\to$ pin \texttt{A}$i$ $\to$
+   \texttt{DAC\_CHANNELS[i] = [1, 3, 5, 7]} (rewired 2026-08-03).\\
+   \textbf{All eight OSEMs and all eight coils are connected} (scope,
+   2026-08-06). Every controller v0--v10 drives \textbf{A0--A3} --- the reason
+   is a measurement, and it is in Part IV.}
+  \end{minipage}
+\end{frame}
+\note{One suspended mirror, eight OSEM shadow sensors watching it, eight coils
+pushing back, and a host computer closing the loop over a serial link. All
+eight OSEMs are electrically connected -- that was confirmed on an oscilloscope
+on 2026-08-06, and it corrects an earlier claim in this repository that four of
+them were not wired. Every controller in this talk nevertheless drives only A0
+to A3, and the reason turns out to be interesting rather than administrative;
+it gets two slides near the end of Part IV. The coil map matters: the
+coils were rewired on 2026-08-03 and the map is now 1, 3, 5, 7. The old map,
+0, 2, 4, 6, now points at the coils for sensors 4 to 7 -- and neither the
+simulator nor the interlocks can catch a wrong map, because the simulator
+round-trips its held-voltage dictionary through whatever map the controller
+declares. Only the bench catches that.}
+
+% ---------------------------------------------------------------- 3
+\begin{frame}{The OSEM: a shadow sensor}
+  \centering
+  \begin{tikzpicture}
+    \node[blk] (led) at (0,0) {IR LED};
+    \draw[flow, dashed] (led) -- (2.6,0);
+    \node[font=\scriptsize] at (1.5,0.35) {beam};
+    \draw[thick, fill=gray!30] (2.55,-0.85) rectangle (2.8,0.55);
+    \node[font=\scriptsize, align=center] at (2.68,1.05) {flag\\(on the optic)};
+    \draw[{Stealth[length=1.6mm]}-{Stealth[length=1.6mm]}] (3.15,-0.85) -- (3.15,0.55);
+    \draw[flow, dashed] (2.85,0) -- (4.1,0);
+    \node[blk] (pd) at (5.0,0) {photo-\\diode};
+    \node[blk] (tia) at (7.3,0) {transimpedance\\amplifier};
+    \node[blk] (adc) at (10.2,0) {10-bit ADC\\0--1023 counts};
+    \draw[flow] (pd) -- (tia);
+    \draw[flow] (tia) -- (adc);
+  \end{tikzpicture}
+
+  \vspace{3mm}
+  \begin{columns}[T]
+    \begin{column}{0.46\textwidth}
+      \centering
+      \begin{tikzpicture}[scale=0.78]
+        \fill[gray!25] (1.9,0) rectangle (3.5,2.6);
+        \draw[->] (0,0) -- (5.2,0) node[below, font=\scriptsize] {flag position};
+        \draw[->] (0,0) -- (0,2.8) node[above right, font=\scriptsize] {photocurrent};
+        \draw[thick] plot[smooth, tension=0.8] coordinates
+          {(0.2,0.15) (1.0,0.25) (1.7,0.6) (2.4,1.25) (3.1,1.9) (3.8,2.25) (4.6,2.35)};
+        \draw[gray] (1.05,0.68) -- (0.62,0.28);
+        \node[font=\scriptsize, align=center] at (1.20,0.98) {fully\\blocked};
+        \node[font=\scriptsize] at (4.20,1.80) {clear};
+        \node[font=\scriptsize, align=center] at (2.30,-0.72) {linear only\\in partial shadow};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \footnotesize\raggedright
+      \begin{itemize}\setlength{\itemsep}{2pt}
+        \item Sensing scale: $A_{\mathrm{VCC}} = 5.02$\,V over 1023 counts.
+        \item Actuation scale: DAC full scale 2.5\,V; the loop restricts itself
+              to \texttt{VMIN},\,\texttt{VMAX} $= 0.0, 0.5$\,V around
+              \texttt{BIAS} $=0.25$.
+        \item Pegged at either end the bandpass sees a flat top and the
+              velocity estimate spikes --- exactly when the loop is asked to
+              push hardest.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{An OSEM is an infrared LED shining across a gap onto a photodiode, with a
+flag mounted on the optic partly blocking the beam. Move the optic, the shadow
+moves, the photocurrent changes. A transimpedance amplifier turns that into a
+voltage and the Arduino digitises it to ten bits.
+
+The curve on the left is a schematic, not measured data -- there are no numbers
+on those axes deliberately. The point it makes is the one that dominates the
+whole project: the sensor is linear only in partial shadow. Fully blocked, or
+fully clear, and it says nothing. Two separate voltage scales live in this
+system and must not be conflated: 5.02 volts of sensing reference, and 2.5
+volts of DAC full scale of which the controller uses only 0 to 0.5.}
+
+% ---------------------------------------------------------------- 4
+\begin{frame}{The pendulum, and why it needs help}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \[ \ddot{x} + \frac{\omega_0}{Q}\,\dot{x} + \omega_0^2 x = \frac{F(t)}{m} \]
+      \[ \omega_0 = 2\pi f_0,\qquad f_0 \approx 1\ \mathrm{Hz},\qquad Q \approx 50 \]
+      \[ \boxed{\ \tau = \frac{Q}{\pi f_0} \approx 16\ \mathrm{s}\ } \]
+      \vspace{1mm}
+      {\footnotesize A suspension is built to be lossless. That is exactly what
+      makes it ring: energy put in at 1\,Hz stays in for tens of seconds.}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \begin{axis}[width=6.2cm, height=4.2cm,
+                     xlabel={time (s)}, ylabel={amplitude (arb.)},
+                     xmin=0, xmax=20, ymin=-1.15, ymax=1.15,
+                     axis lines=left, ytick={-1,0,1}]
+          \addplot[domain=0:20, samples=600, thick]
+            {exp(-x/16)*cos(deg(2*pi*x))};
+          \addplot[domain=0:20, samples=100, dashed] {exp(-x/16)};
+          \addplot[domain=0:20, samples=100, dashed] {-exp(-x/16)};
+        \end{axis}
+      \end{tikzpicture}\\
+      {\scriptsize Illustrative: $e^{-t/\tau}\cos 2\pi f_0 t$ at
+      $\tau = 16$\,s, $f_0 = 1$\,Hz. Not measured data.}
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{The optic hangs as a pendulum near one hertz with a quality factor around
+fifty. Neither number was characterised on this bench -- Q and drive amplitude
+are sliders in the simulator precisely because nobody measured them -- but they
+are the working values everywhere in the repo.
+
+The ringdown constant that follows, tau equals Q over pi f-nought, is about
+sixteen seconds. That single number turns up again and again later: it is why
+the calibration window is twenty seconds and not five, it is why a post-kick
+recalibration measures the kick rather than the lab, and it is why the trend
+tests in v9 and v10 use a two-second lag. The plot on the right is illustrative
+-- it is the analytic envelope at those constants, not a recorded trace.}
+
+% ---------------------------------------------------------------- 5
+\begin{frame}{Cold damping: the process variable is \emph{velocity}}
+  \begin{align*}
+    \mathrm{bp}(t) &= \mathrm{LP}_{3\,\mathrm{Hz}}\big[\,\mathrm{HP}_{0.4\,\mathrm{Hz}}[A(t)]\,\big] \\[2pt]
+    v(t) &= \mathrm{LP}_{5\,\mathrm{Hz}}\!\left[\frac{\mathrm{bp}(t)-\mathrm{bp}(t-\Delta t)}{\Delta t}\right] \\[2pt]
+    u(t) &= -K(t)\cdot v(t)
+  \end{align*}
+  \vspace{-2mm}
+  \begin{center}
+  \begin{tikzpicture}[node distance=4mm]
+    \node[blk] (osem) {OSEM\\counts};
+    \node[blk, right=of osem] (bp) {bandpass\\0.4--3\,Hz};
+    \node[blk, right=of bp] (dv) {$d/dt$ +\\LP 5\,Hz};
+    \node[blk, right=of dv] (err) {$e = -v$\\setpoint 0};
+    \node[blk, right=of err] (pid) {PID\\$K_p,K_i,K_d$};
+    \node[blk, right=of pid] (dac) {clip to\\0--0.5\,V};
+    \node[blk, right=of dac] (coil) {coil};
+    \foreach \a/\b in {osem/bp, bp/dv, dv/err, err/pid, pid/dac, dac/coil}
+      \draw[flow] (\a) -- (\b);
+    \draw[flow] (coil.south) -- ++(0,-0.55) -| node[pos=0.25, below, font=\scriptsize]
+      {optic} (osem.south);
+  \end{tikzpicture}
+  \end{center}
+  \vspace{1mm}
+  {\footnotesize The setpoint is a constant zero, so $e=-v$: the loop does not
+  ask where the optic \emph{is}, only that it stop \emph{moving}.
+  \src{provenance.md, ``The documented algorithm''}}
+\end{frame}
+\note{This is the whole control law, and it has not changed since v2. Bandpass
+the raw sensor between 0.4 and 3 hertz, differentiate to get velocity, smooth
+that at 5 hertz, and drive the coil with minus a gain times velocity.
+
+The critical thing -- and the thing that makes every textbook PID intuition
+misleading here -- is that the process variable is velocity, not position, and
+the setpoint is a constant zero. So the error is simply minus the velocity. The
+loop has no opinion about where the optic sits; it only objects to it moving.
+That is what "cold damping" means: you are synthesising a viscous drag that the
+suspension deliberately does not have.
+
+The bandpass matters too. All three of the modelled rigid-body resonances sit
+inside 0.4 to 3 hertz. A resonance outside that band would be filtered out of
+the very signal the loop closes on.}
+
+% ---------------------------------------------------------------- 6
+\begin{frame}{Three gains: P is a damper, I is a spring, D is a mass}
+  \centering
+  With $e = -v$ and $v = \dot{x}$:
+  \[
+    \underbrace{K_p\,e = -K_p\,\dot{x}}_{\text{force} \propto \text{velocity}}
+    \qquad
+    \underbrace{K_i\!\int\! e\,dt = -K_i\,x}_{\text{force} \propto \text{displacement}}
+    \qquad
+    \underbrace{K_d\,\frac{de}{dt} = -K_d\,\ddot{x}}_{\text{force} \propto \text{acceleration}}
+  \]
+  \vspace{2mm}
+  {\footnotesize
+  \begin{tabular}{@{}llll@{}}
+    \toprule
+    term & acts on & physically & effect on the pole \\
+    \midrule
+    $K_p$ & velocity & \textbf{viscous damper} & \textbf{the only term that removes energy} \\
+    $K_i$ & displacement & added \textbf{spring} & moves the resonance; does not damp \\
+    $K_d$ & acceleration & added (negative) \textbf{mass} & noisiest term --- differentiates twice \\
+    \bottomrule
+  \end{tabular}}
+
+  \vspace{3mm}
+  {\footnotesize ``Expect the amplitude ratio to end up no better than v1's,
+  because neither new term dissipates. What they buy is a stiffer, heavier
+  effective plant.'' \src{osem.v2.py docstring}}
+\end{frame}
+\note{This is the single most illuminating slide in the deck for anyone who
+knows ordinary PID.
+
+Because the error is minus velocity, every term is shifted by one derivative
+from what its name suggests. P acts on velocity, so it is a viscous damper --
+and it is the only one of the three that takes energy out of the pendulum.
+That is the entire purpose of the loop. I integrates velocity, and the integral
+of velocity is displacement, so the I term is a spring: it moves the resonance
+but it does not dissipate anything. D differentiates velocity, and the
+derivative of velocity is acceleration, so the D term is added mass -- and
+since it has now differentiated the sensor signal twice, it is by far the
+noisiest term in the loop.
+
+v2's own docstring predicted this in advance: switching I and D on would not
+damp better than P alone, it would give you a stiffer, heavier effective plant.
+That prediction held -- the ladder table shows v2 at 0.028 against v1 at 0.025,
+which is no improvement.}
+
+% ---------------------------------------------------------------- 7
+\begin{frame}{Where the three numbers came from}
+  \centering
+  {\footnotesize
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+     & ch0 & ch1 & \textbf{ch2} & ch3 \\
+    \midrule
+    \texttt{STEADY\_GAIN}  & $-0.030$ & $-0.030$ & $\mathbf{+0.010}$ & $-0.030$ \\
+    \texttt{CAPTURE\_GAIN} & $-0.035$ & $-0.035$ & $\mathbf{+0.012}$ & $-0.035$ \\
+    \texttt{KI\_GAIN}      & $-0.040$ & $-0.040$ & $\mathbf{+0.040}$ & $-0.040$ \\
+    \texttt{KD\_GAIN}      & $-0.0015$ & $-0.0015$ & $\mathbf{+0.0015}$ & $-0.0015$ \\
+    \bottomrule
+  \end{tabular}}
+
+  \vspace{3mm}
+  {\footnotesize
+  \begin{itemize}\setlength{\itemsep}{2pt}
+    \item \textbf{$-0.030$ is the only gain ever validated against a scope} ---
+          ch0, 2026-07-15 run 3: ``real damping at gain $=-0.03$, 6$\times$
+          reduction, no rail clipping.''
+    \item \texttt{CAPTURE\_GAIN} is stronger and used only at large amplitude.
+          The source says plainly it is \textbf{not independently validated}.
+    \item $K_i$ and $K_d$ share each channel's \emph{sign}, because they share
+          one loop --- but not its \emph{magnitude}: ch2 runs
+          $|K_i| = 0.040$ like the rest while its $|K_p|$ is $0.010$.
+    \item \texttt{I\_CLAMP\_V} $= 0.15$ is ``only a backstop''. The real
+          anti-windup is back-calculation at \texttt{TRACK\_TC\_S} $= 0.5$\,s.
+  \end{itemize}}
+  \vspace{1mm}
+  {\scriptsize\textit{Sources: comment block above \texttt{STEADY\_GAIN} in
+  \texttt{osem.v9.py}; \texttt{provenance.md} Table 1 and \S\,``What the report
+  does NOT contain''.}}
+\end{frame}
+\note{Now the honest part: how were these numbers chosen?
+
+Minus 0.030 on channel zero is the only gain in this entire repository that was
+ever watched on an oscilloscope. That was 2026-07-15, run three: real damping,
+a six-fold reduction in amplitude, no rail clipping. Everything else is either
+copied from that, inferred from a report, or guessed conservatively.
+
+The capture gain is a two-level schedule -- stronger while the amplitude is
+still large, tapering to steady as it comes down. The source comment states
+flatly that capture is not independently validated. It is minus 0.035, which is
+deliberately just under the minus 0.040 limit we will come to in two slides.
+
+Ki and Kd follow each channel's sign because all three terms drive the same
+coil through the same loop. But note that their magnitudes do not track Kp:
+channel two runs Ki of 0.040 like everyone else while its Kp is only 0.010,
+four times smaller. Nothing in the repo justifies that asymmetry -- it is worth
+knowing before anyone retunes.
+
+Finally the integrator clamp. It is 0.15 volts, and the source calls it only a
+backstop. The mechanism that actually stops windup is back-calculation with a
+half-second tracking constant, added in v3. On the bench the clamp never even
+engaged: peak I was 0.084 volts against that 0.150 limit.}
+
+% ---------------------------------------------------------------- 8
+\begin{frame}{ch2 runs \emph{positive} --- on purpose}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \begin{axis}[width=6.4cm, height=4.4cm,
+                     xlabel={time (s)}, ylabel={$e^{-\gamma t}$},
+                     xmin=0, xmax=16, ymin=0, ymax=1.02,
+                     axis lines=left, legend pos=north east,
+                     legend cell align=left]
+          \addplot[domain=0:16, samples=80, thick] {exp(-0.2197*x)};
+          \addlegendentry{A0 $\gamma=0.2197$}
+          \addplot[domain=0:16, samples=80, dashed] {exp(-0.1821*x)};
+          \addlegendentry{A1 $\gamma=0.1821$}
+          \addplot[domain=0:16, samples=80, very thick] {exp(-0.2796*x)};
+          \addlegendentry{\textbf{A2 $\gamma=0.2796$}}
+          \addplot[domain=0:16, samples=80, dotted, thick] {exp(-0.1982*x)};
+          \addlegendentry{A3 $\gamma=0.1982$}
+        \end{axis}
+      \end{tikzpicture}\\
+      {\scriptsize Envelopes drawn from the \emph{measured} decay constants,
+      \texttt{provenance.md} Table 1 ($R^2 = 0.65$--$0.92$).}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \footnotesize
+      A2 damps \textbf{fastest} of the four --- while running at
+      $K = +0.010$, where A0/A1/A3 ran at $-0.030$.
+
+      \vspace{2mm}
+      A positive gain on a normally-wired channel \emph{pumps}. The only
+      reading that fits is that \textbf{ch2's coil or OSEM is mounted the
+      other way round}.
+
+      \vspace{2mm}
+      \textbf{Confirmed on hardware 2026-08-04}: ch2 ran positive alongside
+      three negative channels and came out the best-damping axis, ratio
+      0.01--0.03 against ch0's 0.08.
+
+      \vspace{2mm}
+      \alert{This is not a bug and must never be ``corrected''.}
+      The simulator encodes the same fact as
+      \texttt{COIL\_GAIN[2] = -4.15}.
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{Channel two is the story that keeps paying off.
+
+Table 1 of the original report fits an exponential decay to each channel with
+all four damping together. A2 has the largest decay constant of the four --
+0.2796 per second, a time constant of 3.58 seconds -- and Figure 2's
+applied-gain panel shows it running at plus 0.010 while the others ran at minus
+0.030. A positive gain on a correctly-wired channel would pump the resonance,
+not damp it. The only consistent reading is that channel two's coil or its OSEM
+is physically mounted the other way round, so its loop sign is inverted.
+
+This was confirmed on the bench on 2026-08-04, on the first four-channel run
+after the rewiring: channel two ran positive while the other three ran negative
+and it came out the best-damping axis of the four, ratio 0.01 to 0.03 against
+channel zero's 0.08.
+
+The R-squared values behind those fits are 0.65 to 0.92, so treat one
+significant figure as the honest precision. The simulator carries the same fact
+as a negative coil gain, about four times the magnitude of the others, which is
+why a gain three times smaller still damps fastest.}
+
+% ---------------------------------------------------------------- 9
+\begin{frame}{$K_p = -0.040$: the least-evidenced number in the repo}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \footnotesize
+      \textbf{What is claimed.} One sentence, in the docstring of
+      \texttt{osem.v0.py} (deleted 2026-08-04, git history only):
+
+      \vspace{1mm}
+      \begin{quote}\itshape\scriptsize
+        real damping at gain $=-0.03$; onset of instability / rail at
+        gain $=-0.04$.
+      \end{quote}
+
+      \vspace{2mm}
+      \textbf{What supports it.}
+      \begin{itemize}\setlength{\itemsep}{1pt}
+        \item The report, written two days later, never mentions it.
+        \item No logged run in \texttt{data/} records it.
+        \item The simulator \emph{provably cannot} reproduce it: the plant is
+              linear apart from the ADC. Swept to $-0.600$, damping increases
+              monotonically and there are \textbf{zero faults}.
+        \item v0 measured it with \emph{one} channel driving; v1 then ran four
+              at $-0.030$ --- $4\times$ the total authority --- without trouble.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \begin{axis}[width=6.2cm, height=4.0cm,
+                     xlabel={$|K_p|$}, ylabel={damping achieved},
+                     xmin=0, xmax=0.65, ymin=0, ymax=1.20,
+                     axis lines=left, ytick=\empty, xtick={0,0.2,0.4,0.6}]
+          \addplot[domain=0.0:0.6, samples=60, thick] {1-exp(-6*x)};
+          \draw[dashed, thick] (axis cs:0.040,0) -- (axis cs:0.040,1.20);
+          \node[font=\tiny, anchor=west] at (axis cs:0.07,1.10)
+            {$\leftarrow$ claimed onset $-0.040$};
+        \end{axis}
+      \end{tikzpicture}\\
+      {\scriptsize Schematic --- the simulator's qualitative trend, not
+      measured data. \emph{No} experiment behind the dashed line exists, and
+      the ceiling actually used is $-0.035$.}
+    \end{column}
+  \end{columns}
+  \vspace{1mm}
+  \centering\footnotesize
+  \alert{Treat it as real and uncharacterised. Do not exceed $-0.035$ unattended.}
+\end{frame}
+\note{Every gain in this project rests on a limit that has almost no evidence
+behind it.
+
+The claim is that minus 0.030 damps cleanly and minus 0.040 is the onset of
+instability or railing. The entire record of that is one undated sentence in
+the docstring of v0, a file that has since been deleted and lives only in git
+history. The weekly report, written two days later, does not mention it. No CSV
+in the data directory records it. And the simulator cannot help, because the
+plant it models is linear apart from the ADC: sweep the gain to minus 0.600 and
+damping just increases monotonically with zero faults.
+
+There is even a counter-indication. That measurement was taken with a single
+channel driving. v1 then ran all four channels at minus 0.030, which is four
+times the total actuation authority, without any trouble. So whatever minus
+0.040 is, it is not a simple total-authority effect.
+
+The right posture is the one the README takes: treat it as real and
+uncharacterised. Do not go past minus 0.035 unattended. Research item 3 is the
+bench sweep that would settle it -- keep the twelve-column CSV and a scope
+trace, and separate where clipping starts from where oscillation grows. The
+leading hypothesis is phase lag from the finite-difference velocity estimator.}
+
+% ---------------------------------------------------------------- 10
+\begin{frame}{The gain schedule, and the baseline everything scales off}
+  \begin{columns}[T]
+    \begin{column}{0.53\textwidth}
+      \footnotesize
+      \begin{align*}
+        \mathrm{RMS}_{\mathrm{base}} &= \sqrt{\tfrac{1}{N}\textstyle\sum \mathrm{bp}(t_i)^2}
+          \quad \text{at gain} = 0 \\
+        r(t) &= \mathrm{RMS}_{\mathrm{win}}[\mathrm{bp}(t)] \big/ \mathrm{RMS}_{\mathrm{base}} \\
+        K(t) &= K_{\mathrm{steady}} + s(r)\,(K_{\mathrm{cap}} - K_{\mathrm{steady}}) \\
+        s(r) &= \mathrm{clip}\!\left(\tfrac{r-0.2}{0.4},\,0,\,1\right)
+      \end{align*}
+
+      \vspace{3mm}
+      {\footnotesize
+      Slew-limited at \texttt{GAIN\_SLEW\_PER\_S} $=0.02$, so there is no gain
+      step that could itself kick a transient. That ramp doubles as the startup
+      soft-start: $0 \to$ capture gain in 1.75\,s.}
+    \end{column}
+    \begin{column}{0.45\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \begin{axis}[width=5.8cm, height=4.0cm,
+                     xlabel={ratio $r$ (amplitude / own baseline)},
+                     ylabel={$|K|$}, scaled y ticks=false,
+                     xmin=0, xmax=1.0, ymin=0.028, ymax=0.037,
+                     axis lines=left, ytick={0.030,0.035},
+                     yticklabels={$0.030$, $0.035$}]
+          \addplot[thick, samples=200, domain=0:1]
+            {0.030 + 0.005*max(0,min(1,(x-0.2)/0.4))};
+          \draw[dashed] (axis cs:0.35,0.028) -- (axis cs:0.35,0.037);
+          \node[font=\scriptsize, anchor=west] at (axis cs:0.36,0.0295) {lock line 0.35};
+        \end{axis}
+      \end{tikzpicture}
+    \end{column}
+  \end{columns}
+  \vspace{2mm}
+  \centering\footnotesize
+  \textbf{One number, three jobs:} the runaway breaker trips above
+  $1.8\times$ baseline, the scheduler blends between $0.2\times$ and
+  $0.6\times$, and \textbf{\texttt{LOCKED} means below $0.35\times$ held for 5\,s}.
+\end{frame}
+\note{Two more pieces of the baseline law.
+
+First, the gain schedule. Rather than run one fixed gain, each channel blends
+between its steady gain and its stronger capture gain according to how large
+the oscillation currently is relative to that channel's own calibrated
+baseline. Full capture above 0.6 of baseline, tapering linearly to steady by
+0.2, and every change slew-limited at 0.02 per second so the gain change cannot
+itself kick the optic. That same ramp is the startup soft-start: it takes about
+1.75 seconds to reach capture gain from zero.
+
+Second, and this is the load-bearing part: baseline RMS. It is measured once
+per calibration with the gain forced to zero, and then three different things
+scale off it. The runaway breaker trips above 1.8 times baseline. The scheduler
+blends between 0.2 and 0.6 times baseline. And the lock detector -- which
+produces the run's actual deliverable, the LOCKED message -- fires below 0.35
+times baseline held for five seconds.
+
+That is a lot of weight on one number measured in one window, and it is the
+reason four separate versions later spend their effort on when and how that
+number is measured.}
+
+% ---------------------------------------------------------------- 11
+\begin{frame}{Three layers, one wire}
+  \centering
+  \begin{tikzpicture}[node distance=8mm]
+    \node[blk, minimum width=3.0cm] (ctl) {\texttt{osem.vN.py} --- control law, safety, logging};
+    \node[blk, minimum width=3.0cm, below=of ctl] (py) {\texttt{pyDAC.py} --- \texttt{DACController}, transport};
+    \node[blk, minimum width=3.0cm, below=of py] (ino) {\texttt{arduino.ino} --- ADC stream + AD5628 SPI};
+    \draw[flow] (ctl) -- node[right, font=\scriptsize] {\texttt{set\_voltage(ch, V)}} (py);
+    \draw[flow] (py) -- node[right, font=\scriptsize] {serial @ 115200} (ino);
+    \draw[flow] (ino.west) -- ++(-1.0,0) |- node[pos=0.25, left, font=\scriptsize, align=right]
+      {counts\\0--1023} (ctl.west);
+  \end{tikzpicture}
+
+  \vspace{3mm}
+  {\footnotesize
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    direction & message & meaning \\
+    \midrule
+    MCU $\to$ host & \texttt{READY} & sent once after \texttt{setup()} \\
+    host $\to$ MCU & \texttt{SET <ch> <volts>} & sets DAC 0--7; replies \texttt{OK ch=.. v=..} \\
+    host $\to$ MCU & \texttt{STREAM} / \texttt{STOP} & replies \texttt{STREAMING} / \texttt{STOPPED} \\
+    MCU $\to$ host & \texttt{a0,...,a7} & free-running ADC counts, one line per loop \\
+    \bottomrule
+  \end{tabular}}
+
+  \vspace{2mm}
+  {\footnotesize Opening the port toggles DTR and resets the board, and
+  \texttt{setup()} zeroes all eight DAC channels ---
+  \textbf{connecting is itself a safing action}.}
+\end{frame}
+\note{The stack is three layers across one language boundary. The Arduino
+sketch owns the ADC and the SPI DAC. pyDAC is pure transport: it opens the
+port, waits for READY, and turns set-voltage calls into SET commands. The
+controller on top owns the control law, the safety interlocks and the logging.
+
+Two details worth carrying forward. First, SET commands and the sample stream
+share one wire, so an OK acknowledgement arrives buried inside sample lines --
+set_voltage reads up to fifty lines looking for it. That has consequences on
+the next slide.
+
+Second, a safety property that comes free: opening the serial port toggles DTR,
+which resets the board, and the sketch's setup function zeroes all eight DAC
+channels before anything else runs. So merely connecting de-energises the
+coils.}
+
+% ---------------------------------------------------------------- 12
+\begin{frame}{The wire is the bottleneck --- and the loop rate falls with coil count}
+  \begin{columns}[T]
+    \begin{column}{0.49\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \begin{axis}[width=6.2cm, height=4.0cm, ybar, bar width=17pt,
+                     symbolic x coords={1 coil, 4 coils, 8 coils},
+                     xtick=data, ymin=0, ymax=92,
+                     ylabel={loop rate (Hz)},
+                     xlabel={coils actually driven},
+                     nodes near coords={\pgfmathprintnumber[fixed,zerofill,precision=1]{\pgfplotspointmeta}},
+                     every node near coord/.append style={font=\scriptsize},
+                     enlarge x limits=0.28]
+          \addplot coordinates {(1 coil,73.0) (4 coils,23.5) (8 coils,12.5)};
+        \end{axis}
+      \end{tikzpicture}\\
+      {\scriptsize Median \texttt{DAMPING}-row spacing over 20 bench logs:
+      13.7 / 42.6 / 79.9\,ms. The wire itself delivers \textbf{348\,Hz}.
+      \src{analysis/out/loop\_rate.csv}}
+    \end{column}
+    \begin{column}{0.49\textwidth}
+      \footnotesize\raggedright
+      \texttt{set\_voltage} blocks reading up to 50 stream lines waiting for its
+      \texttt{OK}. \textbf{Every coil write costs a serial round trip}, so the
+      loop rate is set by how many coils are driven, not by the control law.
+
+      \vspace{2mm}
+      \textbf{Exactly one} threshold in the codebase is counted in \emph{samples}
+      rather than seconds:
+
+      \vspace{1mm}
+      \centering
+      \begin{tabular}{@{}lr@{}}
+        \toprule
+        \multicolumn{2}{@{}l}{\texttt{MAX\_CONSECUTIVE\_SATURATED = 30}} \\
+        \midrule
+        at 348\,Hz (the wire) & 86\,ms \\
+        at 23.5\,Hz (4 coils) & \textbf{$\sim$1.3\,s} \\
+        \bottomrule
+      \end{tabular}
+
+      \vspace{2mm}
+      \raggedright
+      \alert{And it costs phase.} $K_p = -0.040$ was seen on v0 driving
+      \emph{one} coil at 73\,Hz. Today's four-channel config runs $3\times$
+      slower, with correspondingly less margin at 1\,Hz.
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{A measurement that changed how we read every timing number in the repo,
+and it got sharper today.
+
+The serial link delivers about 348 samples a second. But the control loop does
+not run at that rate, and -- this is the new part -- the rate it does run at
+depends on how many coils are being driven. Re-analysing the twenty bench logs
+that reach the DAMPING state gives 73 hertz with one coil driven, 23.5 with
+four, and 12.5 with eight.
+The cause is pyDAC: every coil write blocks reading up to fifty stream lines
+waiting for its acknowledgement, so each additional driven coil costs another
+serial round trip per loop iteration.
+
+That reframes the minus 0.040 claim. v0 measured it with one coil driving at 73
+hertz. The four-channel configuration everything since v1 has used runs three
+times slower, which is three times the sampling lag in the velocity estimator
+and correspondingly less phase margin at one hertz. Whatever minus 0.040 means,
+it was not measured on the loop we run now.
+
+The other consequence is concrete. Exactly one threshold in the codebase is
+counted in samples rather than seconds: max consecutive saturated, thirty. At
+the wire rate that is 86 milliseconds. At the real four-coil loop rate it is
+about 1.3 seconds, so saturation essentially stops tripping on hardware. The
+rail interlock is safe because rail-sustain is expressed in seconds.
+
+The simulator models this with an ack-drain parameter calibrated so the in-sim
+loop reads 25 hertz against the bench's 24. The behavioural suite deliberately
+pins it to zero, because the suite is characterising the control law, not the
+transport.}
+
+% ---------------------------------------------------------------- 13
+\begin{frame}{Four sensors, one rigid body}
+  \begin{columns}[T]
+    \begin{column}{0.42\textwidth}
+      \centering
+      \begin{tikzpicture}[scale=0.95]
+        \draw[thick, fill=gray!10] (-1.6,-1.6) rectangle (1.6,1.6);
+        \foreach \x/\y/\n in {-1.6/-1.6/A0, -1.6/1.6/A1, 1.6/-1.6/A2, 1.6/1.6/A3}
+          \filldraw (\x,\y) circle (2.2pt) node[font=\scriptsize, inner sep=4pt,
+            anchor={\ifdim\x pt<0pt east\else west\fi}] {\n};
+        \draw[->] (-2.3,0) -- (2.3,0) node[right, font=\scriptsize] {$x$};
+        \draw[->] (0,-2.3) -- (0,2.3) node[above, font=\scriptsize] {$y$};
+      \end{tikzpicture}\\
+      {\scriptsize $z_i = \mathrm{LONG} + \mathrm{PITCH}\cdot y_i
+                          + \mathrm{YAW}\cdot x_i$}
+    \end{column}
+    \begin{column}{0.56\textwidth}
+      {\footnotesize
+      \begin{tabular}{@{}lcccc@{}}
+        \toprule
+        mode & $z_0$ & $z_1$ & $z_2$ & $z_3$ \\
+        \midrule
+        LONG      & $+$ & $+$ & $+$ & $+$ \\
+        PITCH     & $-$ & $+$ & $-$ & $+$ \\
+        YAW       & $-$ & $-$ & $+$ & $+$ \\
+        \textbf{BUTTERFLY} & $+$ & $-$ & $-$ & $+$ \\
+        \bottomrule
+      \end{tabular}}
+
+      \vspace{2mm}
+      \footnotesize
+      \textbf{Four sensors, three rigid-body freedoms.} BUTTERFLY is
+      identically zero for a rigid body --- any reading in it is one sensor
+      disagreeing with the other three.
+
+      \vspace{2mm}
+      \textbf{Consequences the whole project rests on:}
+      one OSEM/coil pair damps the \emph{whole} mass ($\approx$70\,s);
+      four together settle it in $\approx$17\,s
+      \src{provenance.md \S3, \S4}.
+      That $4\times$ is why v1 exists, and it is why a quorum of \emph{one}
+      healthy channel is enough.
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{The four OSEMs are not four independent oscillators. They are four
+sensors watching one mass, so their readings are projections of the same few
+degrees of freedom and are strongly correlated by construction.
+
+With four corners and three rigid-body freedoms -- longitudinal, pitch and yaw
+-- there is a fourth combination, called butterfly, that no rigid-body motion
+can produce. Any signal there is a sensor disagreeing with the other three,
+which is a free consistency check that does not depend on any threshold in ADC
+counts. The simulator models the plant this way.
+
+Two measured facts follow, and both are load-bearing. Driving a single
+OSEM-coil pair damps all four channels, because removing energy from one
+projection removes it from the coupled system -- about seventy seconds for the
+whole system. Running all four independent loops together settles it in about
+seventeen. That four-fold improvement is the entire justification for v1
+existing, and the seventy-second single-channel result is what later justifies
+letting the rig keep running on one healthy axis.
+
+Note carefully what this is not: it is still four independent single-input
+single-output loops. Each OSEM only ever drives its own coil. There is no
+decoupling between modes anywhere in v0 through v10.}
+
+% ---------------------------------------------------------------- 14
+\begin{frame}{The supervisor: three states}
+  \centering
+  \begin{tikzpicture}[node distance=3.2cm and 3.6cm]
+    \node[state, initial, initial text={start}] (C) {CALIBRATING\\{\tiny gain 0, out at BIAS}};
+    \node[state, right=of C] (D) {DAMPING\\{\tiny the only actuating state}};
+    \node[state, below=1.9cm of D] (F) {FAULT\\{\tiny all outputs at BIAS}};
+    \draw[flow] (C) -- node[above, font=\scriptsize, align=center]
+      {$t \geq$ \texttt{CALIBRATION\_S}\\{\tiny sets \texttt{baseline\_rms}}} (D);
+    \draw[flow] (D) -- node[right, font=\scriptsize, align=left]
+      {any rail, any runaway,\\or any pinned actuator} (F);
+    \draw[flow] (C.south) |- node[pos=0.75, below, font=\scriptsize] {any rail} (F.west);
+    \draw[flow] (F.west) -- ++(-2.0,0) |- node[pos=0.25, left, font=\scriptsize, align=right]
+      {all clear for\\\texttt{FAULT\_CLEAR\_SUSTAIN\_S}\\$= 5$\,s} (C.south west);
+  \end{tikzpicture}
+
+  \vspace{2mm}
+  {\footnotesize
+  \textbf{No transition out of \texttt{DAMPING} except into \texttt{FAULT}},
+  and no terminal state. \texttt{Ctrl+C} leaves through a \texttt{finally}
+  block that returns every DAC channel to bias.
+  \texttt{CALIBRATION\_S} was 8\,s on v0--v2 and is \textbf{20\,s from v3
+  onward}.}
+\end{frame}
+\note{One string variable, three values, and it gates actuation and is written
+to every CSV row. The simulator drives the shipping code through this same
+state machine rather than reimplementing it.
+
+Calibrating: all gains forced to zero, outputs held at bias, accumulating the
+squared bandpassed signal. On exit it sets baseline RMS, which as we saw is the
+reference for the runaway breaker, the scheduler and the lock detector.
+
+Damping: the only state that actuates. Per sample it schedules gains, checks
+for runaway, updates the lock detector, and actuates.
+
+Fault: all outputs to bias, gain zeroed every sample, waiting for five seconds
+of all-clear before re-calibrating.
+
+Two structural notes. There is no way out of DAMPING except into FAULT, and
+there is no terminal state -- Ctrl-C leaves through a finally block that
+returns every DAC channel to bias and closes the log. And note what does not
+run in FAULT: the schedule update, the runaway check and the lock update are
+all skipped. That omission is the first defect we will look at.}
+
+% ================================================================ PART II
+\section{The ladder: v0 to v3}
+
+% ---------------------------------------------------------------- 15
+\begin{frame}{v0 --- the baseline}
+  \begin{columns}[T]
+    \begin{column}{0.55\textwidth}
+      \footnotesize
+      \texttt{ENABLE\_CHANNEL = [True, False, False, False]}\\
+      P-only: $u = -K\cdot v$, \texttt{KI\_GAIN} $=$ \texttt{KD\_GAIN} $= 0$.
+
+      \vspace{2mm}
+      \textbf{What v0 already got right} (and every version since inherits):
+      \begin{enumerate}\setlength{\itemsep}{1pt}
+        \item Runs continuously, not as fixed-duration sweep steps.
+        \item Measures its \emph{own} baseline every (re)start, instead of
+              borrowing one 45\,s window from a 9-minute run.
+        \item A rail interlock on \emph{raw counts}, separate from the RMS
+              breaker --- because a blind OSEM flatlines, which an RMS-only
+              check reads as \emph{perfect stability}.
+        \item Auto-recovery out of \texttt{FAULT}.
+        \item A lock detector that prints a real number.
+        \item Streaming CSV, flushed periodically, survives an unclean kill.
+        \item Gain scheduling with a slew-limited ramp.
+      \end{enumerate}
+    \end{column}
+    \begin{column}{0.43\textwidth}
+      \centering
+      {\scriptsize
+      \begin{tabular}{@{}lr@{}}
+        \toprule
+        \multicolumn{2}{@{}l}{\textbf{v0, through \texttt{harness.py}}} \\
+        \midrule
+        ch0 amplitude ratio & 0.188 \\
+        time to lock        & 12.1\,s \\
+        suite (when present)& 18/18 \\
+        \midrule
+        undriven ch1/2/3    & 0.333 / 0.316 / 0.253 \\
+        \bottomrule
+      \end{tabular}}
+
+      \vspace{3mm}
+      \footnotesize
+      \raggedright
+      \textbf{Three defects shipped with it}, all present in v0, v1 and v2:
+      \texttt{saturation-latch}, \texttt{rail-threshold},
+      \texttt{runaway-baseline}.
+
+      \vspace{2mm}
+      Plus a fourth nobody found until v9.
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{v0 is the 2026-07-15 bench configuration: channel zero only, pure
+velocity feedback, I and D zeroed. It is the only entry in the whole ladder
+ever confirmed against a scope.
+
+Read the left column as the design that survived. v0 already established seven
+things that no later version changed: continuous running instead of sweep
+steps, measuring its own baseline fresh on every restart, a rail interlock on
+raw counts kept deliberately separate from the RMS breaker, auto-recovery,
+a lock detector that prints a number, a streaming CSV that survives a crash,
+and slew-limited gain scheduling.
+
+The rail interlock deserves a moment. A fully occluded OSEM pins the ADC at
+zero, and the bandpassed signal then flatlines near zero -- which looks like
+perfect stability to an RMS check, at the exact moment the sensor has gone
+blind. So rail state is checked on raw counts, not on the scaled voltage.
+
+The numbers on the right were measured through the harness while v0 was still
+in the tree. It also shipped three defects, and a fourth that nobody found
+until v9 -- nine versions later.}
+
+% ---------------------------------------------------------------- 16
+\begin{frame}{v1 --- one line changed}
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[width=10.0cm, height=3.6cm, xbar, bar width=13pt,
+                 symbolic y coords={four channels, one channel},
+                 ytick=data, xmin=0, xmax=82,
+                 xlabel={settling time (s), \texttt{provenance.md} \S3--\S4},
+                 nodes near coords,
+                 every node near coord/.append style={font=\scriptsize},
+                 enlarge y limits=0.55]
+      \addplot coordinates {(70,one channel) (17,four channels)};
+    \end{axis}
+  \end{tikzpicture}
+
+  \vspace{1mm}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \footnotesize
+      \texttt{ENABLE\_CHANNEL = [True]*4}. Nothing else moved: same gains, same
+      filters, same safety code, same three defects.
+
+      \vspace{2mm}
+      v0's docstring claim that only ch0 was validated was \textbf{already two
+      days out of date} when v0 was frozen --- \S4 of the report documents all
+      four damping simultaneously.
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \footnotesize
+      \textbf{Why $4\times$, when it is still four SISO loops?}
+      The four loops act \emph{in parallel} over the coupled modes, so the
+      overall rate is closer to the \emph{sum} of their contributions than to
+      the single slowest coupling path.
+
+      \vspace{2mm}
+      Measured: ch0 ratio $0.188 \to \mathbf{0.025}$, lock
+      $12.1 \to \mathbf{10.7}$\,s.
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{v1 is a one-line diff: enable all four channels. It is worth its own
+slide because of the size of the effect and because of what it says about the
+architecture.
+
+Seventy seconds down to seventeen. And this is still four independent
+single-input single-output loops -- no MIMO, no decoupling, each OSEM driving
+only its own coil. The gain comes from parallel coverage of the coupled modes:
+the loops act in parallel rather than in series, so the overall damping rate is
+closer to the sum of the contributions than to the slowest single coupling
+path.
+
+Note the provenance quirk. v0 shipped with three of four channels disabled and
+a docstring saying only channel zero was validated -- but the report documenting
+all four running together was already two days old at that point. v1 is simply
+the repo catching up to its own evidence.}
+
+% ---------------------------------------------------------------- 17
+\begin{frame}{v2 --- I and D switched on, and the prediction that held}
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[width=9.6cm, height=3.8cm, ybar, bar width=20pt,
+                 symbolic x coords={v0 (ch0 only), v1 (P-only), v2 (full PID), v3 (full PID)},
+                 xtick=data, ymin=0, ymax=0.23,
+                 ylabel={ch0 amplitude ratio},
+                 nodes near coords={\pgfmathprintnumber[fixed,zerofill,precision=3]{\pgfplotspointmeta}},
+                 every node near coord/.append style={font=\scriptsize},
+                 x tick label style={font=\scriptsize},
+                 enlarge x limits=0.16]
+      \addplot coordinates {(v0 (ch0 only),0.188) (v1 (P-only),0.025)
+                            (v2 (full PID),0.028) (v3 (full PID),0.029)};
+    \end{axis}
+  \end{tikzpicture}
+
+  \vspace{1mm}
+  {\footnotesize
+  \textbf{The I and D terms bought nothing in damping --- exactly as predicted},
+  because neither dissipates. And on hardware v2 was \emph{worse}: its
+  integrator was non-zero in \textbf{63\%} of samples and pushed a pinned-actuator
+  streak from \textbf{28 to 31} against a threshold of \textbf{30}.
+
+  \vspace{2mm}
+  Peak $|I|$ was $0.084$\,V against a $0.150$\,V clamp ---
+  \textbf{\texttt{I\_CLAMP\_V} never even engaged.} Bounded is not the same as
+  unwinding.}
+\end{frame}
+\note{v2 gives Ki and Kd real values for the first time. The PID structure had
+been in the file since v0; both gains were simply zero, which collapsed the sum
+to the P-only law.
+
+The measured result is that it did not damp better -- 0.028 against v1's 0.025,
+which is noise. That is exactly what the docstring predicted before the run,
+for the reason on the P-I-D slide: neither term removes energy.
+
+But it was not neutral. On hardware v2 was actively worse, and in a way that is
+the perfect setup for the defect slides. Its integrator was non-zero in 63
+percent of samples and it pushed the longest pinned-actuator streak from 28
+samples to 31, against a threshold of 30. Three samples either side of that
+threshold is the whole difference between a fault that clears itself in five
+seconds and one that needs a human.
+
+And notice: peak integrator output was 0.084 volts against a 0.150 volt clamp.
+The clamp never engaged at all. Bounded is not the same thing as unwinding --
+which is precisely why v3 replaces the clamp-plus-conditional-integration
+scheme with back-calculation.
+
+One caveat the repo is careful about: this was not isolated from Kd. A clean
+test would zero one and keep the other.}
+
+% ---------------------------------------------------------------- 18
+\begin{frame}{On the bench, 2026-08-03 --- the only hardware evidence for v1--v3}
+  \centering
+  {\footnotesize
+  \begin{tabular}{@{}lccc@{}}
+    \toprule
+     & \textbf{v1} & \textbf{v2} & \textbf{v3} \\
+    \midrule
+    Law                        & P-only & full PID & full PID \\
+    Lock time                  & 13.8\,s & 13.9\,s & 14.5\,s \\
+    Baseline (ch0)             & 0.6316\,V & 0.3158\,V & 0.1804\,V \\
+    Peak $|\mathrm{bp}|$       & 3.141\,V & 2.837\,V & 0.410\,V \\
+    ADC clipped                & 2.19\% & \textbf{10.40\%} & 0.00\% \\
+    Samples with non-zero $I$  & 0 of 6939 & 4709 of 7513 & all \\
+    Longest pinned run         & 28 & \textbf{31} & 0 \\
+    Trip type                  & runaway & \textbf{saturation} & none \\
+    Outcome                    & recovered in 5.0\,s & \alert{\textbf{latched $\sim$50\,s}} & no fault \\
+    \bottomrule
+  \end{tabular}}
+
+  \vspace{3mm}
+  {\footnotesize
+  \alert{Do not compare \texttt{ratio} across these runs} --- it is normalised
+  to each run's own baseline and those differ by $3.5\times$. Normalising the
+  absolute locked RMS gives $0.139 / 0.128 / 0.115$: indistinguishable.
+  \textbf{These runs do not rank the three on damping quality.}}
+\end{frame}
+\note{First hardware runs since v0, on 2026-08-03. This table is the only
+hardware evidence in the repo for v1, v2 and v3, and everything the later
+versions carry traces back to it.
+
+Read across the bottom four rows. v1 clipped the ADC on 2.19 percent of
+samples, never got its integrator going, reached a 28-sample pinned run,
+tripped the runaway breaker and cleared itself in five seconds. v2 clipped ten
+percent, ran its integrator most of the time, reached 31 samples against a
+threshold of 30, tripped saturation instead -- and latched a fault for the
+remaining fifty seconds of the run.
+
+The last line on the slide is the discipline point. The ratio column is
+normalised to each run's own baseline, and those baselines differ by a factor
+of three and a half. If you normalise the absolute locked RMS instead you get
+0.139, 0.128 and 0.115 -- indistinguishable. These runs prove things about
+failure behaviour. They do not rank the three versions on damping quality, and
+the repo says so explicitly.}
+
+% ---------------------------------------------------------------- 19
+\begin{frame}{Defect 1: \texttt{saturation-latch} --- reproduced on hardware}
+  \begin{columns}[T]
+    \begin{column}{0.47\textwidth}
+      \centering
+      \begin{tikzpicture}[node distance=2.2cm and 2.6cm]
+        \node[state] (D) {DAMPING};
+        \node[state, below=1.6cm of D] (F) {FAULT};
+        \draw[flow] (D) -- node[right, font=\scriptsize, align=left]
+          {saturation sets\\\texttt{saturated\_flag}} (F);
+        \draw[flow, dashed] (F.west) .. controls +(-1.5,0) and +(-1.5,0) ..
+          node[pos=0.5, font=\scriptsize, align=center, fill=white, inner sep=1pt]
+          {needs\\\texttt{all\_clear}} (D.west);
+        \node[font=\scriptsize, align=center, anchor=north] at (F.south)
+          {\alert{\texttt{check\_runaway()} never runs here}\\
+           \alert{$\Rightarrow$ the flag can never clear}};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.50\textwidth}
+      \footnotesize\raggedright
+      v0 recomputed \texttt{saturated\_flag} only inside
+      \texttt{check\_runaway()}, which does not run in \texttt{FAULT}.
+
+      \vspace{1mm}
+      A saturation trip therefore pinned \texttt{all\_clear} to \texttt{False}
+      \textbf{forever} --- permanent fault until a manual restart, flatly
+      contradicting the auto-recovery the module advertises. A \emph{runaway}
+      trip recovered fine; \textbf{only saturation deadlocked}.
+
+      \vspace{2mm}
+      \textbf{The fix (v3).} Maintain the flag in \texttt{actuate()}, where the
+      output is actually known --- so it refreshes every sample in every state,
+      including \texttt{FAULT}, where the output is held at bias and it clears
+      on its own.
+
+      \vspace{2mm}
+      \alert{\textbf{Reproduced on hardware, 2026-08-03.}} Across 16{,}966
+      \texttt{FAULT} samples v2 logged exactly \textbf{one distinct ratio value
+      (3.6803)} --- nothing was being recomputed at all.
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{The first of the three original defects, and the only one reproduced on
+hardware.
+
+v0 recomputed the saturated flag only inside check-runaway, and check-runaway
+does not run in the FAULT state. So a saturation trip would set the flag, enter
+FAULT, and then nothing could ever clear it: a permanent fault requiring a
+manual restart, in a module that advertises auto-recovery. A runaway trip
+recovered fine, because it never set that flag. Only saturation deadlocked.
+
+The fix in v3 is to maintain the flag in actuate, where the output is actually
+known, so it refreshes every sample in every state including FAULT -- and in
+FAULT the output is held at bias, so it clears itself.
+
+What makes this the strongest defect story is the evidence. On the bench, v2
+latched for the last fifty seconds of a run, and the proof that it was the
+stale flag rather than a live condition is that across 16,966 FAULT samples
+there is exactly one distinct ratio value, 3.6803. Nothing was being recomputed
+at all.}
+
+% ---------------------------------------------------------------- 20
+\begin{frame}{Defect 2: \texttt{rail-threshold} --- an interlock at the noise floor}
+  \begin{columns}[T]
+    \begin{column}{0.55\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \begin{axis}[width=7.0cm, height=4.4cm, ybar, bar width=10pt,
+                     xtick={1,2,3,4},
+                     xticklabels={0\,mV, 5\,mV, 10\,mV, 20\,mV},
+                     xmin=0.4, xmax=4.6, ymin=0, ymax=1.15,
+                     ytick={0,0.2,0.4,0.6},
+                     ylabel={time to arm (s)},
+                     xlabel={injected sensor noise},
+                     legend style={at={(0.02,0.98)}, anchor=north west,
+                                   legend columns=2, draw=none, fill=none},
+                     nodes near coords={\pgfmathprintnumber[fixed,zerofill,precision=2]{\pgfplotspointmeta}},
+                     every node near coord/.append style={font=\tiny}]
+          \addplot coordinates {(1,0.51) (2,0.51)};
+          \addlegendentry{v0/v1/v2}
+          \addplot coordinates {(1,0.41) (2,0.41) (3,0.41) (4,0.41)};
+          \addlegendentry{v3 onward}
+          \node[font=\tiny, anchor=south, align=center] at (axis cs:2.85,0.50)
+            {\alert{v0}\\\alert{never}\\\alert{arms}};
+          \node[font=\tiny, anchor=south, align=center] at (axis cs:3.85,0.50)
+            {\alert{v0}\\\alert{never}\\\alert{arms}};
+        \end{axis}
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.43\textwidth}
+      \footnotesize
+      \textbf{v0:} \texttt{RAIL\_LOW\_COUNTS = 3} of 1023 ($\sim$14.7\,mV), and
+      250 \emph{consecutive} samples under it. One noise sample above the line
+      reset the count.
+
+      \vspace{2mm}
+      So above $\sim$1 count RMS of dark noise the interlock silently
+      \textbf{stopped arming} --- and a blind channel then reports an amplitude
+      ratio near \emph{zero}, reading as the \textbf{steadiest axis on the
+      rack} while the loop stays in \texttt{DAMPING} and declares itself locked.
+
+      \vspace{2mm}
+      \textbf{v3:} 12 counts, and \textbf{80\% of a 0.5\,s window} rather than
+      an unbroken run --- noise now \emph{dilutes} the evidence instead of
+      erasing it.
+
+      \vspace{2mm}
+      \alert{Also reproduced on hardware:} v1 logged 246 genuinely clipped ADC
+      samples (2.19\%) and \textbf{the rail flag never set once}.
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{The second defect is a threshold sitting in the noise.
+
+v0 required the raw counts to be below 3 out of 1023 -- about fifteen
+millivolts -- for 250 consecutive samples. The word consecutive is the bug: a
+single noise sample poking above the line resets the counter. So above roughly
+one count RMS of dark noise the interlock silently stops arming altogether.
+
+And the failure mode is the worst possible one. A blind channel's bandpassed
+signal flatlines, so it reports an amplitude ratio near zero and reads as the
+steadiest axis on the rack -- while the loop stays in DAMPING and declares
+itself locked on a dead sensor.
+
+v3 moves the threshold to 12 counts and, more importantly, changes the test
+from an unbroken run to eighty percent of a half-second window. Now noise
+dilutes the evidence instead of erasing it. The chart shows the difference: at
+ten and twenty millivolts of injected noise the old interlock never arms at
+all, while v3 arms in 0.41 seconds regardless.
+
+This was reproduced on hardware too: v1 logged 246 genuinely clipped ADC
+samples, 2.19 percent of the run, and the rail flag never set once, because the
+clipping is transient and the check needed 250 in a row.}
+
+% ---------------------------------------------------------------- 21
+\begin{frame}{Defect 3: \texttt{runaway-baseline} --- improved, \emph{not} solved}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \begin{axis}[width=6.6cm, height=4.0cm, ybar, bar width=24pt,
+                     xtick={1,2}, xticklabels={v0/v1/v2, v3/v4/v5},
+                     xmin=0.4, xmax=2.6, ymin=0, ymax=52,
+                     ylabel={worst baseline skew (\%)},
+                     nodes near coords={\pgfmathprintnumber[fixed,zerofill,precision=1]{\pgfplotspointmeta}},
+                     every node near coord/.append style={font=\scriptsize}]
+          \addplot coordinates {(1,39.3) (2,19.7)};
+          \draw[dashed, thick] (axis cs:0.4,35) -- (axis cs:2.6,35);
+          \node[font=\scriptsize, anchor=south east] at (axis cs:2.55,35.5)
+            {suite line, 35\%};
+        \end{axis}
+      \end{tikzpicture}\\
+      {\scriptsize One 6\,V/s impulse swept across the calibration window
+      ($t = 2/4/6$\,s), rigid-body plant, \textbf{simulator only}.}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \footnotesize
+      \textbf{v0:} one RMS over a single 8\,s window, then compared against for
+      the rest of the run. \\
+      \textbf{v3:} calibrate 20\,s, take the \textbf{median of 5 sub-windows},
+      so one bad sub-window is outvoted.
+
+      \vspace{2mm}
+      \textbf{Read the \emph{spread}, not any one column.} On a retired
+      seven-point sweep v0 came out \emph{better} than v3 at $t=5$\,s and
+      $t=7$\,s. A single fixed shock time can rank them backwards; what the
+      median buys is a \textbf{bound}.
+
+      \vspace{2mm}
+      \alert{It does not help against sustained disturbance.} Gain is zero
+      during calibration, so a shock rings down over a timescale comparable to
+      the window itself and there is no clean sub-window left to prefer.
+
+      \vspace{1mm}
+      \textbf{Labelled a partial fix in the code.} A real fix needs a baseline
+      that tracks, or a transient detector that restarts calibration ---
+      neither exists in any version.
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{The third defect is the one that was never really fixed, and the repo is
+honest about that.
+
+v0 measured the baseline as a single RMS over one 8-second window and then
+compared against it for the rest of the run. If a bump landed inside that
+window, the baseline was inflated for the whole run -- which desensitises the
+runaway breaker and makes the lock detector easier to satisfy. v3 calibrates
+for twenty seconds and takes the median of five sub-windows, so one bad
+sub-window gets outvoted.
+
+The measured improvement is 39.3 percent worst-case skew down to 19.7, against
+an assertion line at 35. But read that as a bound, not as a ranking. On a
+retired seven-point sweep, v0 actually came out better than v3 at two of the
+shock times. A single fixed shock time can rank them backwards. What the median
+buys is a bound on the damage wherever the transient lands, which is why the
+harness sweeps the shock across the window and asserts the worst case.
+
+And it does not help at all against sustained disturbance, because gain is zero
+during calibration so a shock rings down over a timescale comparable to the
+whole window. Once several have landed there is no clean sub-window left to
+prefer. The code labels this a partial fix, and it still is in v10.}
+
+% ---------------------------------------------------------------- 22
+\begin{frame}{v3 --- the control law itself becomes a real PID}
+  \centering
+  {\footnotesize
+  \begin{tabular}{@{}p{0.30\textwidth}p{0.62\textwidth}@{}}
+    \toprule
+    \textbf{change} & \textbf{why} \\
+    \midrule
+    derivative on \emph{measurement}, not on error
+      & algebraically identical while the setpoint is a constant zero, but it
+        cannot produce a derivative kick if that ever changes \\
+    \addlinespace
+    \textbf{back-calculation anti-windup}, \texttt{TRACK\_TC\_S} $= 0.5$\,s
+      & the old scheme froze the accumulator at a hard limit; this bleeds it
+        back at a defined time constant, so recovery from saturation is smooth
+        rather than dependent on which side of a conditional the error fell on.
+        \texttt{I\_CLAMP\_V} stays as a backstop \\
+    \addlinespace
+    one \texttt{reset()}, on every entry to a non-actuating state
+      & exactly one definition of bumpless re-entry \\
+    \bottomrule
+  \end{tabular}}
+
+  \vspace{3mm}
+  {\footnotesize
+  Two kinds of change kept deliberately separate --- \textbf{the control law}
+  above, \textbf{the three defect fixes} on the previous slides --- so that a
+  bench comparison can attribute an effect to one or the other.
+
+  \vspace{2mm}
+  \texttt{Channel.p\_term} / \texttt{i\_term} / \texttt{d\_term} /
+  \texttt{ki} / \texttt{kd} survive as \emph{properties}, because the logger,
+  the status line and the simulator's live gain editing all use those names.
+
+  \vspace{2mm}
+  \textbf{v3 is one of only three controllers with \texttt{BENCH\_STATUS =
+  validated}} (with v7 and v9). It is the minimal PID baseline to A/B against.}
+\end{frame}
+\note{v3 does two separable things, and keeping them separate is the point:
+restructure the control law, and fix the three defects. A bench comparison can
+then attribute an effect to one or the other.
+
+The control law changes are all standard practice. Derivative on measurement
+rather than on error -- algebraically the same here because the setpoint is a
+constant zero, but it cannot kick if that ever changes. Back-calculation
+anti-windup replacing a hard clamp plus conditional integration: the old scheme
+froze the accumulator at a limit, and recovery then depended on which side of a
+conditional the error happened to fall. And exactly one reset method, called on
+every entry to a non-actuating state, so there is one definition of bumpless
+re-entry rather than several.
+
+One engineering detail worth noting: the per-channel P, I and D terms survive
+as properties on the Channel object, because the logger, the status line and
+the browser simulator's live gain editing all use those names. Refactors that
+break the observability of a running rig are not free.
+
+v3 is still in the tree today, and it is one of only three controllers marked
+validated on hardware. It is the minimal PID baseline -- the thing to A/B
+against when you want to know whether a supervisor change actually helped.}
+
+% ================================================================ PART III
+\section{The fork in the road}
+
+% ---------------------------------------------------------------- 23
+\begin{frame}{The v4 that failed: modal (MIMO) damping}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \footnotesize
+      \textbf{The idea, and it is a good one.} Four loops each fighting a plant
+      the other three are also driving is the wrong decomposition. Control the
+      \emph{motion}, not the sensors:
+      \begin{enumerate}\setlength{\itemsep}{1pt}
+        \item Accumulate the $4\times4$ covariance during calibration ---
+              its eigenvectors \emph{are} the observed modes.
+        \item A new \texttt{SYSID} state: dither each coil in turn, measure how
+              the modes answer $\Rightarrow$ the actuation matrix $B$.
+        \item Damp per \emph{mode}; distribute through $B^{+}$.
+      \end{enumerate}
+
+      \vspace{2mm}
+      \textbf{Its own selling point:} it would \emph{discover} that ch2 pushes
+      the other way instead of having to be told.
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \footnotesize
+      \textbf{It did not.} Written and deleted the same day, 2026-08-03.
+
+      \vspace{2mm}
+      \centering
+      {\scriptsize\setlength{\tabcolsep}{3pt}
+      \begin{tabular}{@{}ll@{}}
+        \toprule
+        ground truth & $[-0.59,\, -0.45,\, \mathbf{+2.45},\, -0.51]$ \\
+        \midrule
+        vel $\times$ PRBS & $[+2.0,\, +0.2,\, -0.53,\, -1.27]$ \\
+        acc $\times$ PRBS & $[-0.71,\, -0.47,\, -0.86,\, -1.96]$ \\
+        \bottomrule
+      \end{tabular}}
+
+      \vspace{2mm}
+      \raggedright
+      \textbf{Neither recovered ch2's sign.} Two causes, both diagnosed:
+      zero-lag correlation on \emph{velocity} has no coherent term, because
+      force acts on \emph{acceleration}; and a $\sim$40-bit PRBS gives
+      $\sim$\textbf{16\%} inter-channel crosstalk --- the size of the
+      differences being measured.
+
+      \vspace{2mm}
+      Its \emph{mode estimator} was fine: 98.8\% / 1.2\% mode content.
+    \end{column}
+  \end{columns}
+  \vspace{1mm}
+  \centering\footnotesize
+  \alert{The hand-measured constant beat the automatic method.}
+\end{frame}
+\note{This is the story beat I most wanted in the deck.
+
+There were two different files called osem.v4.py. This is the first one:
+a modal, MIMO controller, written and deleted on the same day, 2026-08-03.
+
+The idea is genuinely better than what shipped. Four independent loops on one
+rigid body is the wrong decomposition -- each loop is fighting a plant the
+other three are also driving. So: learn the modes from the covariance of the
+sensor vector during calibration, learn the actuation matrix by dithering each
+coil in turn, damp per mode, and distribute the modal command through the
+pseudo-inverse. Its headline selling point was that it would discover channel
+two's inverted sign rather than having to be told.
+
+It failed at exactly that. Ground truth has channel two at plus 2.45 against
+about minus 0.5 for the others -- four times the magnitude and the opposite
+sign. The velocity-times-PRBS estimate got the sign wrong on three of four
+channels; the acceleration estimate got channel two's sign wrong too.
+
+The diagnosis is clean and is worth carrying: a zero-lag correlation on
+velocity has no coherent term to find, because force acts on acceleration; and
+a roughly forty-bit PRBS gives about sixteen percent inter-channel crosstalk,
+which is the same size as the differences being measured. Its mode estimator,
+notably, was fine -- 98.8 percent of the energy in one mode.
+
+The lesson: the hand-measured constant from a 2026-07 report beat the automatic
+method. The fix is not more cleverness, it is a better measurement -- stepped
+sine and lock-in, which becomes v6.}
+
+% ================================================================ PART IV
+\section{The supervisor ladder: v4 to v10}
+
+% ---------------------------------------------------------------- 24
+\begin{frame}{v4 --- \texttt{auto-disable}: demote the axis, do not freeze the rig}
+  \begin{columns}[T]
+    \begin{column}{0.44\textwidth}
+      \centering
+      \begin{tikzpicture}[node distance=1.4cm]
+        \node[blk, minimum width=3.0cm] (rail) {rail on ch$_i$};
+        \node[blk, minimum width=3.0cm, below=0.9cm of rail] (dem)
+          {ch$_i$ held at bias\\ch$_{j\neq i}$ \textbf{keep damping}};
+        \node[blk, minimum width=3.0cm, below=0.9cm of dem] (q)
+          {fewer than\\\texttt{MIN\_HEALTHY\_CHANNELS} $= 1$};
+        \node[blk, minimum width=3.0cm, below=0.9cm of q] (f) {global \texttt{FAULT}};
+        \draw[flow] (rail) -- (dem);
+        \draw[flow] (dem) -- (q);
+        \draw[flow] (q) -- (f);
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.54\textwidth}
+      \footnotesize
+      \textbf{The problem.} v3 reads
+      \texttt{any\_rail = any(ch.rail\_fault ...)} and freezes all four. One
+      OSEM losing its flag stops \emph{all} damping --- \alert{at exactly the
+      moment of largest excursion}, which is what made the flag leave range.
+
+      \vspace{2mm}
+      \textbf{A quorum of one is not a guess}: \texttt{provenance.md} \S3
+      measured one OSEM/coil pair damping the whole rigid body.
+
+      \vspace{2mm}
+      {\scriptsize\setlength{\tabcolsep}{4pt}
+      \begin{tabular}{@{}ll>{\raggedright\arraybackslash}p{0.46\linewidth}@{}}
+        \toprule
+        condition & v4 & why \\
+        \midrule
+        rail & \textbf{demote} & local \emph{sensing} failure: that
+          measurement is garbage \\
+        runaway & global & not localisable --- four loops, one body \\
+        saturation & global & measurement fine, only the output clipped \\
+        \bottomrule
+      \end{tabular}}
+
+      \vspace{2mm}
+      Saturation is deliberately \emph{not} demoted: a saturated channel is
+      still pushing the right way at full authority.
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{v4 -- the second file of that name -- is v3 plus exactly one behavioural
+change, so a bench comparison isolates it. It gives identical damping numbers
+to v3, because in a quiet lab nothing ever demotes. The whole change is dormant
+until something goes wrong.
+
+The problem it fixes: v3 freezes all four channels on any one rail. The stated
+reason was that all four OSEMs sit on one rigid body so one blind sensor makes
+the optic's position untrustworthy globally. That is true for reconstructing
+the optic's state -- but no version does that. They are four independent SISO
+loops; channel zero never reads channel two's sensor. So the effect was that
+all damping stopped at the moment of largest excursion, which is exactly what
+made the flag leave range in the first place.
+
+The table on the right is the design, not an implementation detail. A rail is
+a local sensing failure, so demote that channel. A runaway is not localisable
+-- four loops on one body, so "amplitude is growing under feedback" does not
+say which loop is feeding it -- so it stays global. And saturation stays global
+deliberately: a saturated channel is still pushing the right way at full
+authority, so parking it would remove damping at peak amplitude, the same
+mistake this version exists to fix. It would also limit-cycle, since a channel
+demoted for saturation immediately stops saturating.
+
+Re-arming has three careful details: the filters are not reset, because
+re-seeding a one-pole injects a step and the two-second hold is five time
+constants of the highpass; the baseline is carried forward rather than
+re-measured, because re-measuring would measure the event; and the gain ramps
+back from zero.}
+
+% ---------------------------------------------------------------- 25
+\begin{frame}{v5 --- four channels become four lanes}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \centering
+      {\footnotesize
+      \begin{tabular}{@{}lrrrr@{}}
+        \toprule
+         & total & code & logic & \texttt{main()} \\
+        \midrule
+        v3 & 908 & 515 & 400 & 64 \\
+        v4 & 1172 & 577 & 460 & 64 \\
+        \textbf{v5} & \textbf{533} & \textbf{356} & \textbf{270} & \textbf{48} \\
+        \bottomrule
+      \end{tabular}}
+
+      \vspace{2mm}
+      {\footnotesize \texttt{Channel} went from \textbf{231 lines to 13}: it
+      stopped being where state lives and became a \emph{view} onto the
+      controller's arrays, so \texttt{sim/server.py} and \texttt{harness.py}
+      kept working unchanged.}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \footnotesize
+      \textbf{The evidence it is the same controller} --- every printed
+      observable matches v4 \emph{exactly}, on two different plants:
+
+      \vspace{1mm}
+      \centering
+      {\scriptsize
+      \begin{tabular}{@{}ll@{}}
+        \toprule
+        observable & v4, and v5 identically \\
+        \midrule
+        ratios & 0.029 / 0.098 / 0.045 / 0.132 \\
+        lock & 10.6\,s \\
+        peak $P$/$I$/$D$ & 0.0881 / 0.0644 / 0.0412\,V \\
+        re-arm & 2.10\,s \\
+        \bottomrule
+      \end{tabular}}
+
+      \vspace{2mm}
+      \raggedright
+      \textbf{The one thing that got worse:} speed, and in the direction you
+      would not guess --- \textbf{57.5\,$\mu$s/step against v4's 42.4}. numpy's
+      per-call overhead on a length-4 array beats four scalar operations.
+      Both are $\sim$50$\times$ inside the 2.88\,ms budget, so it is
+      irrelevant on hardware.
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{v5 is two changes kept separable. First the shape: four channels become
+four lanes of one numpy array instead of four objects each running identical
+scalar arithmetic. Every filter, the PID, the gain schedule and each interlock
+becomes one expression rather than four.
+
+The file halved. But the interesting number is that the per-channel class went
+from 231 lines to 13, because it stopped being where state lives and became a
+view onto the controller's arrays. Attribute access forwards straight through,
+which is what let the simulator and the harness keep working unchanged --
+including live gain editing from the browser UI.
+
+The evidence that a rewrite is behaviour-preserving is the table on the right:
+every printed observable matches v4 exactly, on two different plant models,
+and that was verified before anything new was added on top.
+
+And one honest regression, in the direction most people would not guess.
+Vectorising made it slower -- 57.5 microseconds per step against 42.4. numpy's
+per-call overhead on a length-four array is larger than four scalar operations.
+Both are about fifty times inside the 2.88 millisecond budget, so it does not
+matter on hardware; it only makes the simulator suite slower to run.}
+
+% ---------------------------------------------------------------- 26
+\begin{frame}{v5 --- \texttt{fast-refault}: stop re-measuring during the event}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \begin{axis}[width=6.6cm, height=4.3cm,
+                     xlabel={drive amplitude}, ylabel={mean true displacement (V)},
+                     xmin=2.0, xmax=3.7, ymin=0, ymax=2.9,
+                     axis lines=left, legend pos=north west,
+                     legend cell align=left, mark size=1.7pt]
+          \addplot[thick, mark=*] coordinates
+            {(2.2,0.550) (2.5,1.409) (3.0,1.908) (3.5,2.633)};
+          \addlegendentry{v4}
+          \addplot[thick, dashed, mark=square*] coordinates
+            {(2.2,0.269) (2.5,0.307) (3.0,0.451) (3.5,0.773)};
+          \addlegendentry{v5}
+        \end{axis}
+      \end{tikzpicture}\\
+      {\scriptsize Simulator \emph{ground truth} over 300\,s --- not the
+      controller's own estimate.}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \footnotesize
+      \textbf{The problem.} v0--v4 answer \emph{every} fault the same way: wait
+      for all-clear, then re-calibrate. That is \texttt{CALIBRATION\_S} of open
+      loop at zero gain --- correct for a transient, \emph{wrong} for a
+      disturbance that has not gone away. The optic rings straight back up to
+      the amplitude that faulted it.
+
+      \vspace{2mm}
+      \centering
+      {\scriptsize
+      \begin{tabular}{@{}lccc@{}}
+        \toprule
+        200\,s @ drive 2.5 & \% DAMPING & faults & locks \\
+        \midrule
+        v0 / v1 / v2 & 0.6\% & 1 & never \\
+        v3 / v4      & 4.1\% & 7 & never \\
+        \textbf{v5}  & \textbf{87.5\%} & \textbf{1} & \textbf{10.2\,s} \\
+        \bottomrule
+      \end{tabular}}
+
+      \vspace{2mm}
+      \raggedright
+      \textbf{The fix is small.} If the previous engagement lasted under
+      \texttt{FAST\_REFAULT\_S} $=15$\,s, the cause is evidently still present
+      --- re-engage on the baseline already in hand. Bounded by
+      \texttt{MAX\_BASELINE\_REUSE} $= 4$.
+
+      \vspace{1mm}
+      \alert{Found by stressing the simulator across clipping regimes, not by
+      reading the code.}
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{The second half of v5, and the first of what becomes a family of
+supervisor fixes.
+
+Every version up to v4 answers every fault identically: wait for all-clear,
+then re-calibrate. That is twenty seconds of open loop with the gain at zero.
+It is exactly right for a transient. It is exactly wrong for a disturbance that
+is still present, because during those twenty seconds the optic rings straight
+back up to the amplitude that faulted it, and faults again on contact. The
+result is a supervisor-level feedback loop that spends its life measuring
+instead of damping.
+
+The numbers are dramatic. Over two hundred seconds of sustained clipping, v3
+and v4 spend four percent of samples actually damping across seven faults and
+never lock. v5 spends 87.5 percent and locks in ten seconds.
+
+The plot is the optic itself -- simulator ground truth, not the controller's
+own estimate -- and the gap widens with drive amplitude.
+
+The fix is four lines: if the previous engagement lasted under fifteen seconds,
+re-engage on the baseline already in hand rather than measuring a new one. It
+is bounded at four reuses so a stale baseline cannot persist. And note how it
+was found: by stressing the rebuilt simulator across clipping regimes, not by
+reading the code.
+
+What it does not fix: at the highest drive, with 56 percent of samples
+clipping, v5 still exhausts its reuses. That regime is a sensor problem, not a
+control problem.}
+
+% ---------------------------------------------------------------- 27
+\begin{frame}{v5.5 --- eight OSEMs, and why it never locked}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \footnotesize
+      v5 with \texttt{N = 8} and the full map
+      \texttt{DAC\_CHANNELS = [1,3,5,7,0,2,4,6]}. \textbf{Not a new rung}: same
+      control law, constants, \texttt{FIXES} and state machine.
+
+      \vspace{2mm}
+      Going 4\,$\to$\,8 was a config change rather than a rewrite \emph{only
+      because v5 keeps channel state in arrays}.
+
+      \vspace{2mm}
+      All eight sit on one rigid body, so every semantic held unchanged: quorum
+      of one, one global \texttt{FAULT}, one lock claim.
+
+      \vspace{2mm}
+      \textbf{Channels 4--7 shipped disabled} --- their sign is unknown, and a
+      wrong-signed channel \emph{pumps}. ch2 was \emph{discovered} from bench
+      data, not predicted.
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \footnotesize
+      \alert{\textbf{The simulator cannot test this file.}}
+      \texttt{sim/server.py} models one rigid body with exactly four OSEMs
+      --- four corners and a $4\times4$ projection. There is no measured
+      geometry or coil gain for 4--7, and \textbf{inventing them would mean
+      validating against fabricated physics}. \texttt{make check} skips it and
+      says why.
+
+      \vspace{2mm}
+      \textbf{It has never locked.} On the bench, ch0--ch3 damped at ratio
+      0.07--0.26 while ch4--ch7 --- calibrated at $\sim$0.002\,V ---
+      \textbf{faulted the whole rig six times in 120\,s}.
+
+      \vspace{2mm}
+      \textbf{An OSEM carrying no \emph{in-band} signal does not rail} --- and
+      that, not disconnection, is what a4/a6/a7 turn out to be. It sits
+      mid-scale with a flat bandpassed output, so \texttt{auto-disable} never
+      fires; it calibrates a near-zero baseline, and then any noise reads as a
+      runaway.
+      \textbf{A minimum-plausible-baseline check is the missing guard.}
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{v5.5 is the eight-channel commissioning build. It is v5 with N equal to
+eight and the full eight-pair coil map, and it is explicitly not a new rung of
+the ladder -- same control law, same constants, same fixes, same state machine.
+
+Two things are worth taking from it. First, going from four to eight channels
+was a configuration change rather than a rewrite, and that is a direct dividend
+of v5's array refactor: N is a module constant and everything derives from it.
+
+Second, the honesty. The simulator models one rigid body with exactly four
+OSEMs -- four corners and a four-by-four modal projection. There is no measured
+geometry or coil gain for channels four to seven, and inventing them would mean
+validating future work against fabricated physics. So make check skips the file
+and prints the reason rather than approximating.
+
+It has never locked, and the reason is instructive. An OSEM that carries no
+in-band signal does not rail -- it sits mid-scale with a flat bandpassed
+output. So auto-disable never fires. It then calibrates a near-zero baseline of
+about two millivolts, after which any noise at all exceeds 1.8 times that
+baseline and reads as a runaway. On the bench, channels zero to three were
+damping happily while channels four to seven faulted the whole rig six times in
+two minutes. A minimum-plausible-baseline check is the guard that is missing,
+in every version.
+
+At the time we thought those four OSEMs were simply not plugged in. They are --
+all eight are connected. The real reason is coming up two slides from now, and
+it does not change this failure mode at all: the guard is still missing.}
+
+% ---------------------------------------------------------------- 28
+\begin{frame}{v6 --- measuring the actuation matrix properly}
+  \begin{columns}[T]
+    \begin{column}{0.46\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \begin{axis}[width=6.2cm, height=4.0cm, ybar, bar width=15pt,
+                     xtick={1,2,3,4},
+                     xticklabels={$\sigma_1$,$\sigma_2$,$\sigma_3$,$\sigma_4$},
+                     xmin=0.4, xmax=4.6, ymin=0, ymax=1.22,
+                     ylabel={normalised singular value},
+                     nodes near coords={\pgfmathprintnumber[fixed,zerofill,precision=3]{\pgfplotspointmeta}},
+                     every node near coord/.append style={font=\scriptsize}]
+          \addplot coordinates {(1,1.000) (2,0.154) (3,0.058) (4,0.043)};
+          \draw[dashed, thick] (axis cs:0.4,0.10) -- (axis cs:4.6,0.10);
+        \end{axis}
+      \end{tikzpicture}\\
+      {\scriptsize Dashed: the 10\% retention line.\\
+       \textbf{Directions above it: 2; expected: 2} --- bench 2026-08-04}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \footnotesize
+      \texttt{KIND = "sysid"} --- \textbf{not a controller}. It damps nothing
+      and closes no loop; the harness refuses to simulate it.
+
+      \vspace{2mm}
+      \textbf{Stepped sine, one coil at a time.} While coil $j$ drives, no other
+      coil is. Nothing to disentangle, no matrix to invert, no assumption about
+      quadrature --- \textbf{magnitude and phase both fall out of the lock-in}.
+      That is precisely what the modal v4 got wrong.
+
+      \vspace{2mm}
+      \textbf{Four coils drive two DOF, confirmed.} A rank that is not 2 means
+      the \emph{measurement} is wrong rather than the optic.
+
+      \vspace{2mm}
+      \alert{But only 4 of 12 frequencies were usable} --- ch2 railed in 17 of
+      48 steps --- and two of those four are near-identical across coils, i.e.
+      ambient-dominated. \textbf{A valid measurement on a quarter of the sweep,
+      not yet a matrix to build a modal controller on.}
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{v6 is not a controller. It declares KIND equals sysid, exposes no
+Controller class, damps nothing, and both the harness and the bench runner
+check that and refuse to simulate it.
+
+What it does is drive one coil at a time with a sine and record what all four
+OSEMs do, recovering the actuation matrix by lock-in detection. Why stepped
+sine rather than something cleverer: while coil j is driving, no other coil is.
+There is nothing to disentangle, no matrix to invert, and no assumption about
+quadrature -- both quadratures come out of the lock-in together so magnitude
+and phase are measured rather than inferred. That is exactly the pair of
+mistakes that killed the modal v4.
+
+It passed its own rank check on the bench: singular values 1.000, 0.154, 0.058
+and 0.043, so two directions above ten percent against two expected. Four coils
+drive two degrees of freedom, as the geometry says.
+
+But be honest about the caveat. Only four of twelve frequencies were usable,
+because channel two railed in seventeen of forty-eight steps, and two of those
+four frequencies are near-identical across coils, meaning they were
+ambient-dominated rather than drive-dominated. It is a valid measurement on a
+quarter of the sweep, not yet a matrix to build a modal controller on.
+
+The multisine variant failed outright -- channel two railed in all four passes.
+Both failures share one cause: open loop, nothing damping, so the optic rings
+up and channel two clips. Closed-loop dither is the way past it.}
+
+% ---------------------------------------------------------------- 29
+\begin{frame}{The DC actuation matrix --- and the conclusion it will not support}
+  \begin{columns}[T]
+    \begin{column}{0.55\textwidth}
+      \centering
+      {\scriptsize\setlength{\tabcolsep}{3pt}
+      \begin{tabular}{@{}lrrrr|rrrr@{}}
+        \toprule
+        & \multicolumn{4}{c|}{coils 0--3} & \multicolumn{4}{c}{coils 4--7} \\
+        \midrule
+        a0 & $-105$ & $-107$ & $-48$ & $+19$ & $-29$ & $-21$ & $-28$ & $-26$ \\
+        a1 & $-49$ & $-68$ & $-33$ & $+18$ & $+5$ & $+7$ & $+4$ & $+8$ \\
+        a2 & $+35$ & $+66$ & $+213$ & $-141$ & $-25$ & $-22$ & $-13$ & $-26$ \\
+        a3 & $+36$ & $+14$ & $+58$ & $-51$ & $-1$ & $-2$ & $+2$ & $-1$ \\
+        \midrule
+        a4 & $+0$ & $+2$ & $+2$ & $+1$ & $+8$ & $+8$ & $+2$ & $+1$ \\
+        a5 & $+4$ & $+0$ & $+0$ & $-6$ & $-0$ & $-7$ & $-1$ & $+8$ \\
+        a6 & $+1$ & $+4$ & $+2$ & $+3$ & $+3$ & $+3$ & $+4$ & $+6$ \\
+        a7 & $-0$ & $+3$ & $+1$ & $+0$ & $+1$ & $-1$ & $+6$ & $+7$ \\
+        \bottomrule
+      \end{tabular}}\\
+      {\scriptsize $d(\text{counts}_i)/d(\text{bias}_j)$, one coil stepped at a
+      time, bench 2026-08-04.}
+    \end{column}
+    \begin{column}{0.43\textwidth}
+      \centering
+      {\footnotesize \textbf{Block means of $|$response$|$}}\\[1mm]
+      {\footnotesize
+      \begin{tabular}{@{}lcc@{}}
+        \toprule
+        & coils 0--3 & coils 4--7 \\
+        \midrule
+        sensors 0--3 & \textbf{66} & \textbf{14} \\
+        sensors 4--7 & 2 & \textbf{4} \\
+        \bottomrule
+      \end{tabular}}
+
+      \vspace{3mm}
+      \footnotesize
+      \raggedright
+      \textbf{Coils 4--7 work} --- they move a0--a3 by $\sim$25 counts/V.
+      \textbf{Sensors a4--a7 do not respond to anything}, $\leq 8$ counts/V.
+
+      \vspace{2mm}
+      \alert{We read that as ``a4--a7 are not wired''. It was wrong} --- and the
+      next slide is why. A DC slope against a fixed threshold cannot separate
+      \emph{no sensor} from \emph{a working sensor with small gain}.
+
+      \vspace{2mm}
+      Note a3: the common-mode sweep read $+43$ counts/V, but coil3\,$\to$\,a3
+      alone is $-51$. \textbf{Common-mode slopes are not per-coil slopes.}
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{This one measurement closed a question that had been open since v5.5.
+
+Step each coil's bias one at a time and record how every sensor's resting count
+moves. That gives an eight-by-eight DC actuation matrix in counts per volt.
+
+Read the two-by-two block summary on the right. Within the wired block --
+coils zero to three onto sensors zero to three -- the mean response magnitude
+is 66 counts per volt. Coils four to seven onto the wired sensors is 14, so
+those coils demonstrably work. But nothing moves sensors a4 to a7 by more than
+eight counts per volt: the block means are two and four, which is measurement
+noise.
+
+We concluded that the four extra OSEMs were simply not connected, and wrote
+that into the repository. It was wrong, and the next slide is the correction.
+Hold on to the shape of the mistake: the test was a DC slope compared against a
+fixed threshold in counts per volt, and a threshold like that cannot tell a
+sensor that is absent from a sensor that is present with a small gain. Nothing
+here is bad data -- every number in this table is real.
+
+One trap worth calling out separately, because it nearly cost a sign error. A
+common-mode sweep, moving all four coils together, read plus 43 counts per volt
+for sensor a3. Coil three onto a3 alone is minus 51. Opposite sign. Common-mode
+slopes are not per-coil slopes.}
+
+% ---------------------------------------------------------------- 29b (NEW)
+\begin{frame}{Measured today: all eight \emph{are} wired --- in-band vs out-of-band}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \begin{axis}[width=6.6cm, height=3.7cm, ybar, bar width=13pt,
+                     xtick={1,2,3,4,5,6},
+                     xticklabels={a0,a2,\textbf{a5},a4,a6,a7},
+                     xmin=0.4, xmax=6.6, ymin=0, ymax=9.2,
+                     ytick={0,2,4,6,8},
+                     ylabel={lock-in SNR at the mode},
+                     nodes near coords={\pgfmathprintnumber[fixed,zerofill,precision=1]{\pgfplotspointmeta}},
+                     every node near coord/.append style={font=\scriptsize},
+                     legend style={at={(0.5,-0.20)}, anchor=north,
+                                   legend columns=2, draw=none, fill=none}]
+          \addplot[bar shift=0pt] coordinates {(1,6.3) (2,7.2) (3,7.3)};
+          \addlegendentry{tracks the optic}
+          \addplot[bar shift=0pt] coordinates {(4,1.5) (5,1.1) (6,1.1)};
+          \addlegendentry{own noise floor}
+          \draw[dashed, thick] (axis cs:0.4,1.0) -- (axis cs:6.6,1.0);
+        \end{axis}
+      \end{tikzpicture}\\
+      {\scriptsize Lock-in on the two long 8-channel logs (118\,s and 148\,s)
+       at the rigid-body mode frequencies. Dashed: SNR $=1$, a channel's own
+       noise floor. \src{analysis/blind\_check.py, analysis/a5\_check.py}}
+    \end{column}
+    \begin{column}{0.50\textwidth}
+      \footnotesize\raggedright
+      \textbf{All eight OSEMs are electrically connected} --- confirmed on a
+      scope, 2026-08-06. The split is not wired/unwired, it is
+      \emph{in band}/\emph{out of band}:
+
+      \vspace{1.5mm}
+      {\scriptsize\setlength{\tabcolsep}{4pt}
+      \begin{tabular}{@{}l r>{\raggedright\arraybackslash}p{0.44\linewidth}@{}}
+        \toprule
+        & \multicolumn{2}{@{}l}{power in 0.4--3\,Hz} \\
+        \midrule
+        a0--a3 & 77--99\% & modes at 1.01 and 1.66\,Hz \\
+        \textbf{a5} & \textbf{22--71\%} & tracks 1.01\,Hz, at $\sim\!1/12$ of
+          a0's counts/m \\
+        a4, a6, a7 & 0.1--9\% & a narrow \textbf{6.19\,Hz} line
+          (12.4\,Hz harmonic on a7) \\
+        \bottomrule
+      \end{tabular}}
+
+      \vspace{2mm}
+      \alert{\textbf{It is not an Arduino or sampling problem.}} a3 is read
+      \emph{immediately before} a4 and carries a large clean 1.66\,Hz signal,
+      yet $r(\mathrm{a4},\mathrm{a3}) = -0.029 / +0.004$: no mux leakage from
+      the strongest possible source. And a5, read straight \emph{after} a4, is
+      clean. The signal is not lost between sensor and stream.
+    \end{column}
+  \end{columns}
+
+  \vspace{1.5mm}
+  \centering
+  {\footnotesize The ``not wired'' call came from a \textbf{DC-response
+  threshold} and a \textbf{raw time-domain correlation}. Both are blind to a
+  small coherent signal; the spectral test found it in one pass.
+  \textbf{Wrong statistic, not wrong data.}}
+\end{frame}
+\note{The correction, measured today, and the reason the previous slide is
+still in the deck.
+
+All eight OSEMs are electrically connected. That was confirmed on an
+oscilloscope this morning. The claim in the repository that a4 to a7 were not
+wired was simply wrong.
+
+What is actually true is a split between in-band and out-of-band. Sensors a0 to
+a3 put 77 to 99 percent of their power inside the 0.4 to 3 hertz band the loop
+closes on, at the two rigid-body modes, 1.01 and 1.66 hertz. a5 works: 22 to 71
+percent in band, tracking the 1.01 hertz mode, but at roughly one twelfth of
+a0's counts per metre -- a real sensor with low gain, which is exactly the case
+a DC threshold cannot see. And a4, a6 and a7 put 0.1 to 9 percent in band; what
+dominates them is a narrow interference line at 6.19 hertz, with its harmonic
+at 12.4 hertz on a7.
+
+The clean evidence is the bar chart: lock-in at the mode frequencies over the
+two long logs. a0 scores 6.3, a2 scores 7.2, and a5 scores 7.3 -- the best of
+the three. a4, a6 and a7 score 1.5, 1.1 and 1.1, which is to say they are
+indistinguishable from their own noise floor.
+
+Head off the obvious question, because it is the first one I would ask: is this
+just the Arduino, sampling those pins badly? No. a3 is read immediately before
+a4 and it carries a large, clean 1.66 hertz signal -- the strongest possible
+source for multiplexer leakage -- and the correlation between a4 and a3 is
+minus 0.029 and plus 0.004 on the two runs. Nothing leaks. And a5, read
+straight after a4, is clean. The signal is not being lost between the sensor
+and the stream; it is not arriving at the sensor.
+
+The methodological point at the bottom is the one I would want remembered. The
+original call rested on two statistics: a DC-response threshold, and a raw
+time-domain correlation against the working channels. Both are blind to a small
+coherent signal -- correlation on raw counts is dominated by offset and
+quantisation noise, and a coherent signal of one count buried under five counts
+of noise scores about 0.2. The spectral test found the answer immediately, on
+exactly the same data. It was the wrong statistic, not wrong data.}
+
+% ---------------------------------------------------------------- 30
+\begin{frame}{v7 --- \texttt{bias-trim}: move where the optic hangs}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \begin{axis}[width=6.8cm, height=4.2cm, ybar, bar width=9pt,
+                     xtick={1,2,3,4}, xticklabels={a0,a1,a2,a3},
+                     xmin=0.4, xmax=4.6, ymin=480, ymax=800,
+                     ytick={500,600,700},
+                     ylabel={resting counts},
+                     legend style={at={(0.5,-0.22)}, anchor=north,
+                                   legend columns=2, draw=none, fill=none},
+                     nodes near coords,
+                     every node near coord/.append style={font=\tiny}]
+          \addplot[every node near coord/.append style={yshift=7pt}]
+            coordinates {(1,591) (2,630) (3,712) (4,679)};
+          \addlegendentry{start}
+          \addplot coordinates {(1,549) (2,603) (3,670) (4,679)};
+          \addlegendentry{after trim}
+          \draw[dashed, thick] (axis cs:0.4,511.5) -- (axis cs:4.6,511.5);
+        \end{axis}
+      \end{tikzpicture}\\
+      {\scriptsize Dashed: ADC mid-scale, 511.5 counts.
+       Bench 2026-08-04. a3 was already at its best step.}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \footnotesize
+      Coil bias is a \textbf{DC force}, so stepping it moves where the optic
+      hangs. One \texttt{BIAS\_QUANTUM} $=0.25$\,V at a time, kept only if the
+      \textbf{total} offset across all channels improved.
+
+      \vspace{2mm}
+      \centering
+      {\scriptsize
+      \begin{tabular}{@{}lcc@{}}
+        \toprule
+        bench 2026-08-04 & start & end \\
+        \midrule
+        \textbf{v7 (trim)} & 565 & \textbf{455} counts \\
+        v5 (control) & 566 & 546 (drift) \\
+        \bottomrule
+      \end{tabular}}
+
+      \vspace{2mm}
+      \raggedright
+      Lock times 11.2 / 11.0 / 12.4\,s --- \textbf{the trim costs nothing.}
+
+      \vspace{2mm}
+      \textbf{Two steps were rejected and frozen}, both by the \emph{total}
+      test: ch1\,$\to$\,0.50\,V ($486 \to 528$) and ch3\,$\to$\,1.25\,V
+      ($538 \to 561$). Each helped its own channel and \emph{hurt the rig} ---
+      the four-coils-two-DOF coupling v6 measured.
+
+      \vspace{2mm}
+      \alert{It cannot finish the job:} centring wants $-1.93 \ldots +3.77$\,V
+      against a 2.5\,V DAC. The rest is mechanical or TIA offset.
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{v7 attacks the open hardware problem: no OSEM rests at mid-scale, so
+every channel clips its top rail long before the bottom, and channel two has
+the least headroom of all.
+
+The lever is that coil bias exerts a DC force, so it moves the rest position.
+The design decision worth noting is that this is deliberately not a one-shot
+least-squares solve. That solve wants minus 1.93 to plus 3.77 volts against a
+DAC that only has 2.5, so most of it is unreachable, and it assumes a matrix
+measured on a different day still holds. Instead v7 trims iteratively: one
+quarter-volt quantum at a time, kept only if the total offset across all
+channels improved.
+
+Total, not per-channel, and that matters. Four coils drive two degrees of
+freedom -- the v6 rank check measured that -- so the channels are coupled and
+helping a0 can hurt a2. Two steps were in fact rejected and frozen on that
+test: each helped its own channel and hurt the rig.
+
+There is a second dividend from the accept-or-revert design. The sign table it
+uses came from the per-coil DC matrix, and a wrong sign would otherwise walk a
+sensor into its rail. With revert-on-worse, a wrong sign costs exactly one step.
+
+On hardware it took total offset from 565 counts to 455 with no cost in lock
+time. It cannot finish the job, and the file says so.}
+
+% ---------------------------------------------------------------- 31
+\begin{frame}{v8 --- stop paying 20\,s of zero gain for a baseline}
+  \begin{columns}[T]
+    \begin{column}{0.47\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \begin{axis}[width=6.4cm, height=4.0cm, ybar, bar width=13pt,
+                     xtick={1,2,3,4,5}, xticklabels={5,8,10,15,20},
+                     xmin=0.4, xmax=5.6, ymin=0, ymax=112,
+                     ytick={0,25,50,75,100},
+                     xlabel={\texttt{CALIBRATION\_S} (s)},
+                     ylabel={worst shock skew (\%)},
+                     nodes near coords={\pgfmathprintnumber[fixed,zerofill,precision=1]{\pgfplotspointmeta}},
+                     every node near coord/.append style={font=\tiny}]
+          \addplot coordinates {(1,74.3) (2,86.5) (3,41.0) (4,57.9) (5,20.1)};
+          \draw[dashed, thick] (axis cs:0.4,35) -- (axis cs:5.6,35);
+        \end{axis}
+      \end{tikzpicture}\\
+      {\scriptsize Dashed: the 35\% assertion line.
+      \textbf{Why not simply a shorter window} --- \texttt{research.md} item 6.
+      Every shorter window fails, some worse than the un-fixed defect (39.3\%).}
+    \end{column}
+    \begin{column}{0.51\textwidth}
+      \footnotesize\raggedright
+      \textbf{The cost.} Bench, four channels: 20\,s calibration $+$ $\sim$11\,s
+      to lock $=$ \textbf{65\% of wall clock at zero gain}, plus 25\,s of open
+      loop after every fault.
+
+      \vspace{1.5mm}
+      \textbf{1. \texttt{fast-calib}.} \texttt{CALIBRATION\_S} becomes a
+      \emph{ceiling}. Sub-windows accumulate; calibration ends as soon as the
+      trailing ones agree the floor has stopped moving. Simulator: $20.00
+      \to \mathbf{6.01}$\,s, time-to-lock $30.6 \to \mathbf{16.5}$\,s, and
+      shock skew \emph{improves} $19.7 \to 17.6\%$.
+
+      \vspace{1.5mm}
+      \textbf{2. \texttt{warm-restart}.} A fault after a \emph{healthy}
+      engagement re-engages on the baseline in hand. Two 15\,V/s kicks: v4/v5
+      never re-lock inside 115\,s; v8 re-engages 5\,s after all-clear and
+      re-locks 10.7\,s later.
+
+      \vspace{1.5mm}
+      \alert{On the bench \texttt{fast-calib} never fired.}
+      \texttt{CALIB\_AGREE\_TOL = 1.20} was tuned on simulator noise, one RNG
+      seed. It degrades safely to v5's estimator --- the designed fallback ---
+      but the saving is \textbf{unconfirmed on hardware}.
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{v8 attacks the biggest single waste in the system. On the bench, twenty
+seconds of calibration plus about eleven seconds to lock means sixty-five
+percent of the wall clock is spent with the gain forced to zero and nothing
+damping. After a fault it is worse: five seconds of clear plus twenty of
+calibration, so a single kick costs about forty seconds of not damping.
+
+The obvious answer -- just use a shorter window -- is wrong, and the chart
+shows why. The twenty-second window does not exist because a quiet lab needs
+it; three seconds and twenty seconds agree to within one percent over eight
+seeds. It exists for the case where a shock lands inside the window. Sweep the
+window length and every shorter value fails the 35 percent assertion line, some
+of them worse than the unfixed defect. The cause is the ringdown: at Q of fifty
+and one hertz, tau is about sixteen seconds, so median-of-sub-windows only
+helps when the window is comparable to tau.
+
+So instead: make it a ceiling with a convergence test. Sub-windows accumulate,
+and calibration ends early once the trailing ones agree with each other and
+with everything measured so far. In the simulator that is twenty seconds down
+to six, and total time-to-lock from thirty to sixteen and a half. Crucially the
+shock-skew number does not degrade -- it improves -- because a shock inside the
+window is exactly the case that refuses to converge early.
+
+The second change, warm-restart, makes borrowing the baseline the default on
+the fault path rather than the exception. That breaks the project's standing
+rule that baselines are re-measured and never borrowed, so it is bounded by
+four explicit re-measure cases.
+
+And the honest part: on the bench fast-calib never fired once. Its agreement
+tolerance was tuned on simulator noise with one RNG seed and the bench floor
+does not satisfy it. It degrades safely to the old estimator, which is the
+designed fallback, but the saving is unconfirmed on hardware.}
+
+% ---------------------------------------------------------------- 32
+\begin{frame}{v9 --- the runaway breaker was asking the wrong question}
+  \centering
+  \begin{tikzpicture}[font=\scriptsize]
+    \node[blk, minimum width=6.8cm, anchor=west] (lev) at (0,0.72)
+      {\textbf{level test} (v0--v8):
+       $\mathrm{env} > 1.8 \times \mathrm{baseline}$, sustained 2\,s};
+    \node[blk, minimum width=6.8cm, anchor=west] (grow) at (0,-0.72)
+      {\textbf{growth test} (new in v9):
+       $\mathrm{env} > 1.02 \times \mathrm{env}(t - 2\,\mathrm{s})$};
+    \node[blk, minimum width=2.2cm, anchor=west] (and) at (8.0,0)
+      {\textbf{both} $\Rightarrow$ \texttt{FAULT}};
+    \draw[flow] (lev.east) -- ++(0.45,0) |- (and.west);
+    \draw[flow] (grow.east) -- ++(0.45,0) |- (and.west);
+  \end{tikzpicture}
+
+  \vspace{4mm}
+  \begin{columns}[T]
+    \begin{column}{0.47\textwidth}
+      \footnotesize
+      A \textbf{runaway} is the loop pumping energy \emph{in} --- which means
+      the envelope \textbf{growing}.
+
+      \vspace{1mm}
+      A \textbf{ringdown} is a large but \textbf{falling} envelope --- which
+      means the loop \emph{succeeding}.
+
+      \vspace{2mm}
+      \alert{A level test cannot tell them apart.} So after a kick it trips on
+      a timer, every \texttt{RUNAWAY\_SUSTAIN\_S}, all the way down the
+      ringdown.
+    \end{column}
+    \begin{column}{0.49\textwidth}
+      \footnotesize
+      \textbf{This defect was in every version back to v0.} v8 merely
+      re-engaged fast enough to hit it repeatedly, which is how it was found.
+
+      \vspace{2mm}
+      \texttt{RUNAWAY\_GROWTH\_FRAC = 1.02} gives 2\% of headroom so envelope
+      noise alone cannot read as growth. \texttt{RUNAWAY\_TREND\_LAG\_S = 2.0}
+      is one \texttt{ENVELOPE\_WINDOW\_S}, so the two estimates barely overlap.
+
+      \vspace{2mm}
+      The suite confirms it \emph{still} trips on a genuinely pumped resonance
+      --- the growth gate rejects ringdowns without letting a real runaway
+      through.
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{This is the best single result in the project, and it deserves three
+slides.
+
+The runaway breaker, from v0 all the way through v8, was a level test: is the
+envelope above 1.8 times baseline, sustained for two seconds. That sounds
+reasonable and it is wrong, for a reason that is obvious once stated.
+
+A runaway means the loop is pumping energy in, which means the envelope is
+growing. A large but decaying envelope means the loop is succeeding. A level
+test cannot distinguish those two. So after a kick, while the optic is ringing
+down under perfectly good control, the breaker trips on a timer -- and keeps
+tripping, every two seconds, all the way down the ringdown, until the amplitude
+happens to fall under the line by luck.
+
+v9 keeps the level test and adds a growth test: the envelope must also exceed
+where it was two seconds ago, by two percent. Both conditions, both sustained.
+The two percent is headroom so envelope noise alone cannot read as growth. The
+two-second lag is one envelope window, so the two estimates barely overlap.
+
+The thing to appreciate: this defect was present in every single version back
+to v0. It took until v8 to find, and only because v8 re-engaged fast enough
+after a fault to hit it repeatedly and make the pattern visible.}
+
+% ---------------------------------------------------------------- 33
+\begin{frame}{v9 --- the bench evidence: the envelope \emph{falling} through every fault}
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[width=10.0cm, height=5.0cm,
+                 xlabel={successive envelope readings within one re-engagement},
+                 ylabel={amplitude ratio},
+                 xmin=0.7, xmax=4.6, ymin=0, ymax=6.6,
+                 xtick={1,2,3,4}, axis lines=left,
+                 legend style={at={(1.02,1.0)}, anchor=north west, font=\tiny},
+                 legend cell align=left, mark size=1.8pt]
+      \addplot[thick, mark=*] coordinates {(1,5.97) (2,5.25) (3,4.61) (4,4.84)};
+      \addlegendentry{re-engage $t=71.0$\,s}
+      \addplot[thick, mark=square*, dashed] coordinates {(1,3.00) (2,4.29) (3,4.28) (4,3.14)};
+      \addlegendentry{re-engage $t=78.2$\,s}
+      \addplot[thick, mark=triangle*, dotted] coordinates {(1,2.72) (2,2.48) (3,2.07) (4,1.19)};
+      \addlegendentry{re-engage $t=85.3$\,s}
+      \addplot[thick, mark=diamond*, dashdotted] coordinates {(1,1.64) (2,1.37) (3,0.85)};
+      \addlegendentry{re-engage $t=92.3$\,s}
+      \draw[thick] (axis cs:0.7,1.8) -- (axis cs:4.6,1.8);
+      \node[font=\tiny, anchor=south west, fill=white, inner sep=1pt]
+        at (axis cs:0.75,1.85)
+        {\texttt{RUNAWAY\_MULTIPLE} $= 1.8 \times$ baseline};
+      \node[font=\tiny, anchor=west] at (axis cs:4.08,4.84) {FAULT};
+      \node[font=\tiny, anchor=west] at (axis cs:4.08,3.14) {FAULT};
+      \node[font=\tiny, anchor=west] at (axis cs:4.08,1.19) {FAULT};
+      \node[font=\tiny, anchor=west] at (axis cs:3.10,0.60)
+        {$\ldots \to 0.21$\quad \textbf{LOCKED}};
+    \end{axis}
+  \end{tikzpicture}
+
+  \vspace{-1mm}
+  {\footnotesize Measured on \textbf{v8, hardware, 240\,s, three kicks}:
+  \textbf{ten faults}, and the envelope was \emph{falling} through them.
+  \alert{Only the re-engagement that happened to start at 1.64 --- just under
+  the line --- survived.}}
+\end{frame}
+\note{Here is the defect caught in the act, on hardware.
+
+This is v8, two hundred and forty seconds, three kicks. Ten faults. Each line
+is one re-engagement of the loop after a fault, and the y-axis is the amplitude
+ratio the breaker is watching.
+
+Look at the first line. The loop re-engages at 5.97 times baseline, brings it
+down to 5.25, then 4.61 -- it is working -- and then the breaker faults it
+anyway, because the level was above 1.8 the whole time. Same story on the
+second and third. The optic is being damped and the supervisor keeps taking the
+controller away from it.
+
+The fourth line is the giveaway. It re-engaged at 1.64, which is just under the
+1.8 line, so the breaker never armed -- and that engagement ran all the way
+down to 0.21 and locked. The only thing that distinguished the successful
+engagement from the three failures was where it happened to start relative to
+an arbitrary threshold.
+
+That is the whole fault thrash, in one picture, and it had been in the codebase
+since v0.}
+
+% ---------------------------------------------------------------- 34
+\begin{frame}{v9 --- what the growth gate bought}
+  \begin{columns}[T]
+    \begin{column}{0.56\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \begin{axis}[width=7.4cm, height=4.6cm, ybar stacked, bar width=26pt,
+                     symbolic x coords={v5 (control),v8,v9},
+                     xtick=data, ymin=0, ymax=100,
+                     ylabel={\% of samples},
+                     legend style={at={(0.5,-0.24)}, anchor=north, legend columns=3},
+                     nodes near coords={\pgfmathprintnumber[fixed,zerofill,precision=1]{\pgfplotspointmeta}},
+                     every node near coord/.append style={font=\tiny},
+                     enlarge x limits=0.32]
+          \addplot coordinates {(v5 (control),23.9) (v8,15.1) (v9,26.6)};
+          \addlegendentry{DAMPING}
+          \addplot coordinates {(v5 (control),8.3) (v8,60.5) (v9,36.4)};
+          \addlegendentry{FAULT}
+          \addplot coordinates {(v5 (control),67.7) (v8,24.4) (v9,37.0)};
+          \addlegendentry{CALIBRATING}
+        \end{axis}
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \footnotesize
+      \centering
+      {\footnotesize
+      \begin{tabular}{@{}lcc@{}}
+        \toprule
+        same 3-kick schedule & faults & locks \\
+        \midrule
+        v5 (control) & 1 & 2 \\
+        v8 & \alert{\textbf{10}} & 3 \\
+        \textbf{v9} & \textbf{4} & \textbf{4} \\
+        \bottomrule
+      \end{tabular}}
+
+      \vspace{3mm}
+      \raggedright
+      \textbf{v9 re-locked after \emph{every} kick} ---
+      $t = 31.3 / 83.8 / 151.3 / 205.3$\,s.
+
+      \vspace{2mm}
+      \textbf{Most DAMPING, most locks, and less than half the faults.}
+      v5 looks calm only because it spends 68\% of the run calibrating.
+
+      \vspace{2mm}
+      v9's remaining 36\% in \texttt{FAULT} is
+      \texttt{FAULT\_CLEAR\_SUSTAIN\_S} $=5$\,s $\times$ 4 recoveries plus the
+      gain ramp --- \textbf{no longer thrash}. Gating re-engagement on
+      amplitude rather than a fixed 5\,s would cut it further.
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{Same three-kick schedule, three versions, on hardware.
+
+v8 spends sixty percent of the run in FAULT and only fifteen percent damping.
+v9 more than halves the faults, from ten to four, and takes damping time up to
+26.6 percent -- the best of the three -- while re-locking after every single
+kick, at 31, 84, 151 and 205 seconds.
+
+Read v5 carefully, because it is a trap. It shows only one fault, which looks
+excellent, but it also spends sixty-eight percent of the run calibrating. It
+is not thrashing because it is barely ever engaged. v9 is genuinely better on
+all three of the axes that matter: most damping, most locks, and less than half
+the faults.
+
+And what is left is understood rather than mysterious. v9's remaining
+thirty-six percent in FAULT is five seconds of mandatory all-clear times four
+recoveries, plus the gain ramp. It is cost, not thrash. Gating re-engagement on
+amplitude rather than a fixed five seconds is the next obvious improvement, and
+it is written down as open work.
+
+runaway-trend is confirmed on hardware. That makes v9 one of three validated
+controllers, and it is the one the README tells you to run.}
+
+% ---------------------------------------------------------------- 35
+\begin{frame}{v10 --- merging the branches, and \texttt{soft-saturation}}
+  \begin{columns}[T]
+    \begin{column}{0.45\textwidth}
+      \centering
+      \begin{tikzpicture}[font=\scriptsize]
+        \node[blk] (v5)  at ( 0.0, 3.3) {v5};
+        \node[blk] (v7)  at (-2.0, 1.9) {v7\\\texttt{bias-trim}};
+        \node[blk] (v8)  at ( 2.0, 1.9) {v8\\\texttt{fast-calib}\\\texttt{warm-restart}};
+        \node[blk] (v9)  at ( 2.0, 0.3) {v9\\\texttt{runaway-trend}};
+        \node[blk] (v10) at ( 0.0,-1.2) {\textbf{v10}\\\texttt{soft-saturation}};
+        \draw[flow] (v5) -- (v7);
+        \draw[flow] (v5) -- (v8);
+        \draw[flow] (v8) -- (v9);
+        \draw[flow] (v7) |- (v10);
+        \draw[flow] (v9) |- (v10);
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.53\textwidth}
+      \footnotesize
+      \textbf{The new fix.} v9 faulted the whole rig after 30 consecutive
+      samples pinned against a rail. But \textbf{clipping removes authority in
+      one direction only} --- an output pinned at \texttt{vmax} still pulls
+      \emph{down} at full strength. A clipped loop is a \textbf{weakened} loop,
+      not a broken one, and it is usually the thing bringing the optic back.
+
+      \vspace{2mm}
+      \vspace{1mm}
+      \centering
+      {\scriptsize $\texttt{sat\_trip} = (\texttt{sat\_streak} > 30)
+         \ \wedge\ \neg\big(\mathrm{env} < 0.98\,\mathrm{env}(t{-}2\mathrm{s})\big)$}
+
+      \vspace{2mm}
+      \raggedright
+      \textbf{Same level-vs-trend correction \texttt{runaway-trend} made ---
+      one interlock over.} Same \texttt{env\_hist} deque, same lag, so
+      ``falling'' means one thing to both.
+
+      \vspace{2mm}
+      \textbf{Why the merge needed a third change.} A bias step \emph{is} a
+      force step: it rings the pendulum at $\sim$1\,Hz, inside the band both
+      trend tests read. So a step \textbf{invalidates} the history rather than
+      suspending the interlocks --- a 16\,s hole every
+      \texttt{TRIM\_PERIOD\_S} would be open nearly always.
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{v10 was written today. v7 and v9 were parallel branches off v5 -- v7
+carrying the bias trim, v9 carrying the calibration work and the runaway fix --
+and v10 merges them, plus one new fix.
+
+The new fix generalises v9's insight to the neighbouring interlock. v9 still
+faulted the whole rig after thirty consecutive samples with an output pinned
+against a rail. But clipping removes authority in one direction only: an output
+pinned at the top rail can still pull all the way down at full strength. So a
+clipped loop is a weakened loop, not a broken one -- and it is usually the
+thing bringing the optic back. Faulting replaces a half-strength actuator with
+a frozen one, which is strictly worse.
+
+So the trip now needs the streak and a non-falling envelope. It reuses v9's
+envelope history deque and the same two-second lag, so "falling" means exactly
+one thing across both interlocks.
+
+The merge was not a paste, and the reason is nice. A bias step is a force step
+-- it rings the pendulum at about one hertz, which is inside the band both
+trend tests read. Suspending the interlocks for a ringdown would open a
+sixteen-second hole every fifteen seconds, which is to say permanently. So
+instead a trim step invalidates the history it would have corrupted: the
+envelope deque is cleared and the timers reset. The level halves keep working
+throughout; the trend halves resume one lag later. The baseline is deliberately
+not invalidated, because it is a bandpassed floor and a bias step is DC.}
+
+% ---------------------------------------------------------------- 36
+\begin{frame}{v10 --- status, honestly}
+  \centering
+  {\footnotesize
+  \begin{tabular}{@{}lc@{}}
+    \toprule
+    \texttt{BENCH\_STATUS} & \alert{\texttt{untested}} \\
+    simulator suite, \texttt{harness.py --test v10} & \textbf{37 passed, 0 failed} \\
+    whole tree, \texttt{make check} (v3 23, v7 35, v9 36, v10 37)
+      & \textbf{131 passed, 0 failed} \\
+    \bottomrule
+  \end{tabular}}
+
+  \vspace{3mm}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \footnotesize\raggedright
+      \textbf{A rejected gate, recorded because it looks right and is not.}
+      The first draft required \emph{clip excess} --- ``still demanding more
+      than the rail can give.''
+
+      \vspace{2mm}
+      But \textbf{back-calculation anti-windup exists precisely to drive that
+      residual toward zero} under sustained clipping. The test went false
+      exactly when saturation was worst, and the suite caught it.
+
+      \vspace{2mm}
+      \alert{An anti-windup residual cannot measure unmet demand.}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \footnotesize\raggedright
+      \textbf{What is honest to say today:}
+      \begin{itemize}\setlength{\itemsep}{1pt}
+        \item \texttt{bias-trim}'s numbers are \emph{v7's} bench result, not
+              v10's.
+        \item \texttt{soft-saturation} has only ever run in the simulator ---
+              which models clipping, but \textbf{not the coil driver behind
+              it}.
+        \item The old \texttt{[FAIL]} is gone because the \emph{assertion} was
+              re-expressed, not because behaviour changed: over-gain now has to
+              keep damping while clipped, and it does --- v9 faults once and
+              peaks at 1.527; v10 never faults and peaks at 0.853.
+        \item Only \textbf{v3, v7 and v9} read \texttt{validated}.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{And the part a talk usually skips.
+
+v10 is untested on hardware. Its bench status says so. In the simulator it is
+now thirty-seven passed and nothing failed, and the whole tree is 131 passed
+and zero failed. But read that carefully. The failure that used to sit here --
+over-gain plus a disturbance no longer trips a fault -- did not go away because
+the behaviour changed. It went away because the assertion was re-expressed:
+the old one demanded a fault, and the new one demands that a clipped actuator
+which is still winning keeps damping. On the identical scenario v9 faults once
+and lets the optic peak at 1.527, while v10 never faults and peaks at 0.853.
+Freezing a winning actuator let the optic ring nearly twice as high. Both
+versions really did clip, so this is not a case of the scenario quietly
+stopping being a saturation test.
+
+The left column is my favourite thing in the file. The first draft of
+soft-saturation gated on clip excess -- the amount by which the raw demand
+exceeded the rail -- which reads as the obvious measure of "still demanding
+more than the actuator can give". It is wrong, and wrong for a subtle reason:
+back-calculation anti-windup exists precisely to drive the integrator down
+until the raw demand stops exceeding the rail. So that residual decays toward
+zero exactly when saturation is worst. The test went false at the worst
+possible moment, and the behavioural suite caught it as a pumped loop that
+nothing stopped. An anti-windup residual cannot measure unmet demand.
+
+Also worth saying plainly: every bias-trim number I quoted is v7's hardware
+result, not v10's, and soft-saturation has only ever run against a simulator
+that models clipping but not the coil driver behind it.}
+
+% ================================================================ PART V
+\section{Closing}
+
+% ---------------------------------------------------------------- 37
+\begin{frame}{The floor: why more gain is the only way down}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \begin{axis}[width=7.0cm, height=4.6cm,
+                     xmode=log, ymode=log,
+                     xlabel={$|K_p|$}, ylabel={amplitude ratio floor},
+                     xtick={0.005,0.01,0.03,0.1,0.3},
+                     xticklabels={0.005,,0.03,0.1,0.3},
+                     ytick={0.02,0.05,0.1,0.2,0.5},
+                     yticklabels={0.02,0.05,0.1,0.2,0.5},
+                     xmin=0.0035, xmax=0.45, ymin=0.015, ymax=0.85,
+                     axis lines=left, legend pos=north east,
+                     legend style={draw=none, fill=none},
+                     legend cell align=left, mark size=1.8pt]
+          \addplot[thick, mark=*] coordinates
+            {(0.005,0.557) (0.030,0.173) (0.100,0.059) (0.300,0.021)};
+          \addlegendentry{predicted}
+          \addplot[thick, dashed, mark=square*] coordinates
+            {(0.005,0.545) (0.030,0.239) (0.100,0.088) (0.300,0.031)};
+          \addlegendentry{measured (simulator)}
+        \end{axis}
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \footnotesize
+      The ratio settles at \textbf{0.23} --- and that is the \emph{steady state
+      of a continuously forced oscillator}, not a failure to converge. Remove
+      the drive mid-run and it decays with $\tau = 3.4$\,s damped against
+      $15.9$\,s gain-off (predicted 2.76 / 15.92).
+
+      \vspace{2mm}
+      The floor tracks $\dfrac{\text{intrinsic}}{\text{intrinsic}+\text{added}}$
+      damping.
+
+      \vspace{2mm}
+      \alert{\textbf{The floor falls with gain; gain is capped by the $-0.04$
+      question.}} Those two facts are the whole reason
+      \texttt{research.md} item 3 is ranked where it is.
+
+      \vspace{2mm}
+      The residual $0.0089$\,V is the actuator's 0.5\,mV deadband and 10\,ms
+      throttle, not sensing --- $0.0089/0.0087/0.0094$\,V at $20/5/0$\,mV of
+      injected sensor noise.
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{One physics slide before closing, because it explains where the whole
+project is stuck.
+
+The amplitude ratio does not go to zero. It settles around 0.23, and that is
+not a failure to converge -- it is the steady state of a continuously forced
+oscillator. The proof is that if you remove the drive mid-run it decays with a
+3.4 second time constant damped, against 15.9 seconds with the gain off, both
+close to prediction.
+
+The floor tracks the ratio of intrinsic damping to intrinsic plus added
+damping. So the floor falls with gain, monotonically, and the table confirms
+that from 0.005 up to 0.300.
+
+Which puts the project in a vice. The only way below 0.23 with this control law
+is more gain, and gain is capped by a limit at minus 0.04 that nobody has ever
+characterised. That is why characterising minus 0.04 is ranked where it is in
+the research queue -- it gates two other items.
+
+And a nice negative result: the residual of 0.0089 volts is not sensor noise.
+Inject twenty, five or zero millivolts of sensor noise and it barely moves. It
+is the actuator's half-millivolt deadband and ten-millisecond throttle. Fixing
+that would move you from 0.009 to 0.009, when you are sitting at 0.23.}
+
+% ---------------------------------------------------------------- 38 (NEW)
+\begin{frame}{Measured today: 40\% of the actuator goes to terms that remove no energy}
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[width=11.0cm, height=2.6cm, xbar stacked, bar width=22pt,
+                 xmin=0, xmax=0.268, ymin=-0.6, ymax=0.6,
+                 ytick=\empty, axis y line=none,
+                 xlabel={peak term contribution to the coil command (V)},
+                 xtick={0,0.05,0.10,0.15,0.20,0.25},
+                 xticklabels={0,0.05,0.10,0.15,0.20,0.25},
+                 legend style={at={(0.5,-0.85)}, anchor=north,
+                               legend columns=3, draw=none, fill=none}]
+      \addplot coordinates {(0.0855,0)};
+      \addlegendentry{$P$ 0.0855\,V --- the \emph{only} dissipative term}
+      \addplot coordinates {(0.0627,0)};
+      \addlegendentry{$I$ 0.0627\,V (spring)}
+      \addplot coordinates {(0.0402,0)};
+      \addlegendentry{$D$ 0.0402\,V (mass)}
+      \draw[dashed, very thick] (axis cs:0.25,-0.6) -- (axis cs:0.25,0.6);
+    \end{axis}
+  \end{tikzpicture}
+
+  \vspace{5mm}
+  {\scriptsize Dashed: the actuator half-window,
+   \texttt{VMAX} $-$ \texttt{BIAS} $= 0.25$\,V.}
+
+  \vspace{3mm}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \footnotesize\raggedright
+      $I$ is \textbf{73\%} of $P$. $D$ is \textbf{47\%} of $P$. The three sum to
+      \textbf{0.188\,V} of a $\pm 0.25$\,V window.
+
+      \vspace{2mm}
+      $I + D$ alone is \textbf{0.103\,V} --- \alert{$\sim$40\% of the actuator
+      authority}, in a rig whose central problem is headroom, spent on the two
+      terms that by construction remove \emph{no} energy.
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \footnotesize\raggedright
+      And v2 already measured what they buy: \textbf{nothing}. 0.028 against
+      v1's P-only 0.025.
+
+      \vspace{2mm}
+      \alert{\texttt{provenance.md} contains no justification for
+      \texttt{KI\_GAIN} or \texttt{KD\_GAIN} at all} --- not a scope trace, not
+      a sweep, not a sentence. $-0.030$ has one. These two have none.
+
+      \vspace{2mm}
+      \textbf{Zeroing them is the cheapest headroom in the repo}, and v3 is
+      already the A/B baseline for it.
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{This is new, measured today, and it is the number I would act on first.
+
+Take the peak contribution each PID term makes to the coil command. P peaks at
+0.0855 volts, I at 0.0627, D at 0.0402. So the integrator is seventy-three
+percent the size of the proportional term and the derivative is forty-seven
+percent of it, and all three together come to 0.188 volts against an actuator
+window of plus or minus 0.25 volts around bias.
+
+Now put that next to the P-I-D slide from the first section. P is the only term
+that removes energy. I is a spring and D is added mass; neither dissipates
+anything. So I plus D is 0.103 volts, about forty percent of the total actuator
+authority, being spent on terms that cannot damp -- in a rig whose single
+biggest practical problem is that it runs out of headroom and clips.
+
+And we already know what that forty percent buys, because v2 measured it: an
+amplitude ratio of 0.028 against v1's P-only 0.025. Nothing.
+
+The provenance point is the sharp one. Minus 0.030 has a scope trace behind it
+from 2026-07-15. KI_GAIN and KD_GAIN have nothing -- provenance.md does not
+justify them anywhere, and neither does any docstring. They were switched on in
+v2 to see what would happen, the answer was "no improvement", and they have been
+carried in every version since.
+
+Zeroing them is the cheapest headroom available anywhere in this project, it
+needs no hardware, and v3 already exists as the baseline to A/B it against.}
+
+% ---------------------------------------------------------------- 39 (NEW)
+\begin{frame}{Measured today: two modes, out of the sensor spectra alone}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \begin{axis}[width=7.2cm, height=4.4cm, ybar, bar width=9pt,
+                     xtick={1,2,3,4}, xticklabels={a0,a1,a2,a3},
+                     xmin=0.4, xmax=4.6, ymin=0, ymax=1.30,
+                     ytick={0,0.25,0.5,0.75,1.0},
+                     ylabel={normalised spectral peak},
+                     legend style={at={(0.5,-0.22)}, anchor=north,
+                                   legend columns=2, draw=none, fill=none},
+                     nodes near coords={\pgfmathprintnumber[fixed,zerofill,precision=2]{\pgfplotspointmeta}},
+                     every node near coord/.append style={font=\tiny}]
+          \addplot coordinates {(1,1.00) (2,0.44) (3,1.00) (4,0.38)};
+          \addlegendentry{1.046\,Hz}
+          \addplot coordinates {(1,0.73) (2,1.00) (3,0.52) (4,1.00)};
+          \addlegendentry{1.657\,Hz}
+        \end{axis}
+      \end{tikzpicture}\\
+      {\scriptsize Welch spectra of the raw counts, \texttt{CALIBRATING}
+      windows, 27 bench logs. \src{analysis/out/modes.csv}}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \footnotesize\raggedright
+      \textbf{a0 and a2 peak at 1.046\,Hz. a1 and a3 peak at 1.657\,Hz.}
+      Two frequencies, four sensors, a clean split --- and in the corner layout
+      that is the lower pair against the upper pair.
+
+      \vspace{2mm}
+      \textbf{This is the same result v6 got, by a completely different route.}
+      v6 drove each coil and counted singular values above 10\%: two. This
+      drove \emph{nothing} --- it is the open-loop sensor spectra, gain at zero.
+
+      \vspace{2mm}
+      \alert{Four coils, two degrees of freedom} --- now confirmed from both
+      the actuation side and the sensing side.
+
+      \vspace{2mm}
+      Both modes sit inside the $0.4$--$3$\,Hz bandpass, so the loop does see
+      them. But it damps them as four independent SISO axes, which is exactly
+      the decomposition the modal v4 argued was wrong.
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{The second new result, and it is a nice one because it cost no bench time
+at all.
+
+Take the raw sensor counts from the calibrating windows of all twenty-seven
+logs -- gain forced to zero, nothing driving -- and look at the spectrum. There
+are two peaks: 1.046 hertz and 1.657 hertz. And the four channels split cleanly.
+Sensors a0 and a2 are dominated by the 1.046 peak; a1 and a3 by the 1.657 peak.
+In the corner layout from earlier, a0 and a2 are the lower pair and a1 and a3
+the upper pair.
+
+Why this matters: it is an independent confirmation of the result v6 produced by
+the opposite method. v6 drove each coil in turn with a stepped sine and counted
+singular values above ten percent, and got two. This measurement drove nothing
+at all. Two completely different experiments, one on the actuation side and one
+on the sensing side, agreeing that four coils and four sensors are looking at
+two degrees of freedom.
+
+Both frequencies sit inside the 0.4 to 3 hertz bandpass, so the loop does see
+both. But it treats them as four independent single-input single-output axes,
+which is precisely the decomposition the modal v4 argued was wrong -- and this
+is now the second measurement saying so.}
+
+% ---------------------------------------------------------------- 40
+\begin{frame}{What the simulator can and cannot tell you}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \footnotesize
+      \textbf{It runs the \emph{real} controller} --- every four-channel
+      version is imported and stepped, not reimplemented. Only \texttt{serial}
+      and \texttt{DACController} are stubbed.
+
+      \vspace{2mm}
+      The plant is a linear second-order oscillator per mode with
+      \textbf{exactly one nonlinearity}: the ADC, which offsets each channel to
+      its measured resting count, rounds to an integer, and hard-clips at
+      0/1023. That is why clipping emerges on its own --- and with the bench's
+      asymmetry.
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \footnotesize
+      \alert{\textbf{What it cannot tell you:}}
+      \begin{itemize}\setlength{\itemsep}{2pt}
+        \item \textbf{A safe gain.} More negative $K_p$ is monotonically more
+              damping all the way to $-0.6$. The ADC model reproduces
+              \emph{clipping}, not instability.
+        \item \textbf{A wrong coil map.} \texttt{sim/server.py} round-trips its
+              held-voltage dict through whatever map the controller declares.
+              \textbf{Only the bench catches one.}
+      \end{itemize}
+
+      \vspace{2mm}
+      And \texttt{COIL\_GAIN = [1.00, 0.76, $-$4.15, 0.86]} is \emph{inferred}
+      from Table 1, not measured --- the report characterises no actuator.
+      \textbf{One significant figure is the honest precision.}
+      $Q$ and drive amplitude are sliders because neither was ever
+      characterised.
+    \end{column}
+  \end{columns}
+\end{frame}
+\note{A slide about epistemics, because it is what keeps the numbers in this
+deck trustworthy.
+
+The simulator's strength is that it runs the real controller. Every
+four-channel version in the repository is imported and stepped, not
+reimplemented. Only the serial module and the DAC controller are stubbed. So a
+behavioural result in the simulator is a result about the code that will run on
+the bench.
+
+The plant is a linear second-order oscillator per mode with exactly one
+nonlinearity -- the ADC. It offsets each channel to its measured resting count,
+rounds to an integer, and hard-clips. Which is why clipping emerges on its own
+in simulation, and with the bench's actual asymmetry: every OSEM rests high, so
+the top rail comes first, and channel two hits it first of all.
+
+But it has two blind spots that no amount of simulation closes. It cannot tell
+you a safe gain, because the plant is linear and damping just increases
+monotonically to minus 0.6. And it cannot catch a wrong coil map, because it
+round-trips its held-voltage dictionary through whatever map the controller
+declares.
+
+Finally, the coil gains it uses are inferred from the report's decay table by
+subtracting the intrinsic decay and dividing by the applied gain -- with the
+simulator's assumed Q. The report characterises no actuator at all. One
+significant figure is the honest precision, and Q and drive amplitude are
+sliders precisely because nobody measured them.}
+
+% ---------------------------------------------------------------- 39
+\begin{frame}{Still open}
+  \footnotesize
+  \begin{enumerate}\setlength{\itemsep}{3pt}
+    \item \alert{\textbf{$K_p = -0.040$ has never been applied on hardware.}}
+          Across \textbf{21} logged runs the largest $|$gain$|$ ever commanded is
+          \textbf{0.035} --- \texttt{CAPTURE\_GAIN}, on ch0/1/3 --- and
+          \textbf{0.012} on ch2. Nothing has ever been driven at the limit that
+          caps the whole project. And the one run that saw $-0.040$ was v0
+          driving \emph{one} coil at 73\,Hz; we now run four at 23.5.
+          \src{analysis/kp040.md}
+    \item \textbf{Zero \texttt{KI\_GAIN} and \texttt{KD\_GAIN} and re-measure.}
+          40\% of the actuator, no justification in \texttt{provenance.md}, and
+          v2 already showed no damping benefit. Free headroom, no hardware
+          change, v3 is the A/B baseline.
+    \item \textbf{Chase the 6.19\,Hz line; bring a5 into the loop.} All eight
+          OSEMs \emph{are} wired. a4/a6/a7 put 0.1--9\% of their power in band
+          and are dominated by that one narrow line, while \textbf{a5 already
+          tracks the optic} at $\sim\!1/12$ a0's sensitivity. Everything
+          eight-channel waits here --- \textbf{an interference and alignment
+          job, not a wiring job and not a code job}.
+    \item \textbf{Closed-loop dither sysid.} Both attempts were limited by the
+          same thing: open loop, nothing damping, so the optic rings up and ch2
+          clips. \texttt{sysid.run()} already divides by the \emph{actually
+          commanded} $u$, which is most of what that needs.
+    \item \textbf{Bench-tune \texttt{CALIB\_AGREE\_TOL}} from the logs already
+          recorded, so \texttt{fast-calib} fires on hardware.
+    \item \textbf{Run v10 on the bench.}
+    \item \textbf{A minimum-plausible-baseline guard} --- an OSEM with no
+          in-band signal does not rail, so no version handles it.
+  \end{enumerate}
+
+  \vspace{1mm}
+  \centering
+  \emph{Learn the model, the estimator and the anomaly detector; keep the
+  control law and the interlocks classical and certifiable.}
+\end{frame}
+\note{Seven things, in the order I would do them, and the first two both came
+out of today's re-analysis.
+
+One, and this genuinely surprised me: minus 0.040 has never been applied on this
+hardware. Not once. Across twenty-one logged runs the largest gain magnitude
+ever actually commanded is 0.035, which is capture gain, on channels zero, one
+and three, and 0.012 on channel two. The number that caps the entire project has
+never been reached, let alone exceeded. Put that together with the loop-rate
+result: the one run that did see minus 0.040 was v0, driving a single coil at
+seventy-three hertz. Nothing since has run that configuration.
+
+Two: zero Ki and Kd and re-measure. Forty percent of the actuator window, no
+justification anywhere in provenance.md, and v2 already demonstrated no damping
+benefit. That is free headroom on a rig whose defining problem is headroom, it
+needs no hardware change, and v3 already exists as the baseline to compare
+against.
+
+Three: connect the four unwired OSEMs. A wiring job, not a code job, and
+everything eight-channel including the modal controller waits behind it.
+
+Four: closed-loop dither system identification. Both sysid attempts failed for
+the same reason -- open loop, nothing damping, the optic rings up and channel
+two clips. Running the dither on top of a working loop fixes that, and the
+lock-in already divides by the actually commanded drive rather than the
+intended amplitude, which is most of what is needed.
+
+Five: retune the calibration agreement tolerance from bench data so fast-calib
+actually fires on hardware.
+
+Six: run v10 on the bench.
+
+Seven: a minimum-plausible-baseline guard, because a disconnected OSEM sits
+mid-scale and flat rather than railing, so auto-disable never sees it.
+
+And the closing principle from the research file, which I think is the right
+one for anything that can destroy a suspended mirror: learn the model, the
+estimator and the anomaly detector, and keep the control law and the interlocks
+classical and certifiable.}
+
+% ---------------------------------------------------------------- 40
+\begin{frame}{The ladder, end to end}
+  \centering
+  {\scriptsize\setlength{\tabcolsep}{4pt}
+  \begin{tabular}{@{}llllccl@{}}
+    \toprule
+     & channels & I/D & what it added & ch0 ratio & lock & bench \\
+    \midrule
+    v0    & ch0 only  & zeroed & \emph{the baseline} & 0.188 & 12.1\,s & 2026-07-15 (scope) \\
+    v1    & all four  & zeroed & all four channels on & 0.025 & 10.7\,s & 2026-08-03 \\
+    v2    & all four  & live   & real $K_i$, $K_d$ & 0.028 & 10.5\,s & 2026-08-03 \\
+    v3    & all four  & live   & \textbf{all 3 defects fixed} & 0.029 & 10.6\,s & \textbf{validated} \\
+    \addlinespace
+    \emph{v4 (modal)} & \multicolumn{5}{l}{\emph{MIMO on a learned basis --- written and deleted 2026-08-03}} \\
+    \addlinespace
+    v4    & all four  & live & \texttt{auto-disable} & 0.029 & 10.6\,s & 2026-08-04 \\
+    v5    & all four  & live & \texttt{fast-refault} & 0.029 & 10.6\,s & 2026-08-04 \\
+    v5.5  & \emph{all eight} & live & eight-OSEM build & --- & \emph{never locked} & a4/a6/a7 out of band \\
+    v6    & \multicolumn{5}{l}{\emph{bench tool} --- stepped-sine actuation matrix, closes no loop} & 2026-08-04 \\
+    v7    & all four  & live & \texttt{bias-trim} & 0.029 & 10.6\,s & \textbf{validated} \\
+    v8    & all four  & live & \texttt{fast-calib}, \texttt{warm-restart} & 0.029 & 10.5\,s & 2026-08-04 \\
+    \textbf{v9} & all four & live & \textbf{\texttt{runaway-trend}} & 0.029 & 10.5\,s & \textbf{validated} \\
+    v10   & all four  & live & \texttt{soft-saturation} $+$ merge & --- & --- & \alert{untested} \\
+    \bottomrule
+  \end{tabular}}
+
+  \vspace{1.5mm}
+  {\scriptsize
+  Ratios and lock times are \textbf{simulator} numbers through
+  \texttt{harness.py} on the rigid-body plant. \textbf{The control law has not
+  changed since v2} --- everything from v3 on is the supervisor around it.
+  Pruned \textbf{2026-08-06} to \textbf{v3, v6, v7, v9, v10}; v0--v2, both v4s,
+  v5, v5.5, v8 and the v6.1/v6.5/v6.6 sysid variants are in git history, and
+  their numbers stand because they were measured while the files were present.
+  \texttt{make check} today: \textbf{131 passed, 0 failed};
+  \texttt{analysis/out/*.csv} re-analyses all \textbf{27} bench logs.}
+\end{frame}
+\note{The whole ladder on one slide.
+
+The single most important thing to read off it is the ch0 ratio column: it is
+0.029 from v3 all the way to v9. The control law has not changed since v2.
+Every version from v3 onward is the supervisor around it -- when the loop is
+allowed to be closed, what counts as a fault, how a fault is recovered from,
+and how the baseline everything scales off is measured.
+
+Note also that only three rows say validated: v3, v7 and v9. Those are the only
+controllers in the tree today, and the README tells you to run v9. v0 through
+v2, both files called v4, v5, v5.5, v8, and the multisine sysid tools are all
+in git history only. Their numbers stand because they were measured while the
+files were present.
+
+And the row in the middle in italics is the modal v4 -- the version that tried
+to be cleverer than the ladder, could not rediscover a fact that a
+hand-measured constant already encoded, and was deleted the same day it was
+written. It is still the right idea. It just needs the measurement that v6 is
+now most of the way to producing.}
+
+\end{document}

@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.py[cod]
+.venv/
 
 # arduino-cli sketch dir, recreated by `make arduino`
 build/

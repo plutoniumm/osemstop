@@ -67,9 +67,10 @@ def resolve(name):
     if not all_versions:
         sys.exit("No osem.v*.py found next to harness.py.")
     if name is None:
-        # The newest FILE is now osem.v6.6.py, a bench measurement tool, so a
-        # bare `make sim` or `make test` would land on something the simulator
-        # refuses to run. Default to the newest thing it can actually drive.
+        # The sysid tools sort among the controllers by number (osem.v6.5), so
+        # the newest file is not always drivable -- a bare `make sim` or
+        # `make test` could land on something the simulator refuses to run.
+        # Default to the newest thing it can actually drive.
         drivable = simulatable()
         return drivable[-1] if drivable else all_versions[-1]
     if os.path.isfile(name):
@@ -204,7 +205,8 @@ BASE_PLANT = dict(ack_drain=0.0,
 
 def run(label, seconds, enable, steady, ki=None, kd=None, occlude_at=None,
         auto_kick=False, plant=None, quiet=True, shock_at=None,
-        stop_on_recover=False, until_baseline=False, occlusions=None):
+        stop_on_recover=False, until_baseline=False, occlusions=None,
+        sensor_gain=None):
     """Step the loaded controller through the simulated plant. Returns the
     observations the checks below read.
 
@@ -229,6 +231,13 @@ def run(label, seconds, enable, steady, ki=None, kd=None, occlude_at=None,
     "it drops the axis" and "it puts the axis back" are separate claims, and the
     second one needs the sensor to come back. Several entries can overlap, which
     is how the quorum is exercised.
+
+    `sensor_gain` is four counts-per-metre multipliers, default all 1.0. It is
+    the OTHER sensor failure -- mis-alignment rather than occlusion. An occluded
+    OSEM pins at a rail and the rail interlock sees it; a mis-aligned one keeps
+    reporting a healthy DC level and a healthy noise floor with the optic simply
+    absent from it, and NOTHING in v9 looks for that. 0.0 is a4/a6/a7 on the
+    bench 2026-08-06, 1/12 is a5. See Sim.sens_gain.
     """
     sim = S.SIM
     sim.enable = [bool(v) for v in enable]
@@ -237,6 +246,7 @@ def run(label, seconds, enable, steady, ki=None, kd=None, occlude_at=None,
     sim.ki = list(ki or [0.0] * 4)
     sim.kd = list(kd or [0.0] * 4)
     sim.occlude = [False] * 4
+    sim.sens_gain = [1.0] * 4 if sensor_gain is None else [float(g) for g in sensor_gain]
     sim.auto_kick = auto_kick
     sim.plant.update(BASE_PLANT)
     if plant:
@@ -479,6 +489,18 @@ def suite(path):
     check("a wrong-signed channel is pumped past the runaway line",
           b["peak"][2] > 1.8, f"ch2 peak={b['peak'][2]:.2f}")
     check("the global interlock trips on it", b["faults"] > 0, f"{b['faults']} fault(s)")
+    # The safety complement to the soft-saturation check further down, and the
+    # reason that one is not just "the interlock was switched off". This scenario
+    # ALSO clips -- see the note below -- but here the optic sits near full
+    # amplitude instead of coming down, so the envelope is not falling and the
+    # fault must still fire. Clipped-and-winning keeps damping; clipped-and-not-
+    # winning still faults. Both halves are asserted, on two different runs.
+    if "soft-saturation" in fixed:
+        check("soft-saturation did NOT disable the interlock: clipped and NOT "
+              "winning still faults",
+              b["faults"] > 0 and any(b["sat_ever"]),
+              f"{b['faults']} fault(s) with the actuator pinned, ch2 peak="
+              f"{b['peak'][2]:.2f}")
     # On the rigid-body plant this scenario trips on a PINNED ACTUATOR, not on a
     # runaway, and the distinction decides which defect it exercises. Inverting
     # ch2 does not make the mass unstable -- the other three still out-damp it
@@ -543,8 +565,26 @@ def suite(path):
     over[0] = -0.600
     d = run("over-gain ch0 + a kick", 90, [True, False, False, False], over,
             ki=info["ki"], kd=info["kd"], auto_kick=True)
-    check("over-gain plus a disturbance trips a fault", d["faults"] > 0,
-          f"{d['faults']} fault(s)")
+    # What this scenario actually produces is a CLIPPED loop, not a diverging
+    # one: the simulated plant is linear apart from the ADC, so -0.600 damps
+    # monotonically harder than -0.030 (versions.md: swept to -0.600, zero
+    # faults). Up to v9 the rig faulted here anyway, on the 30-consecutive-pinned
+    # streak alone. `soft-saturation` asks the second question -- is the clipped
+    # output winning? -- and here it is, so v10 keeps damping. Measured on this
+    # exact run: v9 faults once and peaks at 1.527 with 87.8% of samples in
+    # DAMPING; v10 never faults, peaks at 0.853, and reaches 93.3%. Freezing a
+    # winning actuator let the optic ring 1.8x higher. Both versions really did
+    # clip (sat_ever), so this is not a scenario that stopped saturating.
+    if "soft-saturation" in fixed:
+        check("FIXED soft-saturation: a clipped actuator that is still WINNING "
+              "keeps damping instead of faulting",
+              d["faults"] == 0 and any(d["sat_ever"]) and d["ratio"][0] < 0.35,
+              f"{d['faults']} fault(s), saturated={any(d['sat_ever'])}, "
+              f"ch0 ratio {d['ratio'][0]:.3f} vs the 0.35 lock line, "
+              f"peak {d['peak'][0]:.3f}, {d['pct_damping']:.1f}% damping")
+    else:
+        check("over-gain plus a disturbance trips a fault", d["faults"] > 0,
+              f"{d['faults']} fault(s)")
     stuck = d["state"] == "FAULT" and not d["recovered"]
     if "saturation-latch" in fixed:
         check("FIXED saturation-latch: the trip clears and the loop recovers",

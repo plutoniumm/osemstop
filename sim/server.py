@@ -354,6 +354,21 @@ class Sim:
                           shock_rate=0.0, shock_amp=3.0)  # per minute, V/s
         self.occlude = [False] * 4
         self.occlude_high = [False] * 4   # which rail a blinded channel sits on
+        # Per-channel counts-per-metre, relative to nominal. NOT a fudge factor:
+        # an OSEM is a shadow sensor and is only linear while its flag sits in
+        # the partial shadow, so alignment sets how many counts one metre of
+        # optic motion produces -- and the bench 2026-08-06 measured that spread
+        # directly across the eight OSEMs. a5 reads the 1.046 Hz mode at ~1/12 of
+        # a0's counts-per-metre (DC matrix ~13x, passive mode amplitudes ~10.5x,
+        # two independent estimates), while a4/a6/a7 sit clean OUTSIDE the shadow
+        # and modulate with nothing at all: 0.1-9% of their power in the 0.4-3 Hz
+        # loop band, against 77-99% for a0-a3.
+        #
+        # 1.0 is a normal OSEM. 0.0 is the a4/a6/a7 case -- powered, reading, not
+        # sensing the optic, so what reaches the ADC is that channel's own noise
+        # about its resting count. This is the failure `auto-disable` cannot see,
+        # because such a channel never RAILS: it sits mid-scale and flat.
+        self.sens_gain = [1.0] * 4
         self.quake = None                 # sustained injected shake, or None
         self.enable = [bool(v) for v in osem.ENABLE_CHANNEL]
         self.steady = [float(v) for v in osem.STEADY_GAIN]
@@ -569,10 +584,17 @@ class Sim:
                 self.set_occlusion(int(c), bool(kw.get("on", True)),
                                    str(kw.get("side", "low")))
             return f"occlude {kw.get('channels')} {kw.get('side', 'low')}"
+        if kind in ("sensor", "sens_gain"):
+            # Mis-align one OSEM: scale its counts-per-metre. 0.0 is the a4/a6/a7
+            # case measured 2026-08-06 -- reading, not sensing, and never railing.
+            for c in (kw.get("channels") or []):
+                self.sens_gain[int(c)] = float(kw.get("gain", 1.0))
+            return f"sens_gain {kw.get('channels')} -> {float(kw.get('gain', 1.0)):.3f}"
         if kind == "clear":
             with self.lock:
                 self.occlude = [False] * 4
                 self.occlude_high = [False] * 4
+                self.sens_gain = [1.0] * 4
                 self.quake = None
             return "cleared"
         raise ValueError(f"unknown injection: {kind}")
@@ -680,7 +702,13 @@ class Sim:
                 # Sensor volts about THIS channel's measured resting point, not
                 # about mid-scale. See DC_REST_COUNTS: this is what makes the
                 # top rail reachable and the bottom one effectively not.
-                measured = DC_REST_V[i] + (self.x[i] - X_REST)
+                #
+                # `sens_gain` scales the MOTION only, never the resting point --
+                # a mis-aligned flag changes counts-per-metre, not where the
+                # photodiode sits. At 0.0 the channel still reports a perfectly
+                # healthy-looking DC level and a perfectly healthy-looking noise
+                # floor; only the optic is missing from it.
+                measured = DC_REST_V[i] + self.sens_gain[i] * (self.x[i] - X_REST)
             sig = measured + noise_v * gauss()
             if hum_v:
                 sig += hum_v * HUM_SCALE[i] * math.sin(hum_phase)

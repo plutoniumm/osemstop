@@ -1,274 +1,161 @@
 # Research queue
 
-Ranked by impact × confidence × cost, **in dependency order** — each item gated by the ones
-above. Item 1 is **done**. Item 2's one unmet prerequisite — measuring the actuation matrix —
-is now **built**: `sysid.py` plus the four `osem.v6*.py` bench tools implement exactly the
-stepped-sine / interleaved-multisine measurement this file recommends below, and they have
-been run on the bench (raw records in `data/`, 2026-08-04). Nothing else below item 1 is
-started. Every number here came from `harness.py` unless it says otherwise.
+Dependency order — each item gated by the ones above. Simulator numbers (`harness.py`) unless
+marked bench. In the tree: `osem.v3.py`, `osem.v6.py` (sysid), `osem.v7.py`, `osem.v9.py`; v7 and
+v9 confirmed on hardware 2026-08-04. `v0`–`v2`, both files called `v4`, `v5`, `v5.5`, `v6.1`,
+`v6.5`, `v6.6`, `v8` are git history only; their numbers stand.
 
-Note on version references throughout: **`osem.v0.py` … `osem.v3.py` were deleted from the
-working tree on 2026-08-04** and survive only in git history (`git show HEAD:osem.v0.py`).
-Numbers attributed to them below were measured while they were still present and are kept
-because they are the reference point everything after them is measured against.
+## The floor
 
+Amplitude ratio settles at **0.23** — steady state of a continuously forced oscillator, not a
+failure to converge. Drive removed mid-run: decay τ **3.4 s** damped (Kp −0.030) against **15.9 s**
+gain-off, predicted 2.76 / 15.92 s. The floor tracks `intrinsic / (intrinsic + added)` damping:
 
-## The measurement everything else follows from
+| Kp | −0.005 | −0.030 | −0.100 | −0.300 |
+|---|---|---|---|---|
+| predicted floor | 0.557 | 0.173 | 0.059 | 0.021 |
+| measured | 0.545 | 0.239 | 0.088 | 0.031 |
 
-The amplitude ratio settles near **0.23, not zero**: the steady state of a *continuously
-forced* oscillator, not a failure to converge. Drive removed mid-run:
+**The floor falls with gain; gain is capped by the −0.04 instability — item 3.** The 0.0089 V
+residual is the actuator's 0.5 mV deadband and 10 ms throttle, not sensing: 0.0089 / 0.0087 /
+0.0094 V at 20 / 5 / 0 mV injected sensor noise.
 
-| | damped (Kp −0.030) | gain off |
-|---|---|---|
-| decay time constant | **3.4 s** | 15.9 s |
-| predicted | 2.76 s | 15.92 s |
+## 1. Suite fixed for the rigid-body plant — DONE
 
-Undamped matches theory to 0.01 s — model and loop both sound. A gain sweep confirms the
-floor tracks `intrinsic / (intrinsic + added)` damping:
+Seven assertions encoded the old four-independent-oscillator plant; three rewritten in `harness.py`,
+no controller touched. Status: `make check`.
 
-| Kp | predicted floor | measured |
-|---|---|---|
-| −0.005 | 0.557 | 0.545 |
-| −0.030 | 0.173 | 0.239 |
-| −0.100 | 0.059 | 0.088 |
-| −0.300 | 0.021 | 0.031 |
+## 2. Modal (MIMO) damping — blocked on a clean actuation matrix
 
-So the floor falls with gain, and gain is capped by an instability at −0.04 that **has no
-recorded evidence anywhere**. Hence item 3 gates items 4 and 5.
+Acceptance target — ground truth (LONG row, normalised) `[−0.59, −0.45, +2.45, −0.51]`: ch2 4× the
+others, opposite sign. The online attempt (git history) recovered `[2.0, 0.2, −0.53, −1.27]` from
+velocity × PRBS and `[−0.71, −0.47, −0.86, −1.96]` from acceleration × PRBS; its mode estimator was
+fine (98.8% / 1.2% mode content from the calibration covariance). Still binding: dither 1.0 barely
+beat ambient drive 0.8 + seismic 0.8, so size any new dither above that. Superseded: zero-lag
+correlation on velocity has no coherent term (force acts on **acceleration**) and ~40-bit PRBS
+gives **~16%** inter-channel cross-talk, the size of the differences measured. Stepped sine +
+lock-in (`sysid.py`, `osem.v6.py`) fixes both — magnitude and phase both fall out, no quadrature
+guessed, divided by the **commanded** drive.
 
-Negative result: the 0.0089 V residual after the drive stops is **not** sensor-noise
-injection — 0.0089 / 0.0087 / 0.0094 at 20 / 5 / 0 mV of sensor noise. It is
-`RateLimitedActuator`'s 0.5 mV deadband and 10 ms throttle: firmware, not sensing.
+**Bench 2026-08-04, a quarter of a matrix.** Rank check **passed**: singular values
+1.000 / 0.154 / 0.058 / 0.043, two directions above 10% against two expected — four coils drive two
+DOF. But only **4 of 12 frequencies were usable** (ch2 railed in 17 of 48 steps), and two of those
+four, 0.3797 and 0.4805 Hz, are near-identical across coils — ambient-, not drive-dominated. The
+multisine variant (git history) **failed**: ch2 railed in all four passes, and its pass 1 ran
+14.8 Hz effective against ~252 Hz, hence ~4700 V/V against ~70 — aliasing, not physics.
 
+One cause: **open loop, nothing damping, so the optic rings up and ch2 clips.** No OSEM rests at
+mid-scale (bench 600 / 631 / 708 / 677 counts against 511.5), so every channel clips its top rail
+first, and bias cannot centre them — least squares wants −1.93 … +3.77 V against 2.5 V of DAC.
+v7's trim gets total offset 565 → 455 counts.
 
-## 1. Fix the suite for the rigid-body plant — **DONE**
+**Next: closed-loop dither**, the loop holding the optic in range while the known signal rides on
+top. **Done when** the matrix matches ground truth in sign and to ~20% in magnitude, and the modal
+controller damps on the bench.
 
-Was 13 failures, 7 of them *stale assertions* encoding the old four-independent-oscillator
-plant; nothing else could be validated while the test bed lied. Three assertions rewritten
-in `harness.py`; no controller touched.
+## 3. Characterise the −0.04 instability — bench, gates 4 and 5
 
-When the fix landed the suite was 88 checks, **83 pass, 5 fail**, with v0–v3 green
-(18 / 16 / 18 / 18) and all 5 failures on the since-deleted modal v4, all real: no damping
-(ratios 0.24–0.77), never locks, one fault in a quiet lab, I term never accumulates so
-P-dominance has nothing to compare — item 2.
+Every gain in the repo rests on one sentence in a deleted docstring, *"onset of instability/rail at
+gain=-0.04"*. No data records it, `provenance.md` confirms the report never mentions it, and the
+simulator cannot reproduce it — the plant is linear and damping rises monotonically to −0.6.
 
-**Today `make check` is 175 passed, 0 failed.** v0–v3 are gone, so the suite now runs only
-what the simulator can drive: v4 (29 checks) and v5 (30). `osem.v5.5.py` is skipped — eight
-channels against a 4-OSEM plant — and the four `osem.v6*.py` are skipped as bench tools that
-close no loop.
-
-| Stale assertion | Replaced by |
-|---|---|
-| *disabled channels stay at their baseline* | Split: a disabled channel never actuates (peak `\|out − bias\|` = 0), but its ratio must **fall** — one rigid body, so damping ch0 drains the whole mass (`provenance.md` §3). Measured on v0, since deleted: driven ch0 **0.188**, undriven 0.333 / 0.316 / 0.253, driven still flattest (`versions.md` § *The ladder*, re-measured 2026-08-03; the pre-re-measurement figures were 0.197 and 0.265 / 0.323 / 0.355). |
-| *a runaway trip auto-recovers* | Four on with ch2 inverted no longer runs away: the other three out-damp it (net `gain_i · COIL_GAIN_i` −0.1415 → −0.0419, a third of the damping surviving), so the optic sits near full amplitude asking more than its ±0.25 V clip and trips on **ch3 saturation**, t = 10.74 s, `sat_streak` = 31 — defect #1, which latches. Asserted broken-side for v0/v1/v2, fixed-side for v3. Runaway gets its own scenario (ch2 alone, wrong-signed at half magnitude: slow enough to trip on ratio, actuator peaking 0.055–0.112 V of its 0.25 V clip) that every version must recover from — for un-fixed ones that recovery *is* proof nothing saturated. |
-| *KNOWN GAP / FIXED runaway-baseline* | The 18% line was calibrated on the old plant and separates nothing. Swept one shock across the calibration window: worst case **39.3%** (v0/v1/v2) vs **19.7%** (v3, and v4/v5 which inherit the fix), line now 35% (`versions.md` § v3). One fixed shock time ranks them backwards for late shocks, so the check sweeps. (Those two numbers were re-measured 2026-08-03 once scripted shocks got their own RNG; the 45.3% / 25.0% pair this row used to quote came from runs where the shock *direction* depended on the sample rate and is retired.) |
-
-All simulator, rigid-body plant, **never hardware**.
-
-
-## 2. Modal (MIMO) damping — what killed the last attempt
-
-The main **beyond-PID** direction, tried once — by the *original* `osem.v4.py`, the modal
-controller **deleted 2026-08-03**, in git history only (today's `osem.v4.py` is a different
-file: v3 plus `auto-disable`, v3 itself having been deleted a day later). It never damped. It learned the modal basis with no geometry
-input ("2 of 4 modes carry real motion, 98.8% / 1.2%", from the calibration covariance) and
-failed at one point: recovering the actuation matrix. Truth (LONG row, normalised)
-`[−0.59, −0.45, +2.45, −0.51]` — ch2 4× the others, opposite sign.
-
-| scheme | result |
-|---|---|
-| velocity × PRBS (what it did) | `[2.0, 0.2, −0.53, −1.27]` |
-| acceleration × PRBS | `[−0.71, −0.47, −0.86, −1.96]` |
-
-Three compounding causes:
-
-1. **Wrong quadrature — the fundamental one.** Force acts instantaneously on *acceleration*;
-   velocity is its integral, so a zero-lag correlation on velocity has no coherent term to
-   find. (The earlier displacement → velocity fix was right *for a sinusoid at resonance*,
-   and broadband PRBS silently invalidated it.)
-2. **Simultaneous excitation, sequences too short.** ~40 bits gives ~16% cross-talk between
-   channels, comparable to the differences measured; the four LFSR seeds are phase shifts of
-   one m-sequence.
-3. **SNR.** Dither force ≈ 1.0 against ambient drive 0.8 and seismic 0.8.
-
-**Fix.** Fit a *state-space model* to the dither data rather than correlating at one lag —
-lag structure is what states are for; `scipy` / `python-control` are mature. Or the bench
-standard, **stepped sine, one coil at a time, both quadratures**: magnitude and phase both
-fall out, so the sign never depends on guessing a quadrature. It need not be online at all —
-on the bench that is one afternoon's measurement with no convergence risk, and it is what
-the online system ID kept getting wrong.
-
-**Status: the measurement is built and has been run; the modal controller has not.**
-`sysid.py` holds the lock-in and the reporting, and four thin front-ends drive it — none of
-them a controller, all declaring `KIND = "sysid"`, so `harness.py` and `bench.py` skip them:
-
-| | excitation | coils |
-|---|---|---|
-| `osem.v6.py` | stepped sine, one coil at a time | 4 |
-| `osem.v6.1.py` | continuous multisine, interleaved frequency bins, rotated over 4 passes | 4 |
-| `osem.v6.5.py` | stepped sine | 8 |
-| `osem.v6.6.py` | continuous multisine, rotated over 8 passes | 8 |
-
-Both methods measure magnitude *and* phase from the lock-in, so nothing depends on guessing
-a quadrature — cause 1 above. The multisine pair addresses cause 2 differently: each coil
-owns its own comb of exact frequency bins, so the input cross-spectrum is diagonal by
-construction and there is no near-singular matrix to invert. `report()` checks the rank of
-the result (2 DOF for four coils, 4 for eight), which is an independent test of the
-measurement rather than of the optic. Raw records from the bench are in `data/`
-(2026-08-04); the recovered matrices are not written up in this file yet.
-
-**Done when:** the recovered matrix matches ground truth in sign and to ~20% in magnitude,
-and the modal controller damps on the bench.
-
-
-## 3. Characterise the −0.04 instability on the bench
-
-**The only item that needs hardware, and it gates 4 and 5.**
-
-Every gain in the repo rests on one sentence in the docstring of `osem.v0.py` — a file
-deleted on 2026-08-04 and now readable only as `git show HEAD:osem.v0.py`: *"onset of
-instability/rail at gain=-0.04."* No data records it; `provenance.md`, two days later, never
-mentions it — no sweep, no −0.04, no rail-onset trace. The simulator provably cannot
-reproduce it, the plant being linear: more negative Kp is monotonically more damping to
-−0.6. Items 4 and 5 both raise effective gain, so pushing on an undocumented stability limit
-first is the wrong order.
-
-**How:** re-run the sweep on the bench; keep the 12-column CSV *and* the scope trace; record
-where clipping starts versus where oscillation grows — different failures. For the mechanism
-this is the one place **nonlinear system ID** (NARX, or a small network) beats a physics
-model: something nonlinear the linear model cannot express — actuator saturation, magnetic
-nonlinearity, or the OSEM shadow response leaving its linear range.
-
-**Done when:** a logged run in `data/` shows the onset, with a stated mechanism.
-
+Sweep on the bench keeping the 12-column CSV *and* the scope trace, separating where clipping starts
+from where oscillation grows. For the mechanism this is the one place nonlinear system ID (NARX, or
+a small network) beats a physics model: saturation, magnetic nonlinearity, or the OSEM shadow
+response leaving its linear range. **Done when** a logged run in `data/` shows the onset with a
+stated mechanism.
 
 ## 4. Resonant / internal-model control
 
-**The biggest single win on the actual objective.** The floor is set by a *persistent
-narrowband* disturbance near 1 Hz; the internal model principle says asymptotic rejection of
-a sinusoid needs a loop pole there. A lightly-damped complex pole pair at f₀ — a "boost"
-stage, standard on real suspensions — puts enormous loop gain where the disturbance lives
-and almost none elsewhere: the one way at the 0.23 floor **without** the broadband gain
-increase that runs into −0.04.
-
-**Watch for:** added phase, so it interacts with item 5, and it needs f₀. No frequency
-estimator exists — `provenance.md`'s block diagram specifies `zero-crossing → f̂` in
-Calibration, never implemented. This item is the reason to build it.
-
+The floor is a persistent narrowband disturbance near 1 Hz, so asymptotic rejection needs a loop
+pole there. A lightly-damped complex pole pair at f₀ — a "boost", standard on real suspensions —
+puts gain only where the disturbance lives: the one route below 0.23 without the broadband gain
+that hits −0.04. Costs phase, so it interacts with item 5, and needs f₀, which nothing estimates:
+`zero-crossing → f̂` is drawn in the report's block diagram and was never built.
 
 ## 5. Kalman velocity estimator
 
-Today: finite difference plus a 5 Hz lowpass — pure phase lag at 1 Hz, and phase lag
-consumes stability margin. A Kalman filter on the known second-order model is the optimal
-estimator for noisy position in, velocity out. Payoffs: gain headroom for item 4, and the
-**leading hypothesis for item 3** — why −0.04 destabilises on hardware when the linear model
-says it should not.
-
+Finite difference + 5 Hz lowpass is pure phase lag at 1 Hz, and phase lag is stability margin. A
+Kalman filter on the known second-order model is the optimal noisy-position → velocity estimator:
+gain headroom for item 4, and the **leading hypothesis for item 3** — why −0.04 destabilises
+hardware when the linear model says it should not.
 
 ## 6. Stop paying 20 s of zero gain for a baseline
 
-**Cheap, self-contained, does not wait on the bench.** All measured in the simulator on
-2026-08-04.
+`CALIBRATION_S` holds gain at zero to measure `baseline_rms`, the undamped floor; the runaway
+breaker (`>1.8x`), the gain scheduler and the lock detector (`<0.35x`) all scale off it. Bench,
+four channels: 20 s + ~11 s to lock = **65% of wall clock at zero gain**, plus 25 s open loop after
+a fault — ~40 s of not damping per kick.
 
-### What the window buys, and what it costs
+**Why not simply shorter.** A quiet lab needs 3 s (3 s and 20 s agree, 0.8% scatter over 8 seeds);
+the length exists for one shock inside the window. Worst-channel skew from a 6 V/s kick:
 
-`CALIBRATION_S` holds gain at **zero** while measuring `baseline_rms`, the undamped noise
-floor. Three things scale off it: the runaway breaker (`> 1.8x baseline`, sustained), the
-gain scheduler (`ratio = local_rms / baseline`), the lock detector (`< 0.35x baseline`).
-Cost: 20 s of no damping per entry, and `FAULT_CLEAR_SUSTAIN_S + CALIBRATION_S` = 25 s after
-a fault. v5's `fast-refault` already elides the *repeat* case; this item is the rest.
+| CALIBRATION_S | 5 s | 8 s | 10 s | 15 s | **20 s** |
+|---|---|---|---|---|---|
+| worst skew | 74.3% | 86.5% | 41.0% | 57.9% | **20.1%** |
 
-### Why it is 20 s, which is not arbitrary
+Against a **35%** assertion line and **39.3%** un-fixed, every shorter window fails, some worse than
+the defect. Cause is **ringdown** — Q = 50, f0 ~ 1 Hz, tau = Q/(pi·f0) ~ **16 s** — so
+median-of-sub-windows helps only when the window is comparable to tau; at 10 s every sub-window is
+dirty, which is why 12 s is also worse than 10 s. **Scale the ceiling off Q, do not hardcode it.**
 
-In a quiet lab almost any window works — 3 s and 20 s give the same answer, 0.8%
-run-to-run scatter over 8 noise seeds. The length exists for the `runaway-baseline` defect:
-one shock inside the window. Worst-channel skew from a single 6 V/s kick:
+### 6a. Adaptive window — built, bench-failed on one constant
 
-| CALIBRATION_S | sub-window | worst skew |
+`fast-calib` (v9). Simulator: calibration 20.00 → **6.01 s**, time-to-lock 30.6 → **16.5 s**, and
+swept-shock skew *improves* 19.7% → 17.6%, because a shock inside the window refuses to converge
+early and is still measured the old way. Swept over 16 lab conditions, 12 exit at 6.01 s within
+7.0% of the full-window floor and 4 run the ceiling, returning the old number to 0.0%.
+
+**Bench 2026-08-04: never fired.** The agreement tolerance (max/min ratio **1.20**) was tuned on
+simulator noise, one RNG seed; the bench floor does not satisfy it, so it burns the ceiling and
+falls back to the old estimator — safe, but the saving is unconfirmed on hardware. **Retune it from
+the nine bench logs already recorded; done when** it exits early on the bench and still holds shock
+skew under 35%.
+
+`warm-restart` (same version) did transfer: two 15 V/s kicks into a locked loop, re-engages 5 s
+after the all-clear and re-locks 10.7 s later; without it, no LOCKED inside 115 s.
+
+### 6b. Always-on baseline
+
+**The trap:** `baseline_rms` is the *undamped* floor, but the live bandpassed signal closed-loop is
+the *damped* level, ~0.03x of it — the lock detector would demand 0.35x of an already-damped signal
+and the breaker would trip on ordinary motion.
+
+| | how | catch |
 |---|---|---|
-| 5 s | 1.0 s | 74.3% |
-| 8 s | 1.6 s | 86.5% |
-| 10 s | 2.0 s | 41.0% |
-| 15 s | 3.0 s | 57.9% |
-| **20 s** | **4.0 s** | **20.1%** |
+| (a) invert the ratio | open-loop ~ closed-loop / floor(Kp) | 0.173 predicted vs 0.239 measured at Kp −0.030, ~40% error: seed only |
+| (b) witness channel at bias | one rigid body, so it reads the undamped floor free | costs a quarter of the damping authority — blocked, below |
+| **(c) out-of-band — build this** | loop has authority only in 0.4–3 Hz; outside it the plant is open loop at any gain, so track the out-of-band level and scale | scaling characterised once, then free and costs no channel |
 
-The harness asserts < 35% and the un-fixed baseline — measured on v0 before it was deleted —
-reaches 39.3%, so every shorter window fails, some worse than the defect being fixed.
+(b) waited on eight channels. **All eight OSEMs are connected** (scope-confirmed 2026-08-06; the
+earlier "a4–a7 not wired" call was wrong). The split is in-band vs out-of-band: a0–a3 carry 77–99%
+of their power in 0.4–3 Hz and a5 22–71%, but a4/a6/a7 carry only 0.1–9% — 91–99% of their signal
+sits at 3–20 Hz, dominated by a narrow **6.19 Hz** line (12.38 Hz harmonic on a7) absent from
+a0–a3. Their flags are outside the linear partial-shadow region: **alignment, not wiring.** a5 is
+the same story one step milder — in band, at ~1/12 of a0's gain.
 
-Cause: **ringdown**. At Q = 50, f0 ~ 1 Hz, tau = Q/(pi*f0) ~ **16 s**. Median-of-sub-windows
-helps only when *some* sub-windows are clean, i.e. window comparable to tau; at 10 s the
-whole window is contaminated and the median picks the middle of a uniformly bad set. Hence
-the non-monotonicity too (12 s worse than 10 s): what dominates is where the shock falls
-relative to sub-window boundaries, not a smooth statistical effect.
+The bandpass already removes the 6.19 Hz line, which is why those channels calibrated ~0.002 V
+baselines and blew up `env/baseline` in the v5.5 run. Method note: the original call used a DC
+threshold and raw correlation, both blind to a small coherent signal. Test for a peak at the known
+resonance. See `analysis/where_is_power.py`.
 
-**Derive the ceiling from Q, do not hardcode it.** If the real Q is not 50 the window scales
-with it, and ringdown falls out of the item-2 sweep for free.
+## Ruled out
 
-### 6a. Adaptive window — do this first
-
-Accumulate sub-windows, stop when the last few agree to a tolerance, 20 s a **ceiling not a
-target**. Quiet lab: exits in seconds — the 0.8% scatter says the information is already
-there. After a shock: keeps going until the ringdown passes. Strictly better than either
-constant, at the cost of one convergence test.
-
-**Done when:** it exits early in a quiet lab AND still bounds the shock skew under 35% on
-the swept-shock check.
-
-### 6b. Always-on baseline — the right end state, with one trap
-
-Never stop measuring; just *do not use* a fresh estimate unless something needs it.
-
-**The trap** (the naive version is worse than useless): `baseline_rms` is the **undamped**
-floor, but integrating the live bandpassed signal closed-loop measures the **damped** level
-— ~0.03x of it at shipped gains. That leaves the lock detector demanding 0.35x of an
-already-damped signal and the runaway breaker tripping on ordinary motion, so it cannot just
-be the existing accumulator left running. Three that work:
-
-| | How | Catch |
-|---|---|---|
-| **(a) Invert the known ratio** | floor tracks `gamma_int / (gamma_int + gamma_added)` (top of file), so open-loop ~ closed-loop / floor(Kp) | predicted vs measured is 0.173 vs 0.239 at Kp = -0.030, ~40% error — good enough to *seed*, not to be the reference |
-| **(b) A witness channel, held open loop** — **the one to build** | one rigid body, so a channel parked at bias measures the undamped floor continuously and free | costs that channel's damping authority; revisit when `v5.5` brings eight channels and four DOF online — eight sensors for four DOF is real redundancy, and the witness can be rotated so no axis stays unactuated |
-| **(c) Out-of-band estimation** | the loop only has authority in 0.4-3 Hz; outside it the plant is open loop at any gain, so if the disturbance is spectrally stationary, track the out-of-band level and scale | needs the scaling characterised once, then free forever and costs no channel |
-
-**Dependency:** 6a is independent, do it now. 6b(b) is gated on the 8-channel bring-up;
-6b(c) is gated on nothing but wants item 2's plant model to justify the scaling.
-
-
-## Deliberately cut, with reasons
-
-| Candidate | Why not |
+| candidate | why not |
 |---|---|
-| **Actuator deadband / rate-limit fix** | Sets the current floor (0.009 V above; identical at 0 / 5 / 20 mV sensor noise, so not the sensor). Cheap, firmware-only — but it only matters near 0.009 and you are at 0.23. Premature. |
-| **Safe Bayesian optimisation for gain tuning** | Good fit: expensive trials, few parameters, a hard safety constraint (SafeOpt-style methods explore without violating one). The right tool *after* item 3 says where the constraint is. |
-| **CUSUM / change-point interlocks** | Principled fix for both threshold defects — #2 "3 counts, 250 consecutive samples", #3 "2 s RMS > 1.8 × an 8 s baseline" — which test an instantaneous threshold instead of accumulating evidence. The v3 replacements now carried by v4/v5/v5.5 are better *thresholds*; this is the better *kind of thing*. Not urgent. |
-| **Feedforward / Wiener filtering, LQG / H∞, adaptive notch (LMS), ICA** | Wait on a validated plant model = item 2. Wiener feedforward from a seismometer is the detector standard, and strongest of these once a witness sensor exists. |
-| **Reinforcement learning for the damping law** | Sample-hungry on hardware, no stability guarantee, hard safety constraint. Sim-to-real is the usual escape, but this simulator's one documented blind spot is the −0.04 instability — an agent trained on it would learn that more gain is always better, the lesson you least want it to learn. |
+| actuator deadband / rate-limit fix | sets the 0.009 V floor; you are at 0.23. |
+| safe Bayesian optimisation (SafeOpt) for gains | right tool, wrong order — needs item 3 to say where the safety constraint is. |
+| CUSUM / change-point interlocks | right *kind* of thing for defects #2 ("3 counts, 250 consecutive samples") and #3 ("2 s RMS > 1.8 × an 8 s baseline"), which test a level instead of accumulating evidence. Bench, on #3: a level test cannot tell a runaway (envelope growing) from a ringdown (large but falling) and re-tripped all the way down — 10 faults in 240 s. v9's `runaway-trend` growth gate takes that to 4 faults and a re-lock after every kick, which is enough for now. |
+| feedforward / Wiener, LQG / H∞, adaptive notch, ICA | wait on item 2's plant model. Wiener feedforward from a seismometer is the detector standard and strongest of these once a witness sensor exists. |
+| RL for the damping law | sample-hungry on hardware, no stability guarantee, and the simulator's one blind spot is −0.04 — an agent would learn that more gain is always better. |
 
-**`ENABLE_CHANNEL` vs the report, and `auto-disable`.** Only the first is written down —
-`versions.md` § v1: v0's "only ch0 is validated" predates `provenance.md` §4 by two days,
-and v1 onward ship all four channels on.
-
-`auto-disable` was cut here on the grounds that it appeared once in the report's
-block-diagram Safety Checks box next to `lock detect` and nowhere else — drawn and never
-implemented, like `zero-crossing → f̂` (item 4). **That entry is out of date: it was ruled
-out then and has since been built.** `osem.v4.py` implements it — a rail demotes that
-channel alone and a global `FAULT` is reserved for dropping below
-`MIN_HEALTHY_CHANNELS = 1` — and `osem.v5.py` and `osem.v5.5.py` inherit it; all three list
-`auto-disable` in `FIXES`. `harness.py` reads that string and gates a whole section of
-checks on it (a blind axis demoted rather than escalated, the quorum, per-channel re-arming,
-and a rail during calibration still being global). It is written up in `versions.md` § v4,
-and `CLAUDE.md` item 4 is the bench test it still needs — no version has exercised it on
-hardware. `zero-crossing → f̂` is now the only drawn-and-never-implemented block left.
-
-Correction: this entry once listed "the report's 0.085 Hz error" and credited all three to
-`versions.md`; both wrong. `0.085` occurs nowhere in the repo or in `provenance.md`'s text
-layer — that error has left no record, so re-derive it from the report before acting.
-(`auto-disable` was also absent from `versions.md` when this correction was written; it is
-documented there now, as § v4 above records.) No action needed until wanted.
+`auto-disable` was ruled out here and has since been built (v4 on): a rail demotes that channel, a
+global `FAULT` only below a quorum of one. **Never exercised on hardware** — `CLAUDE.md` item 4.
+Do not chase "the report's 0.085 Hz error"; `0.085` occurs nowhere in the repo or in
+`provenance.md`'s text layer.
 
 ## Where learning belongs
 
-Learn the **model**, the **estimator**, and the **anomaly detector**; keep the control law
-and the interlocks classical and certifiable. That split is what real detectors do, and it
-is what lets you argue the machine cannot destroy the optic — the argument that matters when
-the other end is a suspended mirror.
+Learn the model, the estimator and the anomaly detector; keep the control law and the interlocks
+classical and certifiable. That is what lets you argue the machine cannot destroy a suspended
+mirror.

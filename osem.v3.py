@@ -1,92 +1,9 @@
 """
-v4 -- graceful degradation: a blind axis drops out, the rest keep damping.
-==========================================================================
-v3 with ONE behavioural change, and nothing else touched. Everything below
-this section is v3 byte for byte, so a bench comparison isolates it.
+v3 -- a proper PID, and the three known defects fixed.
+==================================================================
+The correction pass that v0/v1/v2 deliberately deferred. Two kinds of
+change, kept separate on purpose:
 
-THE CHANGE. v3 treats a railed sensor as a whole-optic emergency:
-
-    any_rail = any(ch.rail_fault for ch in channels)   # -> FAULT, all four to bias
-
-One OSEM losing its flag stops ALL damping -- at exactly the moment of
-largest excursion, which is when the flag left range in the first place.
-During a seismic event that is backwards: the loop gives up precisely when
-the optic most needs it.
-
-v4 demotes the blind channel instead of the whole rig:
-
-    rail on ch_i  ->  ch_i alone is held at bias; ch_j != i keep damping
-    global FAULT  ->  only when ZERO configured channels are still healthy
-
-That quorum of one is not a guess. provenance.md section 3 measured a single
-OSEM/coil pair damping the WHOLE rigid body (~70 s, against ~17 s for all
-four in section 4), and v0..v4 run four INDEPENDENT SISO loops -- OSEM i
-drives coil i and reads nothing else -- so ch0 does not need ch2's sensor to
-compute ch0's output. Three healthy axes are a slower rig, not a broken one.
-
-WHAT IS DEMOTED, AND WHAT IS STILL GLOBAL. Only the rail interlock became
-per-channel. This is deliberate, and the distinction is the whole design:
-
-  * RAIL is a local SENSING failure. The measurement is garbage, so the
-    output computed from it is garbage. Actuating on it is worse than not
-    actuating. Demote.
-  * AMPLITUDE RUNAWAY is not localisable. Four loops act on one rigid body,
-    so "amplitude is growing under feedback" does not identify which loop is
-    putting the energy in. Still global FAULT, unchanged from v3.
-  * ACTUATOR SATURATION is deliberately NOT demoted, even though it is the
-    other obvious candidate. A saturated channel is still pushing the right
-    way with full authority -- its measurement is fine and only its output is
-    clipped, which v3's back-calculation anti-windup already handles. Pulling
-    it to bias would REMOVE damping authority at peak amplitude, the same
-    mistake this version exists to fix. Saturation keeps v3's behaviour
-    exactly (check_runaway -> global FAULT). Unchanged, on purpose.
-
-CALIBRATING IS ALSO UNCHANGED: any rail there is still a global FAULT. You
-cannot calibrate a blind sensor, and a rig that starts up blind is not ready.
-That also means a demoted channel ALWAYS has a valid baseline, because it was
-healthy for the whole calibration window -- which is what makes re-arming
-cheap.
-
-RE-ARMING. A demoted channel comes back when its rail has been clear
-continuously for REARM_SUSTAIN_S. Three things happen on the way back, and
-each is there for a measured reason:
-
-  1. The filters are NOT reset. versions.md hazard 2: re-seeding a one-pole
-     injects a step. Instead the hold does the work -- BP_LOW_HZ = 0.4 Hz is
-     tau = 0.398 s, so REARM_SUSTAIN_S = 2.0 s is ~5 tau of wash-out AFTER the
-     sensor comes back, which is why the timer starts on rail-clear and not
-     on the demotion.
-  2. The baseline is CARRIED FORWARD, not re-measured. This is a deliberate
-     exception to the "always measure your own baseline, never borrow one"
-     rule the rest of the ladder follows, and it is the one place v4 breaks
-     it. Re-measuring means measuring during the event that caused the
-     demotion, with this channel's gain at zero while the others damp: an
-     inflated noise floor, which then desensitises this channel's runaway
-     breaker (RUNAWAY_MULTIPLE is relative to baseline) for the rest of the
-     run. A pre-event baseline measured in a quiet lab is the better estimate
-     of a quiet lab. If the event was permanent rather than transient, the
-     right recovery is a global re-calibration, which the FAULT path already
-     does.
-  3. active_gain is zeroed on demotion, so GAIN_SLEW_PER_S ramps it back from
-     zero (1.75 s to reach capture gain) rather than stepping. The runaway and
-     schedule RMS windows are cleared too, so near-zero bandpass samples from
-     the blind period cannot sit inside a 2 s window and mask a real runaway.
-
-KNOWN LIMIT, stated because it is easy to over-read this version: it fixes
-the FULLY blind case, not partial clipping. The bench measured 2.19% of
-samples at a rail on v1; RAIL_FRACTION = 0.80 of a window will not fire on
-that, so a partially-clipping channel still reads as healthy and still feeds
-flat-topped bandpass and spiking velocity into a live loop. Centring the OSEM
-rest points (622/632/598 counts against a mid-scale of 511.5) is the fix for
-that, and it is a separate problem. See README.md, "Known open problem".
-
-This is also the `auto-disable` block drawn in the original report's
-safety-checks diagram and never implemented in any version -- see
-provenance.md, "What the report does NOT contain".
-
---------------------------------------------------------------------------
-Inherited from v3, unchanged
---------------------------------------------------------------------------
 1. THE CONTROL LAW is restructured into a real PID (class `PID` below)
    instead of three terms scattered through `Channel.actuate`:
      * derivative on MEASUREMENT, not on error. With a constant setpoint
@@ -111,10 +28,6 @@ Inherited from v3, unchanged
 Everything else -- filters, gain schedule, calibration, logging, serial
 protocol -- is v1/v2 unchanged, so a bench comparison isolates the above.
 See versions.md.
-
-The three `FIXED (v3)` comments below are left naming v3, because v3 is where
-those fixes were made and where the harness first asserted them. The one
-change v4 makes is marked `NEW (v4)`.
 
 What's different from the sweep script, and why
 --------------------------------------------------
@@ -184,10 +97,6 @@ currently-applied gain, and rail/locked flags -- plus the overall
 controller state. That's enough to fully reconstruct what happened and
 verify a "locked" claim after the fact, which is exactly what the
 sweep-vs-scope mismatch showed we needed.
-
-v4 adds a 13th per-channel column, `healthy`, so a log can answer how many
-axes were in the loop at any instant. `rail` alone cannot: a demotion
-outlasts the rail that caused it by REARM_SUSTAIN_S.
 """
 
 import os
@@ -211,26 +120,20 @@ DAC_CHANNELS = [1, 3, 5, 7]   # coil DAC channel for sensor index 0..3 (A0..A3).
                               # [1,3,5,7,0,2,4,6] -- see provenance.md. The old
                               # [0,2,4,6] now points at the coils for sensors 4..7.
 
+VERSION_TAG, BENCH_STATUS = "v3", "validated"   # ran 2026-08-03, see versions.md
+FIXES = ("saturation-latch", "rail-threshold", "runaway-baseline")
+
+# Ran on ch0 on 2026-08-03 and damped: locked in 14.5 s, held 115 s, 0.00% ADC
+# clipping, and auto-recovered from two faults (~5.05 s each). Both of those were
+# RUNAWAY trips with pinned runs of 0 and 4 against a threshold of 30, which v1
+# recovers from too -- so `saturation-latch` and `rail-threshold`, the two fixes
+# that actually separate v3 from v2, are still UNEXERCISED on hardware. Confirming
+# them needs a kick hard enough to pin an actuator for 30+ consecutive samples.
+
 # All four enabled. provenance.md §4 documents all four damping together on
 # the bench (Table 1: tau = 4.55, 5.49, 3.58, 5.05 s for A0..A3), which is the
 # run v0 predates. Disabled channels are still filtered, rail-checked and logged,
 # and still trip the global interlock -- disabling one does not make it silent.
-VERSION_TAG = "v4"
-FIXES = ("saturation-latch", "rail-threshold", "runaway-baseline", "auto-disable")
-
-# --- bench status ---
-# Ran on hardware 2026-08-04. ch0 alone locked in 14.7 s; all four locked in
-# 11.1 s and rode three kicks, faulting and RECOVERING every time -- which is
-# the saturation-latch fix confirmed under a real disturbance, the thing v2
-# latched on. The rewired coil map [1,3,5,7] was validated on the same run, and
-# ch2's +0.010 came out the best-damping channel of the four, as Table 1 said.
-#
-# Still unconfirmed: auto-disable itself. It triggers on a RAILED sensor, and a
-# kick produces runaway/saturation, which is deliberately still global -- so no
-# bench run has demoted a channel yet. Verified against the simulator only,
-# which models occlusion directly. See versions.md section "On the bench".
-BENCH_STATUS = "validated"
-
 ENABLE_CHANNEL = [True, True, True, True]
 
 BIAS = np.array([0.25, 0.25, 0.25, 0.25])
@@ -330,25 +233,6 @@ RAIL_FRACTION = 0.80            # of the samples in the window, not consecutive
 
 FAULT_CLEAR_SUSTAIN_S = 5.0     # all-clear for this long -> auto re-arm
 
-# NEW (v4), "auto-disable". How long a demoted channel's rail must stay clear
-# before it re-arms, and how many channels must survive before the whole rig
-# faults.
-#
-# REARM_SUSTAIN_S is set from the filter time constants, not picked. The
-# slowest pole in the chain is the BP_LOW_HZ = 0.4 Hz highpass, tau =
-# 1/(2*pi*0.4) = 0.398 s. A sensor coming back off a rail is a step into that
-# filter, so the hold has to outlast the transient: 2.0 s is 5.0 tau. The timer
-# starts when the RAIL CLEARS, not when the channel was demoted, so the whole
-# wash-out happens with the sensor already reading properly. Do not shorten it
-# below ~1.2 s (3 tau) without re-checking that re-entry is still bumpless.
-REARM_SUSTAIN_S = 2.0
-# The quorum. provenance.md section 3: one OSEM/coil pair damps the whole rigid
-# body on its own (~70 s, against ~17 s for four), so one healthy channel is a
-# slow rig rather than no rig. Raising this to 2 or 3 trades that residual
-# damping for a tighter definition of "trustworthy" -- a defensible choice, but
-# it is a different one, so it is a constant and not a hardcoded `any()`.
-MIN_HEALTHY_CHANNELS = 1
-
 STATUS_PERIOD_S = 5.0
 CSV_FLUSH_EVERY_N = 200
 # ====================================================
@@ -399,7 +283,15 @@ class SlidingRMS:
             _, old_v = self.buf.popleft()
             self.sq_sum -= old_v ** 2
         n = len(self.buf)
-        return float(np.sqrt(self.sq_sum / n)) if n > 0 else 0.0
+        # max(..., 0.0) is not defensive padding. The sum is incremental, so when
+        # a large transient ages out of the window it leaves a rounding residue of
+        # its own magnitude -- and that residue can be NEGATIVE. sqrt() of that is
+        # nan, every comparison against nan is False, so the runaway breaker would
+        # stop tripping and the lock detector would stop firing, both silently and
+        # permanently. Not one of the three named FIXES: this is a latent bug
+        # v0..v4 all shared, found and documented in v5, and it fires in v3's own
+        # suite run. Carried back here because v3 is flashable.
+        return float(np.sqrt(max(self.sq_sum, 0.0) / n)) if n > 0 else 0.0
 
     def reset(self):
         self.buf.clear()
@@ -520,21 +412,6 @@ class Channel:
     Filtering, rail-checking, and calibration run for every channel
     regardless of `enabled`, so disabled channels still contribute
     diagnostic data and still participate in the global safety trip.
-
-    NEW (v4): two separate reasons a channel might not be driving, kept apart
-    because conflating them is what makes auto-disable unsafe to reason about:
-
-        enabled   STATIC CONFIG. ENABLE_CHANNEL, or a live edit from the
-                  simulator UI. The operator's intent. v4 never writes it.
-        healthy   RUNTIME STATE. Cleared when this channel's sensor rails,
-                  restored REARM_SUSTAIN_S after it comes back. v4 owns it,
-                  and nothing outside this module should touch it.
-
-    `actuating` is the conjunction, and it is what gates the output. Keeping
-    them separate means the simulator can keep assigning `ch.enabled` every
-    frame (sim/server.py apply_gains) without silently un-demoting a blind
-    channel, and means a status line can distinguish "off because you turned
-    it off" from "off because it went blind".
     """
 
     def __init__(self, idx, dac, dac_channel, enabled, steady_gain, capture_gain,
@@ -580,18 +457,6 @@ class Channel:
         self.saturated_flag = False
         self.locked = False
         self.locked_since = None
-
-        # NEW (v4): runtime health, distinct from the static `enabled` above.
-        self.healthy = True
-        self.demoted_since = None     # t of the demotion, for the status line
-        self.clear_since = None       # t the rail cleared; the re-arm timer
-
-    @property
-    def actuating(self):
-        """Driving its coil right now: configured on AND not demoted. Every
-        gate that used to read `enabled` reads this instead, so there is one
-        place that decides whether a channel is in the loop."""
-        return self.enabled and self.healthy
 
     def filter_sample(self, volt, dt):
         hp_out = self.hp.update(volt, dt)
@@ -640,58 +505,6 @@ class Channel:
         elif self.rail_fault and not now_faulted:
             print(f"rail cleared on ch={self.idx}")
         self.rail_fault = now_faulted
-
-    def update_health(self, t):
-        """NEW (v4), "auto-disable". Demote this channel while its sensor is
-        blind; re-arm it once the rail has been clear for REARM_SUSTAIN_S.
-
-        Returns "demoted", "rearmed", or None, so the caller can emit one event
-        per transition instead of one per sample.
-
-        Only RAIL demotes. saturated_flag is deliberately not consulted: a
-        saturated channel's measurement is fine and only its output is clipped,
-        so pulling it to bias would remove damping authority at peak amplitude
-        -- the exact failure this version exists to avoid. Saturation keeps v3's
-        global path through check_runaway(). See the module docstring.
-        """
-        if self.rail_fault:
-            self.clear_since = None
-            if self.healthy:
-                self.healthy = False
-                self.demoted_since = t
-                # Ramp the gain down from zero on the way back rather than
-                # stepping in at whatever it held when the sensor went blind.
-                self.active_gain = 0.0
-                return "demoted"
-            return None
-
-        if self.healthy:
-            return None
-
-        if self.clear_since is None:
-            self.clear_since = t
-        elif t - self.clear_since >= REARM_SUSTAIN_S:
-            self.healthy = True
-            self.clear_since = None
-            self.demoted_since = None
-            # The FILTERS are left alone on purpose (hazard 2: re-seeding a
-            # one-pole injects a step, and REARM_SUSTAIN_S was sized to let them
-            # wash out instead). baseline_rms is left alone too -- carried
-            # forward, not re-measured; see the docstring for why.
-            #
-            # The RMS WINDOWS are cleared, because they are the opposite case:
-            # both are short sliding windows (2.0 s and 1.0 s) that spent the
-            # blind period accumulating a flatlined bandpass near zero. Left in
-            # place, that near-zero history sits inside the runaway window and
-            # dilutes a genuine excursion for a full ENVELOPE_WINDOW_S after
-            # re-entry -- the breaker would be at its least sensitive exactly
-            # when the channel is least trusted.
-            self.runaway_rms.reset()
-            self.schedule_rms.reset()
-            self.excess_since = None
-            self.last_ratio = 0.0
-            return "rearmed"
-        return None
 
     def accumulate_calibration(self, frac_done=0.0):
         """FIXED (v3), defect "runaway-baseline". v0 accumulated one sum of
@@ -752,12 +565,6 @@ class Channel:
         """Returns True if this channel just tripped (runaway or pinned actuator)."""
         if self.baseline_rms is None:
             return False
-        # NEW (v4): a demoted channel is reading a railed sensor, so its
-        # amplitude is not a measurement of anything and must not trip the
-        # global breaker. Return before touching runaway_rms, so the blind
-        # period never enters the window at all.
-        if not self.healthy:
-            return False
         local_rms = self.runaway_rms.update(t_rel, self.bp_out)
         tripped = False
         if local_rms > self.baseline_rms * RUNAWAY_MULTIPLE:
@@ -776,12 +583,7 @@ class Channel:
         return tripped
 
     def update_lock(self, t_rel):
-        # NEW (v4): `actuating`, not `enabled` -- a demoted channel is held at
-        # bias and its bandpass has flatlined, which an RMS-only test reads as
-        # the steadiest axis on the rack. Letting it vote would let a blind
-        # sensor declare the optic locked. That is the same failure mode the
-        # rail interlock was written for in the first place.
-        if not self.actuating or self.baseline_rms is None:
+        if not self.enabled or self.baseline_rms is None:
             self.locked = False
             self.locked_since = None
             return
@@ -796,12 +598,7 @@ class Channel:
             self.locked = False
 
     def actuate(self, dt, state):
-        # NEW (v4): `actuating`, not `enabled`. This is the only line that puts
-        # the demotion into effect -- everything else is bookkeeping. The
-        # else-branch below was already written to define bumpless re-entry for
-        # a FAULT or a config-disabled channel, and a demoted channel is the
-        # same case, so re-engagement needed no new code.
-        if state == "DAMPING" and self.actuating:
+        if state == "DAMPING" and self.enabled:
             u = self.pid.update(self.vel, dt, self.active_gain, self.clip_excess)
             unclipped = self.bias + u
             target = float(np.clip(unclipped, VMIN, VMAX))
@@ -883,23 +680,11 @@ class Channel:
         self.lock_rms.reset()
         self.runaway_rms.reset()
         self.schedule_rms.reset()
-        # NEW (v4): a global re-calibration is the one place a demotion is
-        # forgotten wholesale. Everything is about to be re-measured from
-        # scratch anyway, so carrying a stale demotion into the new baseline
-        # would keep a since-recovered channel out of a run it belongs in.
-        self.healthy = True
-        self.demoted_since = None
-        self.clear_since = None
 
     def status_str(self):
         tag = f"ch{self.idx}"
         if not self.enabled:
             return f"{tag}:off  bp={self.bp_out:+.3f}V"
-        if not self.healthy:
-            # NEW (v4). Distinct from ":off" above -- that is the operator's
-            # choice, this is the rig's. Show how long it has been out.
-            held = "" if self.demoted_since is None else f" {self.demoted_since:.0f}s"
-            return f"{tag}:DOWN{held}  bp={self.bp_out:+.3f}V"
         if abs(self.active_gain - self.capture_gain) < 0.1 * abs(self.capture_gain - self.steady_gain):
             mode = "CAP"
         elif abs(self.active_gain - self.steady_gain) < 0.1 * abs(self.capture_gain - self.steady_gain):
@@ -915,13 +700,7 @@ class Channel:
         return [str(int(counts)), f"{volt:.4f}", f"{self.bp_out:.5f}", f"{self.vel:.5f}",
                 f"{self.out:.4f}", f"{self.active_gain:.5f}", f"{self.last_ratio:.4f}",
                 f"{self.p_term:.5f}", f"{self.i_term:.5f}", f"{self.d_term:.5f}",
-                str(int(self.rail_fault)), str(int(self.locked)),
-                # NEW (v4), 13th column. Without it a log cannot answer "how
-                # many axes were actually in the loop at time t", which is the
-                # first question you ask of any run this version was written
-                # for. rail_fault alone does not answer it: the demotion
-                # outlasts the rail by REARM_SUSTAIN_S.
-                str(int(self.healthy))]
+                str(int(self.rail_fault)), str(int(self.locked))]
 
 
 class Controller:
@@ -961,11 +740,6 @@ class Controller:
         self.locked_announced = False
         self.lock_time = None
         self.fault_count = 0
-        # NEW (v4): demotions are not faults and must not be counted as them --
-        # the whole point is that the rig kept running. Counted separately so a
-        # run can be scored on "how often did an axis drop out" without that
-        # inflating the fault count every other version is compared on.
-        self.demote_count = 0
         self.events = []
 
     def drain_events(self):
@@ -1002,44 +776,15 @@ class Controller:
                                    f"and {STEADY_GAIN[0]:+.3f} (near lock)...\n")
 
         elif self.state == "DAMPING":
-            # NEW (v4), "auto-disable". v3 read `if any_rail:` here and froze
-            # all four. A rail is now a per-channel demotion, and only losing
-            # the QUORUM faults the rig. Health is allowed to move in this
-            # state alone: CALIBRATING above still faults globally on any rail,
-            # and the FAULT path below re-calibrates, which clears demotions
-            # wholesale via reset_for_recalibration().
-            transitions = [(ch, ch.update_health(t)) for ch in channels]
-            n_conf = sum(1 for ch in channels if ch.enabled)
-            healthy_n = sum(1 for ch in channels if ch.actuating)
-            for ch, ev in transitions:
-                if ev == "demoted":
-                    self.demote_count += 1
-                    # A config-disabled channel is rail-checked like any other,
-                    # so say what actually happened rather than claiming to have
-                    # parked an output that was never moving.
-                    what = (f"holding ch{ch.idx} at bias" if ch.enabled
-                            else f"ch{ch.idx} was not driving")
-                    self.events.append(
-                        f"\n!! ch{ch.idx} sensor railed -- {what}. "
-                        f"{healthy_n}/{n_conf} channels still damping.\n")
-                elif ev == "rearmed":
-                    self.events.append(
-                        f"\n[ch{ch.idx} back] rail clear for {REARM_SUSTAIN_S:.0f}s -- "
-                        f"re-engaging on its pre-event baseline "
-                        f"({ch.baseline_rms:.4f}V), gain ramping from zero. "
-                        f"{healthy_n}/{n_conf} damping.\n")
-
-            if n_conf and healthy_n < MIN_HEALTHY_CHANNELS:
-                self.events.append(
-                    f"\n!! quorum lost -- {healthy_n}/{n_conf} channels healthy, "
-                    f"need {MIN_HEALTHY_CHANNELS}. Freezing everything, entering FAULT.\n")
+            if any_rail:
+                self.events.append("\n!! sensor rail detected -- freezing all channels, entering FAULT.\n")
                 self.state = "FAULT"
                 self.fault_clear_since = None
                 self.fault_count += 1
             else:
                 tripped_any = False
                 for ch in channels:
-                    if ch.actuating:
+                    if ch.enabled:
                         ch.update_schedule(t, dt)
                     else:
                         ch.active_gain = 0.0
@@ -1054,16 +799,11 @@ class Controller:
                 else:
                     for ch in channels:
                         ch.update_lock(t)
-                    # `actuating`, not `enabled`: a demoted channel is held at
-                    # bias with a flatlined bandpass, so it can neither lock nor
-                    # block a lock. It must not be able to do either.
-                    enabled_locked = [ch.locked for ch in channels if ch.actuating]
+                    enabled_locked = [ch.locked for ch in channels if ch.enabled]
                     if enabled_locked and all(enabled_locked) and not self.locked_announced:
                         self.lock_time = t - self.damping_start
-                        degraded = ("" if healthy_n == n_conf else
-                                    f" -- DEGRADED, {healthy_n}/{n_conf} channels")
                         self.events.append(f"\n*** LOCKED -- {self.lock_time:.1f}s after gain "
-                                           f"was applied (t={t:.1f}s total){degraded} ***\n")
+                                           f"was applied (t={t:.1f}s total) ***\n")
                         self.locked_announced = True
 
         elif self.state == "FAULT":
@@ -1114,7 +854,7 @@ def main():
     csv_file = open(csv_path, "w", buffering=1)
     header = "time_s,state," + ",".join(
         f"ch{i}_counts,ch{i}_V,ch{i}_bp,ch{i}_vel,ch{i}_out,ch{i}_gain,ch{i}_ratio,"
-        f"ch{i}_p,ch{i}_i,ch{i}_d,ch{i}_rail,ch{i}_locked,ch{i}_healthy"
+        f"ch{i}_p,ch{i}_i,ch{i}_d,ch{i}_rail,ch{i}_locked"
         for i in range(4)
     )
     csv_file.write(header + "\n")

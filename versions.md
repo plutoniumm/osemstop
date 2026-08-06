@@ -27,33 +27,47 @@ make sim V=v4                      # one of them in a browser
 
 ## The ladder
 
-| | channels | I / D | known defects | ch0 ratio | lock | suite |
-|---|---|---|---|---|---|---|
-| **v4** | all four | live | all 3 fixed, + auto-disable | 0.029 | 10.6 s | 33/33 |
-| **v5** | all four | live | + **fast-refault** | 0.029 | 10.6 s | 35/35 |
-| **v5.5** | **all eight** | live | same as v5 | — | — | *skipped* |
-| **v7** | all four | live | + **bias-trim** | 0.029 | 10.6 s | 35/35 |
-| **v8** | all four | live | + **fast-calib**, **warm-restart** | 0.029 | 10.5 s | 36/36 |
-| **v9** | all four | live | + **runaway-trend** | 0.029 | 10.5 s | 36/36 |
+In the tree, as of 2026-08-06. `make check` is **131 passed, 0 failed**.
 
-**v9 is the one to run.** v7 and v8 are parallel branches off v5 — v7 adds the
-bias trim, v8 the calibration work — and v9 is v8 plus the fault fix. The bias
-trim is NOT in v9; folding v7 into v9 is unfinished business.
+| | channels | I / D | fixes | on bench | suite |
+|---|---|---|---|---|---|
+| **v3** | all four | live | all 3 defects fixed | validated 08-03 | 23/23 |
+| **v7** | all four | live | + auto-disable, fast-refault, **bias-trim** | validated 08-04 | 35/35 |
+| **v9** | all four | live | + fast-calib, warm-restart, **runaway-trend** | validated 08-04 | 36/36 |
+| **v10** | all four | live | v9 + v7's trim + **soft-saturation** | **untested** | 37/37 |
 
-`osem.v6.py`, `v6.1`, `v6.5`, `v6.6` are **bench tools**, not controllers: they
-drive coils and record, close no loop, and expose no `Controller`. The suite
-skips them loudly, with a reason printed, as it skips `v5.5` (eight channels
-against a four-OSEM plant).
+All four ship the **same control law** — identical `STEADY_GAIN`, `KI_GAIN` and
+`KD_GAIN`, ch2's `+0.010` included. Everything that separates them is supervisor.
+v3 is kept as the minimal baseline precisely because of that: it is the only one
+with essentially no supervisor, so a supervisor change can be A/B'd against it.
 
-The rungs below v4 are gone from the tree. Their numbers, measured through
-`harness.py` while they were still present:
+**v9 is the one to run on hardware; v10 is the one to develop against.** v9 is
+the newest rung with a bench result behind it. v10 merges v7's bias trim into it
+and adds `soft-saturation`, but has only ever run in the simulator.
 
-| deleted 2026-08-04 | channels | I / D | known defects | ch0 ratio | lock | suite then |
+`osem.v6.py` is a **bench tool**, not a rung: it drives coils and records, closes
+no loop, and exposes no `Controller`. The suite skips it loudly, with a reason
+printed.
+
+Deleted, and in git history only. Their numbers were measured through
+`harness.py` while they were still in the tree, against the suite as it stood
+then — so the counts are not comparable with the table above:
+
+| deleted | channels | I / D | known defects | ch0 ratio | lock | suite then |
 |---|---|---|---|---|---|---|
 | **v0** | ch0 only | zeroed | all 3 intact | 0.188 | 12.1 s | 18/18 |
 | **v1** | all four | zeroed | all 3 intact | 0.025 | 10.7 s | 16/16 |
 | **v2** | all four | **live** | all 3 intact | 0.028 | 10.5 s | 18/18 |
-| **v3** | all four | live | **all 3 fixed** | 0.029 | 10.6 s | 18/18 |
+| **v4** | all four | live | + auto-disable | 0.029 | 10.6 s | 33/33 |
+| **v5** | all four | live | + fast-refault | 0.029 | 10.6 s | 35/35 |
+| **v5.5** | **all eight** | live | same as v5 | — | — | *skipped* |
+| **v8** | all four | live | + fast-calib, warm-restart | 0.029 | 10.5 s | 36/36 |
+
+v0–v2 went on 2026-08-04; v4, v5, v5.5 and v8 on 2026-08-06, each superseded by a
+version that contains it. The `v6.1` / `v6.5` / `v6.6` sysid variants went the
+same day — the multisine pair failed on hardware, and the 8-coil pair expects
+4 DOF, which cannot be seen until a4–a7 are wired. v3 was deleted on 08-04 and
+**restored on 08-06** as the minimal baseline.
 
 "ratio" is the rolling 2 s RMS of the bandpassed signal over that channel's own
 calibrated baseline — 1.0 is undamped, the lock line is 0.35. Every number in
@@ -830,11 +844,63 @@ Two things fall out of that matrix:
    −1.93 … **+3.77 V** of bias change and the DAC has 2.5 V total. Clamped and
    quantised it gets total offset 570 → 320 counts. The rest is mechanical or
    TIA offset.
-2. **Sensors a4–a7 are not connected.** No coil moves them by more than 8
-   counts/V — mean |response| is 4 within the 4–7 block against 66 within 0–3.
-   Coils 4–7 *do* work (they move a0–a3 by ~25 counts/V). Confirmed off the
-   bench: those OSEMs are not wired. **All eight-channel work is blocked on
-   that, not on code.** It is also why `v5.5` has never locked.
+2. **CORRECTED 2026-08-06 — all eight OSEMs are connected.** This section
+   originally read "sensors a4–a7 are not connected", inferred from a DC
+   actuation matrix and raw correlation. That was wrong: connection was
+   confirmed directly on an oscilloscope, and the logs agree once they are asked
+   the right question. The real split is not wired/unwired but **in-band /
+   out-of-band**:
+
+   | | senses suspension motion | dominated by |
+   |---|---|---|
+   | a0–a3 | **yes**, 77–99% of power in 0.4–3 Hz | the 1.01 / 1.66 Hz modes |
+   | a5 | **yes**, 22–71% in band | 1.046 Hz, at ~1/12 of a0's gain |
+   | a4, a6, a7 | **no**, 0.1–9% in band | a 6.19 Hz interference line |
+
+   a4, a6 and a7 carry plenty of signal — raw std 13–105 counts, comparable to
+   a1 and a3 — but **91–99% of it sits at 3–20 Hz**, outside the band the loop
+   acts on. A single narrow line at **6.19 Hz** carries 60–87% of their 3–30 Hz
+   power, with a **12.38 Hz** second harmonic on a7. a0–a3 show nothing like it
+   (top five bins carry 14–26%, i.e. broadband). A sharp line plus a harmonic,
+   on exactly the channels that do not sense motion, is interference: most
+   likely ~350.9 Hz folded down by the 357.1 Hz sample rate, which is the 7th
+   harmonic of ~50.1 Hz mains.
+
+   **This is an alignment problem, not a wiring one.** Those OSEMs are powered
+   and reading light but not modulating with pendulum motion — the flag sits
+   outside the partial-shadow region where a shadow sensor is linear. a5 is the
+   same story one step less severe: inside the linear region but near its edge,
+   hence 1/12 the gain.
+
+   **And it explains why v5.5 failed, correctly.** The 0.4–3 Hz bandpass already
+   removes the 6.19 Hz line, so those channels calibrated baselines of ~0.002 V.
+   Once 91–99% of a channel's content is filtered away, the ratio
+   `env / baseline` explodes on whatever residual is left and the global
+   interlock trips. Real failure, wrong diagnosis.
+
+   See `analysis/blind_check.py`, `analysis/a5_check.py` and
+   `analysis/where_is_power.py`. On a5 specifically: it tracks the
+   1.01 Hz suspension mode to within one FFT bin in all three 8-channel logs
+   (offsets +0.0000 / +0.0000 / +0.0116 Hz, the last at a 0.0116 Hz bin width),
+   with mode amplitude 13.2 / 17.7 / 11.2 counts — larger than a0's own in the
+   140508 run. A floating pin cannot peak at another channel's mechanical
+   resonance three times running.
+
+   It is a **low-gain** sensor, not an absent one, and two independent
+   measurements agree on how low: the DC matrix gives a5 ≤8 counts/V against
+   a0's 105 (~13×), and the passive mode amplitudes give 138 vs 13 counts
+   (~10.5×). So a5 sees the same motion at roughly **1/12 of a0's
+   counts-per-metre** — consistent with a flag sitting near the edge of its
+   shadow, which is an alignment problem rather than a wiring one.
+
+   **Why the original call was wrong, because the failure mode will recur.** It
+   rested on a DC-response threshold and on raw time-domain correlation against
+   a0–a3 (|r| ≤ 0.12). Both are blind to a small coherent signal: 13 counts of
+   real motion on a 530-count DC level with drift scores near zero on raw
+   correlation, because the variance is dominated by drift and by independent
+   noise. **A low-gain sensor and an absent sensor are indistinguishable to
+   those two tests and obvious to a spectral one.** Test for a peak at the known
+   mechanical resonance, not for correlation amplitude.
 
 Note a3: the common-mode sweep (all four coils together) read **+43** counts/V,
 but coil3 → a3 alone is **−51**. Opposite sign. Common-mode slopes are not
@@ -902,11 +968,81 @@ most of what that needs.
   `v65_stepped8` raw files recorded before this fix are misaligned; the in-run
   reports are not, since the lock-in runs off in-memory arrays.
 
+## v10 — the merge, and clipping stops being a fault
+
+Written 2026-08-06, simulator only, **37/37**. `BENCH_STATUS = untested`.
+
+v9 plus v7's `bias-trim` (unchanged in behaviour) plus one new fix.
+
+### `soft-saturation`
+
+v9 faulted the whole rig after `MAX_CONSECUTIVE_SATURATED = 30` consecutive
+samples with an output pinned against its rail. But clipping removes authority in
+**one direction only** — an output pinned at `vmax` still pulls down at full
+strength — so a clipped loop is a weakened loop, not a broken one, and it is
+usually the thing bringing the optic back. The fault now also requires the
+envelope **not to be falling**. Same level-vs-trend correction `runaway-trend`
+made to the runaway breaker, one interlock over.
+
+Measured on the suite's own over-gain scenario (ch0 at Kp = −0.600, one kick,
+90 s). Both versions clip; only the verdict differs:
+
+| | faults | clipped | ch0 ratio | peak | % DAMPING | lock |
+|---|---|---|---|---|---|---|
+| v9 | 1 | yes | 0.090 | **1.527** | 87.8% | 11.6 s |
+| **v10** | **0** | yes | 0.086 | **0.853** | **93.3%** | 14.8 s |
+
+Freezing a winning actuator let the optic ring **1.8× higher**. Note this is a
+simulator result and the simulator is linear apart from the ADC, so −0.600 there
+is aggressive damping rather than an instability — which is exactly why v9's trip
+was a false positive.
+
+The interlock is not merely switched off, and the suite asserts both halves on
+two different runs: the wrong-signed-ch2 scenario also clips, but leaves the
+optic near full amplitude, so it is clipped-and-*not*-winning and still faults
+(4 faults, ch2 peak 1.99).
+
+### A rejected design worth recording
+
+The first draft also gated the fault on `|clip_excess| > SAT_EXCESS_V`, reading
+that as "still demanding more than the rail can give". It is wrong for a
+structural reason: **back-calculation anti-windup exists precisely to drive that
+residual toward zero**, so under sustained clipping it vanishes exactly when
+saturation is worst. The suite caught it as *"over-gain plus a disturbance trips
+a fault — 0 fault(s)"*: a pumped loop nothing stopped. An anti-windup residual
+cannot measure unmet demand.
+
+### Merging the trim was not a paste
+
+A bias step is a force step: it rings the pendulum at ~1 Hz, inside
+`BP_LOW_HZ..BP_HIGH_HZ` — the band both *trend* tests read. Suspending the
+interlocks for a ringdown would open a ~16 s hole in the runaway breaker every
+`TRIM_PERIOD_S = 15 s`, i.e. open nearly always. Instead a step **invalidates the
+history** it would corrupt: `env_hist` cleared, `excess_since` and `sat_streak`
+reset. The level halves keep working throughout; the trend halves resume one lag
+later.
+
+The **baseline is deliberately not invalidated**, though the first draft did that
+too and it cost four tests. The baseline is a *bandpassed* RMS floor and a bias
+step is DC, so the bandpass removes it. The second-order effect is real — an OSEM
+is a shadow sensor, so moving the flag changes counts-per-metre — but a quantum
+is ~25–50 counts of 1023 against thresholds like `RUNAWAY_MULTIPLE = 1.8`.
+Refusing reuse on every trim step just disabled `warm-restart` outright.
+
+---
+
 ### Still open
 
 1. **Connect a4–a7.** Everything eight-channel waits on it, including modal.
-2. **v9's remaining 36% in FAULT** is `FAULT_CLEAR_SUSTAIN_S = 5 s` x 4 recoveries
+2. **Nothing guards a BLIND channel.** `auto-disable` keys on *rail*, and a
+   disconnected OSEM does not rail — it sits mid-scale and flat, calibrates a
+   near-zero baseline, and then any noise reads as a runaway and faults the whole
+   rig. That is what killed the eight-channel v5.5 run: ch0–ch3 damping at ratio
+   0.07–0.26 while ch4–ch7, calibrated at ~0.002 V, faulted the rig six times in
+   120 s. A minimum-plausible-baseline check is the missing guard.
+3. **v9's remaining 36% in FAULT** is `FAULT_CLEAR_SUSTAIN_S = 5 s` x 4 recoveries
    plus the gain ramp — no longer thrash. Gating re-engagement on amplitude rather
    than a fixed 5 s would cut it further.
-3. **Bench-tune `CALIB_AGREE_TOL`** from the nine logs already recorded.
-4. **v7's bias trim is not in v9.** They are parallel branches off v5.
+4. **Bench-tune `CALIB_AGREE_TOL`** from the nine logs already recorded.
+5. **v10 has never run on hardware.** Both of its mechanisms are simulator-only,
+   and the simulator models clipping but not the coil driver behind it.

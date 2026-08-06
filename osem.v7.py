@@ -61,7 +61,7 @@ PORT, A_VCC, ADC_MAX_COUNTS, N = "COM7", 5.02, 1023, 4
 # sensors 4..7 -- neither the simulator nor the interlocks can catch a wrong map.
 DAC_CHANNELS = [1, 3, 5, 7]
 
-VERSION_TAG, BENCH_STATUS = "v7", "untested"
+VERSION_TAG, BENCH_STATUS = "v7", "validated"   # ran 2026-08-04, see versions.md
 FIXES = ("saturation-latch", "rail-threshold", "runaway-baseline", "auto-disable",
          "fast-refault", "bias-trim")
 ENABLE_CHANNEL = [True, True, True, True]

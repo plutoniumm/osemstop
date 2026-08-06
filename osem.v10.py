@@ -1,6 +1,46 @@
 """
-v8 -- stop paying 20 s of zero gain for a baseline.
-===================================================
+v10 -- v9 and v7 merged, and clipping stops being a fault.
+==========================================================
+Same control law as every version back to v3 -- identical STEADY_GAIN, KI_GAIN
+and KD_GAIN, including ch2's deliberate +0.010. Everything that changes is in
+the SUPERVISOR. v10 is v9 (fast-calib, warm-restart, runaway-trend) plus v7's
+`bias-trim`, which were parallel branches off v5, plus one new fix.
+
+  `bias-trim` (from v7, unchanged in behaviour). No OSEM rests at mid-scale --
+  600 / 631 / 708 / 677 counts against 511.5 at bias 0.25 V -- so every channel
+  clips its TOP rail first. Coil bias is a DC force, so stepping it moves where
+  the optic hangs. One quantum at a time, kept only if the TOTAL offset improved.
+  On hardware 2026-08-04 it took total offset 565 -> 455 counts at no cost in
+  lock time. It cannot finish the job: centring wants -1.93..+3.77 V against a
+  2.5 V DAC, and the rest is mechanical or TIA offset.
+
+  `soft-saturation` (NEW). v9 faulted the whole rig after 30 consecutive samples
+  with an output pinned against its rail. But clipping removes authority in ONE
+  direction only -- an output pinned at vmax still pulls down at full strength --
+  so a clipped loop is a weakened loop, not a broken one, and it is usually the
+  thing bringing the optic back. Faulting replaces a half-strength actuator with
+  a frozen one, which is strictly worse. The fault now needs two things at
+  once: pinned for the same 30 samples v9 counted, AND not winning -- the
+  envelope not falling. A clipped output whose envelope is coming down keeps
+  damping. This is the same level-vs-trend correction `runaway-trend` made to
+  the runaway breaker, applied one interlock over.
+
+WHY THE MERGE NEEDED A THIRD CHANGE. A bias step is a force step: it rings the
+pendulum at ~1 Hz, inside the band both trend tests read. Rather than blind the
+interlocks for a ringdown -- a 16 s hole in the breaker every TRIM_PERIOD_S,
+i.e. open nearly always -- a step INVALIDATES the history it would have
+corrupted: env_hist is cleared, and excess_since and sat_streak are reset. The
+level halves keep working throughout; the trend halves resume one lag later.
+See `_moved`. The BASELINE is deliberately not invalidated -- it is a bandpassed
+floor and a bias step is DC; the first draft got that wrong, see `_why_reuse`.
+
+Not verified on hardware. BENCH_STATUS is `untested`; every number quoted above
+for `bias-trim` is v7's bench result, and `soft-saturation` has only ever run in
+the simulator -- which models clipping but not the coil driver behind it.
+
+--------------------------------------------------------------------------
+INHERITED FROM v8: stop paying 20 s of zero gain for a baseline
+--------------------------------------------------------------------------
 v5 with two changes to the SUPERVISOR and nothing else. Every gain, filter,
 threshold and state transition v5 ships is here unchanged: the PID, the
 bandpass, the gain schedule, the rail interlock, the runaway breaker and the
@@ -108,8 +148,13 @@ It must STILL re-measure, and does, in all four of these cases:
      could refresh the budget forever -- and an hour-long run must not close on
      a floor measured once at t = 0. A fault is the natural moment to re-measure.
 
-Not verified on hardware. BENCH_STATUS is `untested` and the numbers above are
-simulator numbers; what the simulator can and cannot tell you is in versions.md.
+Ran on the bench 2026-08-04 (`bench/20260804/v9_4ch_3kicks.log`): re-locked after
+all three kicks, 4 faults against v8's 10, 26.6% of samples DAMPING. `runaway-trend`
+is therefore confirmed on hardware. `fast-calib`, inherited from v8, is NOT --
+`CALIB_AGREE_TOL` was tuned on simulator noise and the bench floor never satisfied
+it, so it burns the full ceiling and degrades to v5's estimator. The numbers above
+are still simulator numbers; what the simulator can and cannot tell you is in
+versions.md.
 
 Two conventions inherited from v5 and worth knowing before editing this:
 `enabled` is static config, `healthy` is runtime, and `enabled & healthy` gates
@@ -137,13 +182,15 @@ PORT, A_VCC, ADC_MAX_COUNTS, N = "COM7", 5.02, 1023, 4
 # sensors 4..7 -- neither the simulator nor the interlocks can catch a wrong map.
 DAC_CHANNELS = [1, 3, 5, 7]
 
-VERSION_TAG, BENCH_STATUS = "v8", "untested"
+VERSION_TAG, BENCH_STATUS = "v10", "untested"
 FIXES = ("saturation-latch", "rail-threshold", "runaway-baseline", "auto-disable",
-         "fast-refault", "fast-calib", "warm-restart")
+         "fast-refault", "fast-calib", "warm-restart", "runaway-trend",
+         "bias-trim", "soft-saturation")
 ENABLE_CHANNEL = [True, True, True, True]
 
 BIAS = np.full(N, 0.25)
-VMIN, VMAX, MAX_SLEW_PER_S = 0.0, 0.5, 2.0
+VMIN, VMAX, MAX_SLEW_PER_S = 0.0, 0.5, 2.0     # nominal; per-channel copies in
+                                               # __init__, which the trim moves
 
 # Kp. STEADY is the bench-validated -0.030 on ch0; CAPTURE is stronger, used only
 # at large amplitude, and is NOT independently validated.
@@ -190,7 +237,80 @@ CALIB_AGREE_N, CALIB_AGREE_TOL = 3, 1.20
 
 LOCK_RMS_FACTOR, LOCK_SUSTAIN_S, LOCK_WINDOW_S = 0.35, 5.0, 5.0
 ENVELOPE_WINDOW_S, RUNAWAY_MULTIPLE, RUNAWAY_SUSTAIN_S = 2.0, 1.8, 2.0
+# v9: the breaker also requires GROWTH. Compare the envelope against itself
+# RUNAWAY_TREND_LAG_S ago; a real runaway grows on that timescale, a ringdown
+# at Q~50 falls. 1.02 gives 2% headroom so envelope noise alone cannot read as
+# growth. Lag is one ENVELOPE_WINDOW_S so the two estimates barely overlap.
+RUNAWAY_TREND_LAG_S, RUNAWAY_GROWTH_FRAC = 2.0, 1.02
+
+# --- soft-saturation ---------------------------------------------------------
+# A pinned actuator is not the same thing as a broken one. Clipping at VMAX
+# removes authority in ONE direction; the coil can still pull the other way at
+# full strength, and the loop keeps working with the half it has. v9 faulted the
+# whole rig on 30 consecutive pinned samples regardless -- the same level-vs-trend
+# error `runaway-trend` fixed in the runaway breaker, one interlock over.
+#
+# The fault now needs all three, together:
+#   1. pinned for MAX_CONSECUTIVE_SATURATED samples, exactly as v9 counted it;
+#   2. the envelope NOT falling -- if it is falling, the clipped output is
+#      winning and taking it away would be perverse.
+# A clipped output whose envelope is coming down keeps damping.
+#
+# SAT_DECAY_FRAC mirrors RUNAWAY_GROWTH_FRAC and is compared over the same lag
+# against the same env_hist deque, so "falling" means one thing to both
+# interlocks. 0.98 gives the same 2% of headroom against envelope noise.
+#
+# A rejected third condition, recorded because it looks right and is not: gating
+# on clip_excess as "still demanding more than the rail can give". Back-
+# calculation anti-windup drives that residual toward zero under sustained
+# clipping BY DESIGN, so it vanishes exactly when saturation is worst. See
+# actuate().
 MAX_CONSECUTIVE_SATURATED = 30                 # samples, not seconds
+SAT_DECAY_FRAC = 0.98
+
+# --- bias trim (from v7) -----------------------------------------------------
+# No OSEM rests at mid-scale: 600 / 631 / 708 / 677 counts against 511.5 at bias
+# 0.25 V, so every channel clips its TOP rail first and ch2 has the least room.
+# Coil bias is a DC force, so it moves where the optic hangs, and the per-coil DC
+# matrix (2026-08-04) says by how much.
+#
+# It is deliberately NOT a one-shot least-squares solve. That solve wants
+# -1.93..+3.77 V against a 2.5 V DAC, so most of it is unreachable, and it
+# assumes a matrix measured on a different day still holds. This trims
+# ITERATIVELY: one quantum at a time, kept only if the TOTAL offset across all
+# channels improved. Total, not per-channel, because four coils drive two DOF
+# (v6 rank check: 2 directions above 10%) -- the channels are coupled and helping
+# a0 can hurt a2. Reverting on a worse total is also what makes a wrong per-coil
+# sign cost one step instead of walking a sensor into its rail.
+BIAS_QUANTUM = 0.25            # coarse on purpose: 2 DOF, 4 knobs -- fine steps
+BIAS_MIN, BIAS_MAX = 0.25, 1.25          # would just chase each other
+BIAS_SWING = 0.25              # +-this around each channel's own bias
+MID_COUNTS = 511.5             # (ADC_MAX_COUNTS - 1) / 2
+TRIM_PERIOD_S = 15.0           # >= one ringdown at Q~50, f0~1 Hz (~16 s)
+TRIM_DEADBAND_COUNTS = 40.0    # inside this, leave it alone
+TRIM_MAX_STEPS = 4             # per channel, per run
+# Folding v7 into v9 is not a paste, and this is why. A bias step is a force
+# step: it rings the pendulum at ~1 Hz, inside BP_LOW_HZ..BP_HIGH_HZ -- the exact
+# band `runaway-trend` reads for growth and soft-saturation reads for decay. So a
+# step corrupts both TREND tests, which compare the envelope against its own past.
+#
+# The fix is NOT to suspend the interlocks for a ringdown. That would be a ~16 s
+# hole in the only breaker that stops a pumping loop, opened every TRIM_PERIOD_S
+# -- i.e. open nearly always, which is worse than not trimming at all. Instead a
+# step INVALIDATES the history: env_hist is cleared and excess_since reset, so no
+# comparison straddles the step. The LEVEL half of each test keeps working
+# through it untouched, and the trend half resumes from post-step data within
+# RUNAWAY_TREND_LAG_S. A real runaway is still caught, one lag later.
+#
+# `warm-restart` gets the same treatment: a baseline measured before the last
+# accepted step describes a rest position that no longer exists, so it is refused.
+# Direction to move THIS channel's bias to reduce its counts:
+#   step = -sign(error) * SLOPE_SIGN * BIAS_QUANTUM
+# Signs are the DIAGONAL of the per-coil DC matrix measured 2026-08-04 (one coil
+# stepped at a time). ch2 is +1 because it is mounted the other way round, the
+# same reason its gains are positive. Do NOT take these from a common-mode sweep:
+# all four coils together read a3 as +43 counts/V while coil3 -> a3 alone is -51.
+SLOPE_SIGN = np.array([-1.0, -1.0, +1.0, -1.0])
 
 # Rail: raw counts, so there is no float-rounding ambiguity, and a FRACTION of a
 # window rather than an unbroken run, so one noise sample dilutes the evidence
@@ -369,6 +489,7 @@ class Controller:
         self.hp, self.lp = OnePole(BP_LOW_HZ, "high"), OnePole(BP_HIGH_HZ)
         self.dsm, self.dfilt = OnePole(DERIV_SMOOTH_HZ), OnePole(D_SMOOTH_HZ)
         self.rms_sch, self.rms_run = _bank(SCHEDULE_WINDOW_S), _bank(ENVELOPE_WINDOW_S)
+        self.env_hist = deque()          # (t, envelope) for the trend test
         self.rms_lock = _bank(LOCK_WINDOW_S)
 
         for k in ("bp prev_bp vel p i d prev_vel clip_excess gain ratio baseline "
@@ -377,6 +498,9 @@ class Controller:
         for k in "primed sat locked rail".split():
             setattr(self, k, np.zeros(N, bool))
         self.healthy = np.ones(N, bool)
+        # Per-channel output window. v9 had module-level VMIN/VMAX; the trim moves
+        # each channel's bias independently, so the window has to move with it.
+        self.vmin, self.vmax = self.bias - BIAS_SWING, self.bias + BIAS_SWING
         self.clear_t, self.excess_since = np.full(N, np.inf), np.full(N, np.inf)
         self.locked_since = np.full(N, np.inf)
         self.out, self.prev_out = self.bias.copy(), self.bias.copy()
@@ -395,6 +519,16 @@ class Controller:
         # --- warm-restart bookkeeping ---
         self.baseline_t = None       # when the live baseline was measured
         self.fault_railed = False    # was the fault a SENSOR failure?
+        # --- bias-trim bookkeeping (v7) ---
+        # `trim_ref` is the total offset the accepted step is judged against, so
+        # a step is only kept if it beat the rig it was measured on.
+        self.trim_steps = np.zeros(N, int)
+        self.trim_frozen = np.zeros(N, bool)
+        self.trim_last = None          # t of the last trim decision
+        self.trim_pending = None       # (channel, previous_bias) awaiting judgement
+        self.trim_ref = None           # total |counts - MID| before that step
+        self.counts_mean = np.full(N, MID_COUNTS)
+        self.trim_step_t = None        # t of the last accepted or reverted step
 
     # ---- helpers ----------------------------------------------------------
     def drain_events(self):
@@ -530,6 +664,11 @@ class Controller:
     # ---- the loop ---------------------------------------------------------
     def step(self, counts, volts, t, dt):
         counts, volts = np.asarray(counts, float), np.asarray(volts, float)
+        # Where each OSEM is RESTING, which is what the trim steers. A 2 s time
+        # constant is two cycles of the ~1 Hz resonance, so the swing averages out
+        # and what is left is the rest position. Maintained in every state,
+        # including FAULT, so a trim decision never reads a stale mean.
+        self.counts_mean += (counts - self.counts_mean) * min(1.0, dt / 2.0)
         self.bp = self.lp.update(self.hp.update(volts, dt), dt).copy()
         if self.filt_on:
             dv = (self.bp - self.prev_bp) / dt if dt > 0 else np.zeros(N)
@@ -585,6 +724,75 @@ class Controller:
         self._actuate(dt)
         return self.state
 
+    def _moved(self, t, i, new):
+        """Apply a bias change to channel `i` and invalidate everything that was
+        measured against the old operating point.
+
+        Both trend interlocks compare the envelope against its own past, and a
+        bias step injects a ~1 Hz transient right into the band they read. Rather
+        than blind them for a ringdown, drop the history so no comparison spans
+        the step: the level tests are untouched and the trend tests resume from
+        post-step data one RUNAWAY_TREND_LAG_S later."""
+        self.bias[i] = new
+        self.vmin[i], self.vmax[i] = new - BIAS_SWING, new + BIAS_SWING
+        self.trim_step_t = t
+        self.env_hist.clear()
+        self.excess_since[:] = np.inf
+        self.sat_streak[:] = 0
+
+    def _trim(self, t):
+        """Nudge one channel's bias a quantum toward mid-scale, then judge it.
+
+        Runs only in DAMPING and no faster than TRIM_PERIOD_S, because a bias
+        step is a DC force step and the pendulum needs a ringdown before the new
+        rest position means anything.
+
+        One channel at a time, and the verdict is on the TOTAL offset across all
+        four -- four coils drive two DOF, so the channels are coupled and a step
+        that centres a0 can push a2 further out. A step that does not improve the
+        total is put back and that channel is frozen for the rest of the run,
+        which is also what makes a wrong SLOPE_SIGN cost one step instead of
+        walking a sensor into its rail.
+        """
+        if self.trim_last is None:
+            self.trim_last = t
+            return
+        if t - self.trim_last < TRIM_PERIOD_S:
+            return
+        self.trim_last = t
+        total = float(np.abs(self.counts_mean - MID_COUNTS).sum())
+
+        if self.trim_pending is not None:          # judge last period's step
+            i, was = self.trim_pending
+            self.trim_pending = None
+            if total >= self.trim_ref:
+                self._moved(t, i, was)
+                self.trim_frozen[i] = True
+                self._say(f"[trim] ch{i} reverted to {was:.2f}V and frozen -- total "
+                          f"offset {self.trim_ref:.0f} -> {total:.0f} counts.")
+                return
+            self._say(f"[trim] ch{i} kept at {self.bias[i]:.2f}V -- total offset "
+                      f"{self.trim_ref:.0f} -> {total:.0f} counts.")
+
+        err = self.counts_mean - MID_COUNTS
+        elig = (self.enabled & self.healthy & ~self.trim_frozen
+                & (self.trim_steps < TRIM_MAX_STEPS)
+                & (np.abs(err) > TRIM_DEADBAND_COUNTS))
+        if not elig.any():
+            return
+        i = int(np.argmax(np.where(elig, np.abs(err), -1.0)))
+        step = -np.sign(err[i]) * SLOPE_SIGN[i] * BIAS_QUANTUM
+        new = float(np.clip(self.bias[i] + step, BIAS_MIN, BIAS_MAX))
+        if abs(new - float(self.bias[i])) < 1e-9:   # already against a clamp
+            self.trim_frozen[i] = True
+            return
+        self.trim_pending, self.trim_ref = (i, float(self.bias[i])), total
+        self.trim_steps[i] += 1
+        was_counts = self.counts_mean[i]
+        self._moved(t, i, new)
+        self._say(f"[trim] ch{i} rests at {was_counts:.0f} counts "
+                  f"({err[i]:+.0f} off mid-scale) -- bias -> {new:.2f}V")
+
     def _damping(self, t, dt):
         drop, back = self._health(t)
         live, n_conf = self.enabled & self.healthy, int(self.enabled.sum())
@@ -610,11 +818,48 @@ class Controller:
         # Runaway breaker, gated on `healthy` not `live`: a config-disabled channel
         # still watches its own amplitude, but a blind one measures nothing.
         env = _rms(self.rms_run, t, self.bp, self.healthy)
-        self.excess_since = self._hold(
-            self.healthy & (env > self.baseline * RUNAWAY_MULTIPLE), self.excess_since, t)
-        trip = self.healthy & ((t - self.excess_since >= RUNAWAY_SUSTAIN_S) | self.sat)
-        if trip.any():
-            return self._fault(t, f"{self._who(trip)} runaway/saturation -- freezing "
+        # FIXED (v9), "runaway-trend". The old test was env > RUNAWAY_MULTIPLE x
+        # baseline sustained RUNAWAY_SUSTAIN_S -- a LEVEL test. A runaway is the
+        # loop pumping energy IN, which means amplitude GROWING; a large but
+        # decaying envelope is the loop succeeding. The level test cannot tell
+        # them apart, so after a kick it trips on a timer while the optic rings
+        # down, every RUNAWAY_SUSTAIN_S, until the amplitude happens to fall
+        # under the line. Measured on hardware 2026-08-04 (v8, 240 s, 3 kicks):
+        # ten faults, and the envelope was falling through every one of them --
+        # 5.97 -> 4.61, 3.00 -> 3.14, 2.72 -> 2.07. The only re-engagement that
+        # survived started at 1.64, just under the 1.8 line. That is the whole
+        # fault thrash, and it was in every version back to v0.
+        #
+        # So: still require the envelope to be high (a decaying transient is not
+        # interesting no matter what it does), but ALSO require it to be growing
+        # relative to where it was RUNAWAY_TREND_LAG_S ago. Both, sustained.
+        self.env_hist.append((t, env.copy()))
+        while self.env_hist and t - self.env_hist[0][0] > RUNAWAY_TREND_LAG_S * 2:
+            self.env_hist.popleft()
+        past = env
+        for ts, e in self.env_hist:                    # oldest sample >= lag old
+            if t - ts >= RUNAWAY_TREND_LAG_S:
+                past = e
+                break
+        growing = env > past * RUNAWAY_GROWTH_FRAC
+        high = env > self.baseline * RUNAWAY_MULTIPLE
+        self.excess_since = self._hold(self.healthy & high & growing, self.excess_since, t)
+        run_trip = self.healthy & (t - self.excess_since >= RUNAWAY_SUSTAIN_S)
+        # "soft-saturation", second half, and the whole of the new behaviour.
+        # `sat` is v9's unchanged 30-sample pinned streak; what v10 adds is the
+        # question v9 never asked -- is the clipped output WINNING? A falling
+        # envelope says yes, and freezing the loop would throw away the only
+        # thing working. A flat or rising one says no, and that is a real
+        # saturation fault: a pumped or over-driven loop that has run out of
+        # authority. Same lag and the same env_hist as the runaway trend, so
+        # "falling" means exactly one thing across both interlocks.
+        sat_trip = self.healthy & self.sat & ~(env < past * SAT_DECAY_FRAC)
+        if run_trip.any():
+            return self._fault(t, f"{self._who(run_trip)} runaway -- freezing all "
+                                  f"channels, entering FAULT.")
+        if sat_trip.any():
+            return self._fault(t, f"{self._who(sat_trip)} pinned against the rail, "
+                                  f"still demanding more, and not winning -- freezing "
                                   f"all channels, entering FAULT.")
 
         # Lock detector. A demoted channel sits at bias with a flatlined bandpass,
@@ -623,6 +868,7 @@ class Controller:
         quiet = live & (_rms(self.rms_lock, t, self.bp, live) < self.baseline * LOCK_RMS_FACTOR)
         self.locked_since = self._hold(quiet, self.locked_since, t)
         self.locked = quiet & (t - self.locked_since >= LOCK_SUSTAIN_S)
+        self._trim(t)
         if n and self.locked[live].all() and not self.locked_announced:
             self.lock_time = t - self.damping_start
             self._say(f"*** LOCKED -- {self.lock_time:.1f}s after gain was applied "
@@ -647,7 +893,7 @@ class Controller:
                          -I_CLAMP_V, I_CLAMP_V)
 
         raw = self.bias + self.p + self.i + self.d
-        clipped = np.clip(raw, VMIN, VMAX)
+        clipped = np.clip(raw, self.vmin, self.vmax)
         self.clip_excess = np.where(live, raw - clipped, 0.0)
         # Bumpless re-entry for every lane not actuating -- FAULT, config-disabled
         # and demoted are all the same case, so none can resume with a stale
@@ -664,8 +910,26 @@ class Controller:
         # Maintained HERE, where the output is actually known, so it refreshes
         # every sample in every state including FAULT -- which is what stops the
         # v0/v1/v2 saturation latch.
-        pinned = (self.out <= VMIN + 1e-6) | (self.out >= VMAX - 1e-6)
+        pinned = (self.out <= self.vmin + 1e-6) | (self.out >= self.vmax - 1e-6)
         self.sat_streak = np.where(pinned, self.sat_streak + 1, 0)
+        # FIXED (v10), "soft-saturation". v9 faulted the rig on the streak alone.
+        # But clipping only removes authority in ONE direction -- an output pinned
+        # at vmax can still pull all the way down -- so a clipped loop is a
+        # weakened loop, not a broken one, and it is usually still the thing
+        # bringing the optic back. Faulting hands the optic a frozen actuator
+        # instead of a half-strength one, which is strictly worse.
+        #
+        # The missing question is whether the clipped output is ACHIEVING
+        # anything, and that is answered by the envelope at the trip below, where
+        # it is in hand. Not by clip_excess: the first draft of v10 gated on
+        # `|clip_excess| > SAT_EXCESS_V` as "still demanding more than the rail
+        # can give", which is wrong for a reason worth recording. Back-calculation
+        # anti-windup exists precisely to drive the integrator down until `raw`
+        # stops exceeding the rail, so under SUSTAINED clipping clip_excess decays
+        # toward zero by design. The test therefore went false exactly when
+        # saturation was worst, and the suite caught it: "over-gain plus a
+        # disturbance trips a fault -- 0 fault(s)", i.e. a pumped loop that
+        # nothing stopped. An anti-windup residual cannot measure unmet demand.
         self.sat = self.sat_streak > MAX_CONSECUTIVE_SATURATED
         self.act.send(self.out)
 
@@ -678,6 +942,17 @@ class Controller:
         if self.fault_railed:
             return False, ("the fault was a RAIL -- a floor measured through a "
                            "suspect sensor is suspect with it")
+        # A trim step deliberately does NOT invalidate the baseline here, though
+        # the first draft of v10 had it do so. The baseline is a BANDPASSED RMS
+        # (BP_LOW_HZ..BP_HIGH_HZ); a bias step moves the DC rest position, which
+        # the bandpass removes. It is not a floor measured at an operating point.
+        # The second-order effect is real -- an OSEM is a shadow sensor, so moving
+        # the flag changes counts-per-metre and therefore the floor in volts --
+        # but a quantum is ~25-50 counts of 1023 and the floor feeds thresholds
+        # like RUNAWAY_MULTIPLE = 1.8, so a few percent of sensor-gain error is
+        # nowhere near any of them. Refusing reuse on a trim step instead disabled
+        # warm-restart outright, since the trim steps every TRIM_PERIOD_S and the
+        # baseline is measured once.
         age = None if self.baseline_t is None else t - self.baseline_t
         if age is not None and age > BASELINE_MAX_AGE_S:
             return False, (f"the baseline is {age:.0f}s old, over the "

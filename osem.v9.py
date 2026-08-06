@@ -108,8 +108,13 @@ It must STILL re-measure, and does, in all four of these cases:
      could refresh the budget forever -- and an hour-long run must not close on
      a floor measured once at t = 0. A fault is the natural moment to re-measure.
 
-Not verified on hardware. BENCH_STATUS is `untested` and the numbers above are
-simulator numbers; what the simulator can and cannot tell you is in versions.md.
+Ran on the bench 2026-08-04 (`bench/20260804/v9_4ch_3kicks.log`): re-locked after
+all three kicks, 4 faults against v8's 10, 26.6% of samples DAMPING. `runaway-trend`
+is therefore confirmed on hardware. `fast-calib`, inherited from v8, is NOT --
+`CALIB_AGREE_TOL` was tuned on simulator noise and the bench floor never satisfied
+it, so it burns the full ceiling and degrades to v5's estimator. The numbers above
+are still simulator numbers; what the simulator can and cannot tell you is in
+versions.md.
 
 Two conventions inherited from v5 and worth knowing before editing this:
 `enabled` is static config, `healthy` is runtime, and `enabled & healthy` gates
@@ -137,7 +142,7 @@ PORT, A_VCC, ADC_MAX_COUNTS, N = "COM7", 5.02, 1023, 4
 # sensors 4..7 -- neither the simulator nor the interlocks can catch a wrong map.
 DAC_CHANNELS = [1, 3, 5, 7]
 
-VERSION_TAG, BENCH_STATUS = "v9", "untested"
+VERSION_TAG, BENCH_STATUS = "v9", "validated"   # ran 2026-08-04, see versions.md
 FIXES = ("saturation-latch", "rail-threshold", "runaway-baseline", "auto-disable",
          "fast-refault", "fast-calib", "warm-restart", "runaway-trend")
 ENABLE_CHANNEL = [True, True, True, True]
