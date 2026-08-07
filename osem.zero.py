@@ -1,89 +1,19 @@
 """
-Fast-lock OSEM damping controller -- no sweep, runs continuously
-==================================================================
-This replaces the manual gain sweep for day-to-day use. It applies a
-validated velocity-feedback (cold damping) gain directly, from the moment
-you press Enter, and reports when the mirror has actually settled instead
-of requiring you to eyeball the scope.
+Fast-lock OSEM velocity-feedback (cold damping) controller. Runs until Ctrl+C.
 
-Only A0 -> ch0 has been experimentally confirmed (2026-07-15, run 3):
-real damping at gain=-0.03 (6x reduction in oscillation amplitude, no
-rail clipping), onset of instability/rail at gain=-0.04. The other three
-channels are wired the same way but their gain has NOT been individually
-validated -- they default to DISABLED (see ENABLE_CHANNEL below). All four
-are still filtered, logged, and safety-checked at all times, so you get
-free diagnostic data on channels 1-3 while ch0 runs, and validating them
-later is just a matter of flipping one flag and watching the scope the
-same way we did for ch0.
+Version "zero", the baseline the ladder (ladder.py) is measured against. ONE
+channel enabled, and a saturation trip LATCHES: FAULT is absorbing and needs a
+manual restart. DO NOT RUN UNATTENDED.
 
-What's different from the sweep script, and why
---------------------------------------------------
-1. No fixed-duration steps. This runs until you Ctrl+C, or until a fault
-   forces it into a frozen state (which it can also recover from on its
-   own -- see the FAULT state below).
+Only A0 -> ch0 is validated on hardware (2026-07-15 run 3): Kp=-0.030 gives 6x
+reduction in oscillation amplitude with no rail clipping; -0.040 is the onset of
+instability/rail. Channels 1-3 default off, still filtered and rail-checked.
 
-2. Calibration phase instead of a single borrowed reference RMS. The old
-   sweep script measured its safety-check reference from ONE 45s window
-   at the very start of a ~9 minute run and never updated it. Here, every
-   time the controller (re)starts or recovers from a fault, it spends
-   CALIBRATION_S seconds with the gain at zero, measuring each channel's
-   own natural (undamped) noise floor fresh, before engaging any gain.
-   That reference is what the runaway breaker and the lock detector both
-   compare against.
+CALIBRATING (gain 0, per-channel noise floor) -> DAMPING -> FAULT, which freezes
+all four outputs: the four OSEMs share one rigid body, so any one rails all.
 
-3. An explicit sensor-rail interlock, independent of the RMS breaker.
-   The sweep run showed that a fully-occluded OSEM (raw ADC pinned at 0)
-   produces a bandpassed signal that also flatlines near zero -- which
-   looks like *perfect* stability to an RMS-only check, when it's actually
-   the sensor going blind. Here, rail state is checked on the raw ADC
-   COUNTS (not the scaled voltage) specifically to avoid any float-
-   rounding ambiguity, and a sustained rail on ANY channel immediately
-   freezes ALL FOUR outputs to bias -- since all four OSEMs sit on the
-   same rigid body, a rail on one is treated as "something about this
-   optic's position is no longer trustworthy," not just a single-axis
-   problem.
-
-4. Auto-recovery. If everything comes back into range on its own (e.g. a
-   transient bump) and stays clear for FAULT_CLEAR_SUSTAIN_S, the
-   controller re-calibrates from scratch and resumes -- no need to
-   restart the script by hand every time something trips.
-
-5. A lock detector with a real, printed answer to "how fast did it
-   stabilize": once an enabled channel's rolling RMS has stayed below
-   LOCK_RMS_FACTOR times its own calibrated baseline for LOCK_SUSTAIN_S,
-   it's declared LOCKED and the elapsed time is printed.
-
-6. Streaming CSV (flushed periodically), not "buffer everything in RAM
-   and write at the end." This script is meant to run indefinitely, so
-   holding hours of samples in a Python list isn't a good idea, and you
-   want data on disk even if it's killed uncleanly.
-
-7. Gain scheduling for a faster, stronger capture without raising the
-   validated steady-state gain. Each channel has two gains:
-     - STEADY_GAIN: the sweep-validated value (-0.03 on ch0).
-     - CAPTURE_GAIN: a stronger, NOT independently validated value, used
-       only while the oscillation is still large.
-   The active gain blends continuously between them based on a short
-   rolling RMS of the bandpassed signal versus that channel's own
-   calibrated baseline: near full CAPTURE_GAIN while amplitude is above
-   CAPTURE_HIGH_FRAC of baseline, tapering linearly down to STEADY_GAIN
-   by the time it drops below CAPTURE_LOW_FRAC, and held at STEADY_GAIN
-   for the remainder of the lock. All gain changes (including the
-   startup ramp from zero) are slew-rate-limited by GAIN_SLEW_PER_S, so
-   there's no abrupt gain step that could itself kick a transient.
-   CAPTURE_GAIN defaults to a modest step past -0.03 and stays under the
-   -0.04 point the sweep flagged as problematic -- watch the scope the
-   first time you run this, the same way you validated -0.03, before
-   pushing it further.
-
-Data logged (per sample, per channel)
---------------------------------------
-Raw ADC counts (unambiguous rail detection), scaled volts, the bandpassed
-signal, the smoothed velocity estimate, the actuator output, the
-currently-applied gain, and rail/locked flags -- plus the overall
-controller state. That's enough to fully reconstruct what happened and
-verify a "locked" claim after the fact, which is exactly what the
-sweep-vs-scope mismatch showed we needed.
+Sensing is 5.02 V over 1023 ADC counts; actuation a 2.5 V DAC restricted to
+VMIN..VMAX = 0.0..0.5 V around BIAS = 0.25 V.
 """
 
 import os
@@ -97,79 +27,45 @@ import numpy as np
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
 from pyDAC import DACController
 
-# ===================== SETTINGS =====================
+# ===== SETTINGS =====
 PORT = "COM7"
 A_VCC = 5.02
 ADC_MAX_COUNTS = 1023
 
-DAC_CHANNELS = [1, 3, 5, 7]   # coil DAC channel for sensor index 0..3 (A0..A3).
-                              # Rewired 2026-08-03. Full 8-pair map is
-                              # [1,3,5,7,0,2,4,6] -- see provenance.md. The old
-                              # [0,2,4,6] now points at the coils for sensors 4..7.
+# Coil DAC channel per sensor 0..3. Rewired 2026-08-03; full 8-pair map is
+# [1,3,5,7,0,2,4,6] (provenance.md). A wrong map is invisible to the simulator
+# and to every interlock.
+DAC_CHANNELS = [1, 3, 5, 7]
 
-# Only ch0 (A0 -> DAC ch0) is experimentally validated. Flip these on one at
-# a time once you've confirmed clean, unclipped convergence on the scope for
-# that axis -- the same way we validated ch0.
-# --- bench status ---
-# 2026-07-15 run 3: ch0 at Kp=-0.030, real damping, no rail clipping. The ONLY
-# configuration confirmed on hardware. Start here on the bench.
 VERSION_TAG, BENCH_STATUS = "zero", "validated"   # ran 2026-08-03 (one channel)
-# NAME, not a number. See ladder.py. This is the original: ONE channel, and a
-# saturation trip LATCHES -- FAULT is an absorbing state needing a manual
-# restart, which every later rung fixed. Kept as the baseline the ladder is
-# measured against. Do not run it unattended.
 
+# Enable one at a time, only after confirming unclipped convergence on the scope.
 ENABLE_CHANNEL = [True, False, False, False]
 
 BIAS = np.array([0.25, 0.25, 0.25, 0.25])
 VMIN, VMAX = 0.0, 0.5
 MAX_SLEW_PER_S = 2.0
 
-# Damping gain per channel. STEADY_GAIN is the sweep-validated value on
-# ch0 (-0.03: real damping, no rail clipping). CAPTURE_GAIN is a stronger
-# value used only transiently while the oscillation is still large -- it
-# is NOT independently validated. It stays under the -0.04 point the
-# sweep flagged as problematic, but confirm on the scope before trusting
-# it unattended, the same way -0.03 was confirmed.
-
-STEADY_GAIN  = np.array([-0.030, -0.030, +0.010, -0.030])   # flipped, and much smaller
+# Kp per channel. -0.030 on ch0 is the only hardware-validated value (2026-07-15
+# run 3); -0.040 is the instability/rail onset, so do not exceed -0.035
+# unattended. ch2 is POSITIVE because that OSEM is mounted the other way round:
+# not a typo, and a wrong sign PUMPS rather than under-damps. CAPTURE_GAIN is
+# transient-only and NOT validated.
+STEADY_GAIN  = np.array([-0.030, -0.030, +0.010, -0.030])
 CAPTURE_GAIN = np.array([-0.035, -0.035, +0.012, -0.035])
 
-# Gain scheduling: blend between CAPTURE_GAIN and STEADY_GAIN based on a
-# short rolling RMS of the bandpassed signal, relative to that channel's
-# own calibrated baseline. Above CAPTURE_HIGH_FRAC of baseline -> full
-# capture gain. Below CAPTURE_LOW_FRAC -> full steady gain. Linear blend
-# between. SCHEDULE_WINDOW_S sets how quickly the estimate reacts.
+# Gain schedule: rolling-RMS/baseline ratio above CAPTURE_HIGH_FRAC -> full
+# capture gain, below CAPTURE_LOW_FRAC -> full steady gain, linear between.
 CAPTURE_HIGH_FRAC = 0.6
 CAPTURE_LOW_FRAC = 0.2
 SCHEDULE_WINDOW_S = 1.0
 
-# Max rate of change of the applied gain, in gain-units/second. Governs
-# both the startup ramp (0 -> scheduled target) and every scheduling
-# transition, so nothing steps abruptly.
+# gain-units/s, on the startup ramp and every schedule transition.
 GAIN_SLEW_PER_S = 0.02
 
-# ---- PID on the velocity loop ----
-# The controlled variable is VELOCITY and the setpoint is zero (bring the
-# optic to rest), so the error is e = 0 - vel = -vel. In that frame:
-#
-#   P  = active_gain * e     <- STEADY_GAIN/CAPTURE_GAIN above ARE Kp. This is
-#                               the only term that removes energy from the
-#                               resonance, and the only one validated on
-#                               hardware (-0.030 on ch0).
-#   I  = KI_GAIN * int(e)    <- the integral of velocity is DISPLACEMENT, so
-#                               this acts as an added SPRING: it shifts the
-#                               resonant frequency rather than damping it.
-#                               Nonzero Ki moves the pole -- re-validate.
-#   D  = KD_GAIN * d(e)/dt   <- the derivative of velocity is ACCELERATION, so
-#                               this acts as added (negative) MASS. It also
-#                               differentiates the sensor a second time, so it
-#                               is by far the noisiest term and is lowpassed
-#                               at D_SMOOTH_HZ.
-#
-# Both default to 0.0 on every channel, which makes the loop mathematically
-# identical to the validated P-only (velocity-feedback) controller. Change one
-# term at a time and confirm on the scope, the same way Kp was confirmed.
+# PID on velocity error e = -vel. P is the only term that removes energy and the
+# only one validated; I integrates to DISPLACEMENT (a spring), D to ACCELERATION
+# (negative mass, noisiest). Both 0.0 here, so the loop is the validated P-only.
 KI_GAIN = np.array([0.0, 0.0, 0.0, 0.0])
 KD_GAIN = np.array([0.0, 0.0, 0.0, 0.0])
 D_SMOOTH_HZ = 2.0      # lowpass on the D term (acceleration estimate)
@@ -189,15 +85,17 @@ RUNAWAY_MULTIPLE = 1.8
 RUNAWAY_SUSTAIN_S = 2.0
 MAX_CONSECUTIVE_SATURATED = 30
 
-RAIL_LOW_COUNTS = 3             # raw ADC counts, out of 0..1023 -- not volts,
-RAIL_HIGH_COUNTS = 1020         # to avoid float-rounding ambiguity
+# Raw ADC counts out of 0..1023, not volts: a railed sensor flatlines the
+# bandpass, which an RMS-only check reads as perfect stability.
+RAIL_LOW_COUNTS = 3
+RAIL_HIGH_COUNTS = 1020
 RAIL_SUSTAIN_S = 0.5
 
 FAULT_CLEAR_SUSTAIN_S = 5.0     # all-clear for this long -> auto re-arm
 
 STATUS_PERIOD_S = 5.0
 CSV_FLUSH_EVERY_N = 200
-# ====================================================
+# ====================
 
 
 class OnePoleFilter:
@@ -280,10 +178,7 @@ def read_sample(ser):
     try:
         raw = ser.readline().decode("utf-8").strip()
         parts = raw.split(",")
-        # The firmware streams one column per analog pin it samples. arduino.ino
-        # streams eight (A0..A7) but only A0..A3 carry OSEMs, so take the
-        # leading four. Exactly-four input is unaffected -- parts[:4] is a
-        # no-op there, so older four-column firmware still works.
+        # arduino.ino streams A0..A7; only A0..A3 carry OSEMs.
         if len(parts) < 4:
             return None
         counts = np.array([int(p) for p in parts[:4]])
@@ -294,11 +189,8 @@ def read_sample(ser):
 
 
 class Channel:
-    """Filter chain, gain, and health tracking for one OSEM/coil pair.
-
-    Filtering, rail-checking, and calibration run for every channel
-    regardless of `enabled`, so disabled channels still contribute
-    diagnostic data and still participate in the global safety trip.
+    """One OSEM/coil pair. Filtering, rail-checking and calibration run even
+    when `enabled` is False, so disabled channels still trip the interlock.
     """
 
     def __init__(self, idx, dac, dac_channel, enabled, steady_gain, capture_gain,
@@ -310,8 +202,6 @@ class Channel:
         self.active_gain = 0.0
         self.bias = bias
 
-        # PID on velocity error e = -vel. active_gain is Kp (scheduled and
-        # slew-limited above); ki/kd are fixed per channel.
         self.ki = ki
         self.kd = kd
         self.i_term = 0.0
@@ -383,11 +273,7 @@ class Channel:
         self.calib_sq_sum, self.calib_n = 0.0, 0
 
     def update_schedule(self, t_rel, dt):
-        """Blend active_gain toward a target set by current oscillation
-        amplitude (relative to this channel's calibrated baseline), moving
-        no faster than GAIN_SLEW_PER_S. Doubles as the startup soft-start,
-        since active_gain begins at 0.0.
-        """
+        """Slew active_gain toward the amplitude-scheduled target. Also soft-start."""
         if self.baseline_rms is None:
             return
         local_rms = self.schedule_rms.update(t_rel, self.bp_out)
@@ -443,9 +329,7 @@ class Channel:
     def actuate(self, dt, state):
         if state == "DAMPING" and self.enabled:
             err = -self.vel                       # setpoint is zero velocity
-
-            self.p_term = self.active_gain * err  # == -active_gain * vel
-
+            self.p_term = self.active_gain * err
             if not self.err_initialized:
                 self.prev_err = err
                 self.err_initialized = True
@@ -456,16 +340,14 @@ class Channel:
             u = self.p_term + self.i_term + self.d_term
             target = np.clip(self.bias + u, VMIN, VMAX)
 
-            # Anti-windup, two layers: a hard clamp on the accumulator, plus
-            # conditional integration -- stop winding up if we are already
-            # against a rail and this error would push further into it.
+            # Anti-windup: clamp the accumulator, and stop integrating when
+            # pinned and the error pushes further in.
             pinned = not (VMIN < self.bias + u < VMAX)
             if not (pinned and (err > 0) == (u > 0)):
                 self.i_term = float(np.clip(self.i_term + self.ki * err * dt,
                                             -I_CLAMP_V, I_CLAMP_V))
         else:
-            # Not actuating: drop every term and forget the accumulator, so a
-            # FAULT or a disabled channel can never resume with stale integral.
+            # Drop every term: no resuming with a stale integral.
             self.p_term = self.d_term = self.i_term = 0.0
             self.err_initialized = False
             target = self.bias
@@ -512,20 +394,8 @@ class Channel:
 
 
 class Controller:
-    """The fast-lock state machine, decoupled from where samples come from.
-
-    main() drives this from the serial stream. sim/server.py drives the exact
-    same class from a simulated plant, so there is no second implementation of
-    the loop to keep in sync -- the simulator is testing this code, not a copy
-    of it.
-
-    Timebase note: the original loop used wall-clock `now` for the rail and
-    fault-recovery timers and `t_rel` for the RMS/lock/runaway timers. Every one
-    of those comparisons is a DIFFERENCE between two timestamps, so driving them
-    all from one monotonic clock is exactly equivalent.
-
-    Prints became events so a caller that is not a console (a server, a test)
-    can consume them; main() drains and prints them unchanged.
+    """The fast-lock state machine. main() drives it from serial, sim/server.py
+    from a simulated plant, so the simulator tests this code and not a copy.
     """
 
     def __init__(self, dac, dac_channels=None, enable=None, steady=None,
@@ -616,14 +486,9 @@ class Controller:
         elif self.state == "FAULT":
             for ch in channels:
                 ch.active_gain = 0.0
-            # KNOWN BUG, left in deliberately (versions.md hazard 1; fixed in v3):
-            # saturated_flag is only ever recomputed inside check_runaway(),
-            # which does not run in this state. Once a saturation trip sets it,
-            # all_clear can never become True again and FAULT is permanent until
-            # a manual restart -- contradicting the auto-recovery this module's
-            # docstring promises. the harness asserts the broken
-            # behaviour for any version whose FIXES tuple is empty, so the fix is
-            # verifiable when it lands. v3 fixes this one.
+            # KNOWN BUG, deliberate (versions.md hazard 1, fixed in v3):
+            # saturated_flag is only recomputed in check_runaway(), which does
+            # not run here, so a saturation trip LATCHES and FAULT is permanent.
             all_clear = not any_rail and all(not ch.saturated_flag for ch in channels)
             if all_clear:
                 if self.fault_clear_since is None:

@@ -1419,10 +1419,19 @@ session, not a hardware change.
 ### Still open after v12
 
 1. **`LOCKED` is never announced** — a5 vetoes the quorum, above. One line.
-2. **Diagonal reallocation.** v12 runs flat at ±0.035. The measured residues want
-   ch2-dominant, ratios ≈ `[1.00, 0.83, −3.82, 0.90]`, worth **1.6–1.8×** more
-   damping for four numbers. Must be checked against the ±0.25 V budget first —
-   the shipped gains already peaked **0.2998 V**, 20 % over.
+2. **Diagonal reallocation is closed. It was never available.** Recorded as a
+   correction: this file previously claimed ratios `[1.00, 0.83, −3.82, 0.90]`
+   worth 1.6–1.8×. Those numbers are in no measurement file. `gains.json`'s
+   optimiser proposes **flat ±0.035**, which is what `delta` already ships.
+   It is structurally impossible, not merely unmeasured: `observable_dof = 2`
+   against `free_gains_per_term = 4`, so a **two-dimensional family of gain
+   vectors damps identically** and the proposal picks its point *"by minimum
+   actuator effort, not by measurement"*. Flat already reaches 90 % of the
+   achievable maximum at the ceiling (0.0739 /s worst mode).
+   The 1.36× that does exist (added damping 0.344 → 0.468 /s) is the
+   −0.030 → −0.035 change plus the Ki/Kd resizing, **already shipping**. Its
+   real result is budget: peak actuator 0.2998 → **0.200 V** against a 0.250 V
+   half-window, with Ki's peak going 0.1135 → 0.0056 V.
 3. **Kalman velocity estimator** — now unblocked. Frequencies known to ±0.0001 Hz;
    Q no longer matters, because τ > 138 s intrinsic against a 2.9–4.7 s closed
    loop means the plant is effectively undamped on control timescales.

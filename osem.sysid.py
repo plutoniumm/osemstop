@@ -1,32 +1,19 @@
 """
-v6 -- stepped-sine actuation matrix, FOUR coils.
-================================================
-NOT a controller. It damps nothing and closes no loop. It drives one coil at a
-time with a sine and records what all four OSEMs do, to recover the **actuation
-matrix** -- the one unmet prerequisite for `research.md` item 2 (modal/MIMO
-damping), and the exact thing the previous attempt got wrong.
+v6: stepped-sine actuation matrix, FOUR coils. NOT a controller; it damps
+nothing and closes no loop. Drives one coil at a time and records all four
+OSEMs to recover the actuation matrix (research.md item 2's unmet
+prerequisite). One coil at a time means nothing to disentangle, and the
+lock-in returns both quadratures, so magnitude AND phase are measured rather
+than inferred. Cost is 4 coils x 12 freqs x (SETTLE + DWELL), about 20 min.
 
-Why stepped sine rather than something cleverer: while coil j is driving, no
-other coil is. There is nothing to disentangle, no matrix to invert, and no
-assumption about quadrature. Both quadratures come out of the lock-in together,
-so magnitude AND phase are measured rather than inferred -- `research.md` item 2
-cause 1 was a zero-lag correlation on velocity, which has no coherent term to
-find for a force that acts on acceleration.
+Four coils drive two DOF, so the 4x4 matrix is rank 2 by construction.
+report() checks it; rank != 2 means the measurement is wrong, not the optic
+(high is crosstalk or drift, low means a coil did not move). Reproduces v4's
+"2 of 4 modes carry real motion, 98.8% / 1.2%".
 
-It is slow, and that is the trade. Four coils x the frequency list x
-(SETTLE + DWELL). With the defaults below that is about 20 minutes.
-
-FOUR COILS DRIVE TWO DOF, so the 4x4 response matrix is rank 2 by construction.
-`report()` checks that, and a rank that is not 2 means the measurement is wrong
-rather than the optic: too high is crosstalk or drift, too low means a coil did
-not move. That check independently reproduces v4's "2 of 4 modes carry real
-motion, 98.8% / 1.2%".
-
-SAFETY. Open loop -- nothing is damping while this runs, so the optic is only as
-quiet as the lab. AMP is small and every output is clamped to the controllers'
-own 0..0.5 V window. A railed sensor invalidates its own step and is reported
-rather than averaged in. All coils are returned to bias on the way out,
-including on Ctrl+C.
+SAFETY: open loop, so nothing damps while this runs. Outputs are clamped to
+the controllers' 0..0.5 V window around BIAS = 0.25. A railed sensor
+invalidates its own step. All coils return to bias on exit, Ctrl+C included.
 """
 
 import sys
@@ -46,12 +33,12 @@ COILS = [0, 1, 2, 3]                # sensor index -> its own coil
 DAC_MAP = [1, 3, 5, 7, 0, 2, 4, 6]  # sensor index -> DAC channel (provenance.md)
 EXPECTED_DOF = 2                    # four coils drive two DOF
 
-FREQS = np.round(np.geomspace(0.3, 4.0, 12), 4)   # must SPAN every resonance:
-                                                  # a DOF invisible to the sweep
-                                                  # is invisible in the rank check
+FREQS = np.round(np.geomspace(0.3, 4.0, 12), 4)   # must SPAN every resonance: a
+                                                  # DOF the sweep misses is also
+                                                  # missing from the rank check
 AMP = 0.05                          # volts peak on the coil, on top of BIAS
 SETTLE_S = 5.0                      # discarded: Q~50 at 1 Hz rings for ~16 s
-DWELL_S = 20.0                      # integrated; long dwell averages the residual
+DWELL_S = 20.0                      # integrated; averages the residual
 
 
 def main():

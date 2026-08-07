@@ -1,5 +1,5 @@
 % ===========================================================================
-%  OSEMa bin-laden -- OSEM suspension damping, v0 through v13
+%  OSEMa bin-laden -- OSEM suspension damping: zero, alpha, beta, delta
 %
 %  Build:   tectonic talk.tex
 %
@@ -41,11 +41,11 @@
 
 % === the three parts of every defect slide =================================
 \newcommand{\rawdata}{\textbf{The data.}}
-\newcommand{\goeswrong}{\alert{\textbf{What goes wrong.}}}
+\newcommand{\goeswrong}{\textbf{What goes wrong.}}
 \newcommand{\thefix}{\textbf{The fix, and the number that moved.}}
 
 \title{OSEMa bin-laden}
-\subtitle{Fourteen rungs of a suspended-optic damping loop: v0 to v13}
+\subtitle{Four rungs of a suspended-optic damping loop: \texttt{zero}, \texttt{alpha}, \texttt{beta}, \texttt{delta}}
 \date{7 August 2026}
 
 \begin{document}
@@ -55,11 +55,13 @@
   \titlepage
   \begin{center}
     \scriptsize Eight OSEM shadow sensors, eight coils, one suspended mirror,\\
-    and fourteen attempts at the supervisor around them.
+    and four kept rungs of the supervisor around them.
   \end{center}
 \end{frame}
 \note{Title slide. The name is the project's own pun on OSEM. One control law,
-barely changed since v2, wrapped in thirteen successive supervisors.
+barely changed since the first four-channel build, wrapped in a supervisor that
+grew over four kept rungs. More builds existed between them; they are in version
+control, not on this slide.
 
 Every number in this deck is measured and comes out of the repository. Where a
 number is a simulator number rather than a hardware number, the slide says so.
@@ -85,7 +87,7 @@ and the number that moved when it was fixed.}
     \node[blk, minimum width=1.6cm] (osem) at (2.9,0.7) {OSEM $\times$8\\(A0--A7)};
     \node[blk, minimum width=2.2cm] (adc)  at (5.6,0.7) {Arduino Mega\\ADC A0--A7};
     \node[blk, minimum width=2.4cm] (host) at (9.3,0.7) {host\\\texttt{pyDAC.py}\\\texttt{osem.vN.py}};
-    \node[blk, minimum width=2.2cm] (dac)  at (5.6,-1.5) {AD5628\\octal DAC};
+    \node[blk, minimum width=2.2cm] (dac)  at (5.6,-1.5) {8-channel DAC\\(number $\to$ voltage)};
     \node[blk, minimum width=1.6cm] (coil) at (2.9,-1.5) {coils $\times$8};
 
     \draw[flow] (0.7,0.7) -- (osem);
@@ -106,17 +108,13 @@ and the number that moved when it was fixed.}
    their four coils push back.}
   \end{minipage}
 \end{frame}
-\note{One suspended mirror, eight OSEM shadow sensors watching it, eight coils
-pushing back, and a host computer closing the loop over a serial link.
+\note{One suspended mirror, eight OSEM shadow sensors, eight coils, and a host
+closing the loop over a serial link.
 
-All eight OSEMs are electrically connected, confirmed on an oscilloscope. Four of
-them carry usable in-band signal. Why the other four do not is open, and it gets
-its own slide in Part IV.
-
-The coil map matters. Sensor i drives the coil at DAC_CHANNELS of i, and that map
-is not the identity. Neither the simulator nor the interlocks can catch a wrong
-map, because the simulator round-trips its held-voltage dictionary through
-whatever map the controller declares. Only the bench catches that.}
+The coil map is the thing to flag. Sensor i drives the coil at DAC_CHANNELS of i,
+and that map is not the identity. Neither the simulator nor the interlocks can
+catch a wrong map, because the simulator round-trips its held-voltage dictionary
+through whatever map the controller declares. Only the bench catches that.}
 
 % ================================================================ 3
 \begin{frame}{The OSEM: a shadow sensor}
@@ -139,123 +137,228 @@ whatever map the controller declares. Only the bench catches that.}
   \vspace{4mm}
   \footnotesize
   \begin{itemize}\setlength{\itemsep}{4pt}
-    \item A flag on the optic partly occludes the beam. \textbf{The photodiode
-          current is linear only while the flag is partly in the beam.} Fully
-          blocked or fully clear, the sensor reports nothing about motion.
-    \item \textbf{The ADC reads 0 to 1023 counts, so mid-scale is 511.5.} A
-          channel resting away from mid-scale has asymmetric room before it
-          runs out at one end: those two ends are its \emph{rails}.
-    \item \textbf{Two voltage scales, never to be conflated.} Sensing:
-          $A_{\mathrm{VCC}} = 5.02$\,V over 1023 counts, so
-          \textbf{4.907\,mV/count}. Actuation: DAC full scale 2.5\,V, of which
-          the loop uses \texttt{VMIN},\,\texttt{VMAX} $= 0.0, 0.5$\,V around
-          \texttt{BIAS} $= 0.25$.
+    \item \textbf{An analogue-to-digital converter turns that voltage into a
+          whole number, 0 to 1023 ``counts''.} Its two ends are the
+          \emph{rails}: past them the number cannot go further, whatever the
+          mirror does.
     \item \textbf{At a rail the sensor is outside its linear region}, so
           anything derived from it is wrong until the flag comes back.
   \end{itemize}
 \end{frame}
-\note{An OSEM is an infrared LED shining across a gap onto a photodiode, with a
-flag on the optic partly blocking the beam. Move the optic, the shadow moves, the
-photocurrent changes. A transimpedance amplifier turns that into a voltage and
-the Arduino digitises it to ten bits.
+\note{An infrared LED shining across a gap onto a photodiode, with a flag on the
+optic partly blocking the beam. Move the optic, the shadow moves, the
+photocurrent changes.
 
-The first bullet dominates the whole project: the sensor is linear only in
-partial shadow.
+The first bullet is the one that dominates the whole project: the sensor is
+linear only in partial shadow, so a channel that reaches a rail stops reporting
+motion at all.
 
-Two voltage scales live in this system and must not be conflated. 5.02 volts of
-sensing reference over 1023 counts, which is 4.907 millivolts per count, and that
-number turns up again in the torn-frame slide. And 2.5 volts of DAC full scale,
-of which the controller uses only 0 to 0.5.
+The two voltage scales are worth pausing on because conflating them is an easy
+mistake to make when reading the code: 4.907 millivolts per count on the sensing
+side, and a DAC that can reach 2.5 volts but is deliberately restricted to a
+half-volt window on the actuation side.}
 
-The last bullet is the open hardware problem. Every clipping number later in the
-deck traces back to it.}
-
-% ================================================================ 4
-\begin{frame}{The pendulum, and why it needs help}
+% ================================================================ 3b
+\begin{frame}{How the damping was measured, and why it is a bound}
+  \scriptsize
   \begin{columns}[T]
-    \begin{column}{0.49\textwidth}
-      \footnotesize
-      A suspended optic is a damped harmonic oscillator. For one sensed
-      coordinate $x(t)$, of mass $m$, driven by force $F(t)$:
-      \[ \ddot{x} + \frac{\omega_0}{Q}\,\dot{x} + \omega_0^2 x = \frac{F(t)}{m} \]
-      \vspace{-3mm}
+    \begin{column}{0.52\textwidth}
+      \textbf{The normal way.} Kick the pendulum, remove all drive, watch the
+      swing die away, fit the decay. One kick, one curve, and $Q$ follows.
+
+      \vspace{1.5mm}
+      \textbf{Two measured reasons that was impossible here.}
       \begin{itemize}\setlength{\itemsep}{1pt}
-        \item $\omega_0 = 2\pi f_0$, the resonance
-        \item $Q$, the quality factor
-        \item amplitude decays as $e^{-\gamma t}$ with
-              $\gamma = \omega_0 / 2Q$, and $\tau \equiv 1/\gamma$
+        \item \textbf{Too slow.} $\tau > 138$\,s needs five to ten minutes of
+              undisturbed decay. Ambient building motion re-excites the mirror
+              long before that.
+        \item \textbf{A big enough kick saturates the sensor.} ch0 rests at
+              $\sim$590 counts, so $\sim$430 counts of swing before it hits an
+              end: only \textbf{7$\times$} the 62-count ambient, where fitting a
+              decay wants \textbf{10$\times$}. The large-amplitude part, with
+              the best signal, is the unusable part.
       \end{itemize}
 
+      \vspace{1.5mm}
+      \textbf{What was done instead.} A \textbf{320\,s recording with the loop
+      off}, coils parked, \textbf{no kick}: 355\,797 samples, coils written 8
+      times in the whole record, \textbf{nothing reaching a sensor end}.
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \begin{axis}[width=6.0cm, height=2.5cm,
+                     xlabel={frequency}, ylabel={power},
+                     xmin=0.93, xmax=1.07, ymin=0, ymax=1.15,
+                     axis lines=left, xtick=\empty, ytick=\empty,
+                     legend style={at={(0.02,0.98)}, anchor=north west,
+                                   draw=none, fill=none, font=\tiny}]
+          \addplot[thick, domain=0.93:1.07, samples=400]
+            {1/(1+((x-1)/0.004)^2)};
+          \addlegendentry{low damping: sharp}
+          \addplot[dashed, thick, domain=0.93:1.07, samples=300]
+            {1/(1+((x-1)/0.025)^2)};
+          \addlegendentry{high damping: broad}
+        \end{axis}
+      \end{tikzpicture}
+
+      \raggedright
+      \textbf{Why that still gives the damping.} Shaken by broadband noise, a
+      resonance makes a peak, and the \textbf{width} of the peak is set by the
+      damping: $\text{width} = f_0 / Q$. Measure the \emph{sharpness of the
+      peak}, not the decay of a swing.
+
+      \vspace{1.5mm}
+      \textbf{Why it is a bound.} 276\,s of usable record resolves
+      $1/276 = \mathbf{0.0036}$\,\textbf{Hz}. A mode at 0.7155\,Hz with
+      $Q = 433$ is only $\mathbf{0.0017}$\,\textbf{Hz} wide, narrower than that.
+      Measured width \textbf{0.00566}\,Hz against a resolution floor of
+      \textbf{0.00543}.
+
+      \vspace{1mm}
+      ``At least as sharp as I can resolve'' bounds $Q$ from below and cannot
+      give a value. \alert{\textbf{A longer quiet recording fixes that; a bigger kick
+      does not.}}
+    \end{column}
+  \end{columns}
+
+  \vspace{1.5mm}
+  {\scriptsize \textbf{A caution.} An earlier attempt fitted decay curves from
+  kicks during normal runs and got $Q = 20$--$22$, excluded at
+  \textbf{21.7$\sigma$}: in all \textbf{73} windows the other three channels
+  were still damping. It measured the control loop and reported it as the
+  pendulum.}
+\end{frame}
+\note{The deck quotes Q greater than 433 and tau greater than 138 seconds, so it
+owes you an account of where those came from. The file names in the repository
+say ringdown, and this is not a classical ringdown, so I want to be careful.
+
+Normally you kick a pendulum, take all the drive away, watch the swing die, and
+fit the decay. One kick, one curve, and Q falls out of how fast it dies.
+
+Two measured reasons that could not be done. First, it is too slow: with tau over
+138 seconds you would need five to ten minutes of undisturbed decay, and ambient
+building motion re-excites the mirror long before that. Second, a kick big enough
+to measure saturates the sensor. Channel zero rests around 590 counts, so there
+are about 430 counts of swing before it hits an end, which is only seven times
+the ambient level, where fitting a decay properly wants a factor of ten. The
+large-amplitude part of the swing, the part with the best signal, is exactly the
+part that is unusable.
+
+So instead: a 320 second recording with the control loop off and the coils
+parked. No kick at all. The mirror simply moves under ambient excitation, and
+nothing reaches a sensor end.
+
+That still gives you the damping, and the picture is the reason. Shake a
+resonance with broadband noise and it makes a peak in the spectrum. The width of
+that peak is set by the damping: width equals f-nought over Q. Low damping means
+a sharp peak. So you measure the sharpness of the peak instead of the decay of a
+swing.
+
+And that is also why the answer is a bound rather than a number. 276 seconds of
+usable record resolves 0.0036 hertz. A mode at 0.7155 hertz with Q of 433 is
+0.0017 hertz wide, narrower than the resolution. The measured width is 0.00566
+against a resolution floor of 0.00543. So the honest statement is that the peak
+is at least as sharp as I can resolve, which bounds Q from below and cannot
+produce a value. A longer quiet recording turns it into a number. A bigger kick
+does not.
+
+The caution at the bottom is the trap. An earlier attempt did fit decay curves,
+taken from kicks during normal runs, and got Q of twenty to twenty-two. That is
+excluded at 21.7 sigma, because in all seventy-three of those windows the other
+three channels were still actively damping. It measured the control loop and
+reported it as the pendulum. In a ringdown you have to be certain nothing else is
+removing energy.}
+
+% ================================================================ 4
+\begin{frame}{The plant: three resonances, and a bound on the damping}
+  \begin{columns}[T]
+    \begin{column}{0.47\textwidth}
+      \footnotesize
+      A suspended optic is a damped harmonic oscillator. For one sensed
+      coordinate $x(t)$, mass $m$, force $F(t)$, and mode $m$:
+      \[ \ddot{x} + \frac{\omega_m}{Q_m}\,\dot{x} + \omega_m^2 x = \frac{F(t)}{m} \]
+      \vspace{-3mm}
+
+      Amplitude decays as $e^{-\gamma_m t}$, so
+      \[ \gamma_m = \frac{\omega_m}{2 Q_m}, \qquad \tau_m \equiv 1/\gamma_m. \]
+
       \vspace{2mm}
-      \textbf{Measured, 320\,s ringdown, coils held at bias:}
+      \textbf{Resonances}, 320\,s ringdown, coils at bias:
+      \[ f_A, f_B, f_C = 0.7155,\ 0.9949,\ 1.6396\ \mathrm{Hz} \]
+      \vspace{-4mm}
+      \begin{center}each $\pm 0.0001$\,Hz\end{center}
+    \end{column}
+    \begin{column}{0.51\textwidth}
+      \footnotesize\raggedright
+      $\gamma_m$ across channels, in s$^{-1}$:
 
       \vspace{1mm}
       \centering
       {\scriptsize
-      \begin{tabular}{@{}ll@{}}
+      \begin{tabular}{@{}lccc@{}}
         \toprule
-        $f_A$ & $0.7155 \pm 0.0001$\,Hz \\
-        $f_B$ & $0.9949 \pm 0.0001$\,Hz \\
-        $f_C$ & $1.6396 \pm 0.0001$\,Hz \\
+        & ch & median & range \\
         \midrule
-        $\gamma$ & $+0.00004 \pm 0.00719$\,s$^{-1}$ \\
+        A & 4 & 0.0483 & $0.0107$--$0.1388$ \\
+        B & 5 & 0.0082 & $0.0005$--$0.0579$ \\
+        C & 4 & 0.0094 & $0.0061$--$0.0530$ \\
         \bottomrule
       \end{tabular}}
-    \end{column}
-    \begin{column}{0.49\textwidth}
-      \footnotesize\raggedright
-      \textbf{Three resonances}, all inside the 0.4--3\,Hz band the loop reads.
 
-      \vspace{2mm}
-      \textbf{The measured $\gamma$ is consistent with zero.} So $\gamma$ gives
-      a \emph{bound}, not a value:
-      \[ Q > 433\ (1\sigma), \qquad \tau > 138\,\mathrm{s} \]
+      \vspace{1mm}
+      \raggedright
+      Mode A spans a \textbf{factor of 13} across four channels watching one
+      rigid body, which a rigid body cannot do.
+      \alert{\textbf{Do not quote a per-mode $\gamma$ as measured.}}
 
-      \vspace{2mm}
-      \alert{\textbf{That is why it needs help.}} A suspension is built to be
-      lossless, so a kick rings for \emph{minutes}. With the loop closed the
-      same kick settles in \textbf{2.9--4.7\,s}:
-      \[ \frac{\tau_{\mathrm{open}}}{\tau_{\mathrm{closed}}} > 29 \]
-      \textbf{That ratio is the entire reason the loop exists.}
+      \vspace{1.5mm}
+      \textbf{What is established is \emph{aggregate}}, from a 12\,s
+      autocorrelation exclusion test over all channels and the in-band signal as
+      a whole. The fitted
+      $\gamma_{\mathrm{agg}} = +0.00004 \pm 0.00719$\,s$^{-1}$ is consistent with
+      zero:
+      \[ Q > 433\ (1\sigma) \;\Rightarrow\; \tau > 138\,\mathrm{s} \]
+      \vspace{-2mm}
+      \alert{\textbf{One bound over all three modes, not three measurements.}}
 
-      \vspace{2mm}
-      {\scriptsize A $\tau \approx 16$\,s figure is still carried in the
-      simulator. It comes from an assumed $Q = 50$, which this ringdown excludes
-      at \textbf{8.7$\sigma$}.}
+      \vspace{1.5mm}
+      {\scriptsize Closed loop the same kick settles in \textbf{2.9--4.7\,s}.}
     \end{column}
   \end{columns}
 \end{frame}
-\note{The plant, measured from a 320 second quiet ringdown with the coils held
-at bias.
+\note{The plant, from a 320 second quiet ringdown with the coils held at bias.
 
-A suspended optic is a damped harmonic oscillator. One coordinate x, resonance
-omega-nought equals two pi f-nought, quality factor Q. The amplitude decays as e
-to the minus gamma t, where gamma is omega-nought over two Q, and tau is one over
-gamma. Those symbols are used the same way for the rest of the deck.
+Start with the notation, because it is the thing a physicist will check. Gamma
+is per mode: gamma-m equals omega-m over two Q-m. Three resonances means three
+gammas, and the slide should not pretend otherwise.
 
-Three resonances: 0.7155, 0.9949 and 1.6396 hertz, each to a tenth of a
-millihertz. All three sit inside the 0.4 to 3 hertz band the loop closes on,
-which matters because a resonance outside that band would be filtered out of the
-signal the loop uses.
+The resonances themselves are solid: 0.7155, 0.9949 and 1.6396 hertz, each to a
+tenth of a millihertz.
 
-The measured decay rate is consistent with zero. So it gives a bound rather than
-a value: Q greater than 433 at one sigma, tau greater than 138 seconds.
+The per-mode decay rates are not. Fit gamma per mode per channel and mode A comes
+out anywhere from 0.0107 to 0.1388 per second, a factor of thirteen, across four
+channels watching one rigid body. A rigid body does not have four different decay
+rates for the same mode. Those fits are noise-dominated and I am not going to
+quote one as a measurement.
 
-And that is the whole answer to why this needs a loop. A suspension is built to
-be lossless, so a kick rings for minutes. With the loop closed the same kick
-settles in three to five seconds. The ratio is at least twenty-nine, and that
-ratio is the entire reason the loop exists.
+What is established is an aggregate. A twelve second autocorrelation exclusion
+test, run over all channels and the in-band signal as a whole, asks whether a
+claimed Q is compatible with the observed decay of correlation. The aggregate
+fitted rate is four times ten to the minus five, plus or minus 0.0072 per second,
+consistent with zero. At one sigma that gives tau greater than 138 seconds and Q
+greater than 433. One bound covering all three modes, not three measurements.
 
-One warning worth keeping: a sixteen second figure is still carried in the
-simulator, and it comes from an assumed Q of fifty, which this measurement
-excludes at 8.7 sigma.}
+For scale: closed loop the same kick settles in three to five seconds. And a
+sixteen second figure still carried in the simulator assumes Q of fifty, which
+this test excludes at 8.7 sigma.}
 
 % ================================================================ 5
 \begin{frame}{Cold damping: the process variable is \emph{velocity}}
   \begin{align*}
     \mathrm{bp}(t) &= \mathrm{LP}_{3\,\mathrm{Hz}}\big[\,\mathrm{HP}_{0.4\,\mathrm{Hz}}[A(t)]\,\big] \\[2pt]
-    v(t) &= \mathrm{LP}_{5\,\mathrm{Hz}}\!\left[\frac{\mathrm{bp}(t)-\mathrm{bp}(t-\Delta t)}{\Delta t}\right] \\[2pt]
-    u(t) &= -K(t)\cdot v(t)
+    \hat{v}(t) &= \mathrm{LP}_{5\,\mathrm{Hz}}\!\left[\frac{\mathrm{bp}(t)-\mathrm{bp}(t-\Delta t)}{\Delta t}\right] \\[2pt]
+    u(t) &= -K_p(t)\cdot \hat{v}(t)
   \end{align*}
   \vspace{-2mm}
   \begin{center}
@@ -263,8 +366,8 @@ excludes at 8.7 sigma.}
     \node[blk] (osem) {OSEM\\counts};
     \node[blk, right=of osem] (bp) {bandpass\\0.4--3\,Hz};
     \node[blk, right=of bp] (dv) {$d/dt$ +\\LP 5\,Hz};
-    \node[blk, right=of dv] (err) {$e = -v$\\setpoint 0};
-    \node[blk, right=of err] (pid) {$K_p,K_i,K_d$};
+    \node[blk, right=of dv] (err) {$e = -\hat{v}$\\setpoint 0};
+    \node[blk, right=of err] (pid) {gain $K_p$};
     \node[blk, right=of pid] (dac) {clip to\\0--0.5\,V};
     \node[blk, right=of dac] (coil) {coil};
     \foreach \a/\b in {osem/bp, bp/dv, dv/err, err/pid, pid/dac, dac/coil}
@@ -274,16 +377,14 @@ excludes at 8.7 sigma.}
   \end{tikzpicture}
   \end{center}
   \vspace{1mm}
-  {\footnotesize The setpoint is a constant zero, so $e = -v$. The loop does not
-  ask where the optic \emph{is}, only that it stop \emph{moving}. All three
-  measured modes sit inside 0.4--3\,Hz.}
+  {\footnotesize \textbf{The bandpass keeps only the part of the signal between
+  0.4 and 3\,Hz}, discarding slow drift below and fast noise above. All three
+  measured resonances sit inside that window. The target is a constant zero, so
+  the error is just minus the speed: the loop never asks where the mirror
+  \emph{is}, only that it stop \emph{moving}.}
 \end{frame}
-\note{The whole control law, unchanged since v2. Bandpass the raw sensor between
-0.4 and 3 hertz, differentiate to get velocity, smooth at 5 hertz, drive the coil
-with minus a gain times velocity.
-
-The critical thing, and what makes textbook intuition misleading here, is that
-the process variable is velocity and the setpoint is a constant zero. So the
+\note{The critical thing, and what makes textbook intuition misleading here, is
+that the process variable is velocity and the setpoint is a constant zero. So the
 error is simply minus the velocity. The loop has no opinion about where the optic
 sits; it only objects to it moving. That is cold damping: synthesising a viscous
 drag the suspension deliberately does not have.
@@ -294,7 +395,13 @@ outside that band would be filtered out of the very signal the loop closes on.}
 % ================================================================ 6
 \begin{frame}{Three gains: P is a damper, I is a spring, D is a mass}
   \centering
-  With $e = -v$ and $v = \dot{x}$:
+  {\footnotesize A \textbf{PID controller} combines three responses to an error:
+  one proportional to it, one to its running total, one to its rate of change.
+  Here the ``error'' is the mirror's speed, which shifts what each term means.}
+
+  \vspace{1mm}
+  With $e = -\hat{v}$ and $\hat{v} \approx \dot{x}$, the velocity of the sensed
+  coordinate $x$:
   \[
     \underbrace{K_p\,e = -K_p\,\dot{x}}_{\text{force} \propto \text{velocity}}
     \qquad
@@ -308,7 +415,7 @@ outside that band would be filtered out of the very signal the loop closes on.}
     \toprule
     term & acts on & physically & effect on the pole \\
     \midrule
-    $K_p$ & velocity & \textbf{viscous damper} & \textbf{the only term that removes energy} \\
+    $K_p$ & velocity & \textbf{viscous damper} & \alert{\textbf{the only term that removes energy}} \\
     $K_i$ & displacement & added \textbf{spring} & moves the resonance; does not damp \\
     $K_d$ & acceleration & added (negative) \textbf{mass} & noisiest; differentiates twice \\
     \bottomrule
@@ -319,213 +426,136 @@ outside that band would be filtered out of the very signal the loop closes on.}
   \footnotesize
   \textbf{Why add I and D at all?} $K_p$ sets the damping, but it leaves a steady
   offset it cannot remove and it reacts only to present error. $K_i$ takes out the
-  offset; $K_d$ anticipates. Neither dissipates, so
-  \alert{\textbf{amplitude ratio is the wrong metric to expect an improvement
-  in}}.
+  offset; $K_d$ anticipates (and therefore useless for us)
 
-  \vspace{1.5mm}
-  Measured: switching $K_i$ and $K_d$ on moved the \textbf{ch0 amplitude ratio}
-  from \textbf{0.025} to \textbf{0.028}, which is no improvement.
   \end{minipage}
 \end{frame}
-\note{The most illuminating slide in the deck for anyone who knows ordinary PID.
+\note{The one slide that will surprise anyone who knows ordinary PID.
 
 Because the error is minus velocity, every term is shifted by one derivative from
-what its name suggests. P acts on velocity, so it is a viscous damper, and it is
-the only one of the three that takes energy out of the pendulum. I integrates
-velocity, and the integral of velocity is displacement, so I is a spring. D
-differentiates velocity, and the derivative of velocity is acceleration, so D is
-added mass, and having differentiated the sensor twice it is by far the noisiest
-term.
+what its name suggests. That is the whole content of the table, and it is why the
+integrator is a spring rather than a drift-remover here.
 
-Now the question that slide usually leaves hanging: why add I and D at all? P
-sets the damping, but P alone leaves a steady offset it cannot remove, and it
-reacts only to the error in front of it. I takes out the offset, D anticipates.
-Neither dissipates energy. So the amplitude ratio is the wrong number to expect
-them to improve, and when v2 measured 0.028 against v1's 0.025 that was the
-predicted result, not a disappointment.
-
-And the measured consequence: switching Ki and Kd on moved the channel zero
-amplitude ratio from 0.025 to 0.028. No improvement, which is what the physics
-predicts.}
+The question the table leaves hanging is why add I and D at all. P sets the
+damping but leaves a steady offset it cannot remove and reacts only to present
+error. I takes out the offset, D anticipates. Neither dissipates, so amplitude
+ratio is simply not the number either would move.
+}
 
 % ================================================================ 7
-\begin{frame}{The velocity gains, and what set them}
-  \footnotesize
-  \textbf{The loop feeds back velocity.} For OSEM $i$, $\hat{v}_i$ is its
-  bandpassed signal differentiated, in \textbf{V/s}; $u_i$ is the voltage added
-  to that channel's coil bias, in \textbf{V}. The proportional term is
-  \[ u_i = -K_p^{(i)}\,\hat{v}_i, \qquad\text{so } K_p \text{ has units V per V/s.} \]
-  \vspace{-2mm}
+\begin{frame}{How hard to push: choosing the gain}
+  \scriptsize
   \begin{columns}[T]
-    \begin{column}{0.44\textwidth}
+    \begin{column}{0.53\textwidth}
+      \begin{enumerate}\setlength{\itemsep}{2.5pt}
+        \item The controller measures \textbf{how fast the mirror is moving} and
+              pushes against that motion. Push harder, it settles sooner.
+        \item \textbf{The gain is the constant relating the two.} Speed arrives
+              as volts per second of sensor signal, the push leaves as a voltage
+              on the coil, so $K_p$ is in \textbf{volts per volt-per-second}.
+        \item \alert{\textbf{It is negative because the push must oppose the motion.}} A
+              positive value pushes the way the mirror is already going, feeding
+              the motion instead of removing it.
+        \item \textbf{Two ceilings stop it going up indefinitely.} Above about
+              $0.040$ the loop was seen on an oscilloscope to go unstable. And
+              the coil drive has a fixed $\pm 0.25$\,V window, past which the
+              loop asks for more push than the hardware can give.
+        \item \textbf{$0.035$ fits under both, and \emph{instability} binds}:
+              the budget at $0.035$ is \textbf{0.2001\,V} of $0.250$\,V, so the
+              hardware still has room when stability runs out.
+      \end{enumerate}
+    \end{column}
+    \begin{column}{0.45\textwidth}
       \centering
-      {\footnotesize
-      \begin{tabular}{@{}lcccc|c@{}}
+      {\scriptsize\setlength{\tabcolsep}{2.5pt}
+      \begin{tabular}{@{}lrrrr|c@{}}
         \toprule
         & ch0 & ch1 & \textbf{ch2} & ch3 & ch4--7 \\
         \midrule
-        $K_p$ & $-0.035$ & $-0.035$ & $\mathbf{+0.035}$ & $-0.035$ & $0$ \\
-        $K_i$ & $-0.0060$ & $-0.0060$ & $\mathbf{+0.0060}$ & $-0.0060$ & $0$ \\
-        $K_d$ & $-0.00045$ & $-0.00045$ & $\mathbf{+0.00045}$ & $-0.00045$ & $0$ \\
+        $K_p$ & $-.035$ & $-.035$ & $\mathbf{+.035}$ & $-.035$ & $0$ \\
+        $K_i$ & $-.0060$ & $-.0060$ & $\mathbf{+.0060}$ & $-.0060$ & $0$ \\
+        $K_d$ & $-.00045$ & $-.00045$ & $\mathbf{+.00045}$ & $-.00045$ & $0$ \\
         \bottomrule
       \end{tabular}}
 
       \vspace{2mm}
       \raggedright
-      $K_p$ is \textbf{negative} because the coil force must \emph{oppose}
-      velocity.
+      \textbf{ch2 is positive, and that is correct.} Its sensor and coil are
+      mounted the opposite way round, so there opposing the motion \emph{means}
+      the opposite sign. It damps fastest of the four while running positive.
+
+      \vspace{2mm}
+      $K_i$ and $K_d$ take each channel's sign, because all three push the same
+      coil. \textbf{ch4--ch7 sit at zero}: which way their coils push is not
+      known, and a wrong sign would feed the motion.
 
       \vspace{1.5mm}
-      \alert{\textbf{ch2 is positive and that is correct, not a typo.}} Its OSEM
-      and coil are mounted the other way round, so its loop sign is inverted:
-      $K_p > 0$ there opposes velocity exactly as $K_p < 0$ does elsewhere.
-    \end{column}
-    \begin{column}{0.54\textwidth}
-      \raggedright
-      \begin{itemize}\setlength{\itemsep}{2.5pt}
-        \item \textbf{$|K_p| = 0.030$ was set against an oscilloscope} on ch0,
-              watching the sensor trace directly: \textbf{6$\times$ amplitude
-              reduction, no rail clipping}. It is the only value in the project
-              fixed that way.
-        \item \alert{\textbf{Bound: $|K_p| = 0.040$ is the measured onset of
-              instability and railing.}} \textbf{Do not exceed $0.035$
-              unattended.} That is where the shipping value sits.
-        \item \textbf{$K_i$ and $K_d$ take each channel's sign}, because all
-              three terms drive one coil through one loop. Their
-              \emph{magnitudes} are set by the actuator budget: peak coil demand
-              \textbf{0.2001\,V} inside a $\pm 0.25$\,V window.
-        \item \textbf{ch4--ch7 run at zero} because their coil sign is not
-              determined, and a wrong-signed channel \emph{pumps}.
-        \item Anti-windup is back-calculation at \texttt{TRACK\_TC\_S} $= 0.5$\,s.
-              \texttt{I\_CLAMP\_V} $= 0.15$\,V is a backstop: measured peak
-              $|I|$ is \textbf{0.084\,V}, so it has never engaged.
-      \end{itemize}
+      {\scriptsize Only $|K_p| = 0.030$ was fixed by watching an oscilloscope:
+      $6\times$ reduction, no clipping.}
     \end{column}
   \end{columns}
 \end{frame}
-\note{The gains, as they ship.
+\note{This is the slide to go slowly on, because everything later depends on it.
 
-First the units, because a gain without units is not a number. v-hat is the
-bandpassed sensor signal differentiated, in volts per second. u is the voltage
-added to that channel's coil bias, in volts. So Kp is volts per volt-per-second,
-which is dimensionally seconds.
+The controller measures how fast the mirror is moving and pushes against that
+motion. Push harder, it settles sooner. The gain is just the constant relating
+those two things, and because speed arrives as volts per second of sensor signal
+and the push leaves as a voltage on a coil, the gain is in volts per
+volt-per-second.
 
-Kp is negative because the coil force has to oppose velocity. That is the whole
-mechanism: a force proportional to minus velocity is a dashpot.
+The sign is the part worth saying out loud. It is negative because the push has
+to oppose the motion. Get the sign wrong and you are pushing the mirror the way
+it is already going, which feeds the swing rather than removing it.
 
-Channel two is positive, and it is correct rather than a typo. Its OSEM and its
-coil are mounted the other way round, so the loop sign is inverted, and a
-positive Kp there opposes velocity exactly as a negative one does everywhere
-else. The next slide is the measurement behind that claim.
+Then why not simply turn it up. Two separate ceilings. One is stability: above
+about 0.040 the loop was watched on an oscilloscope going unstable. The other is
+hardware: the coil drive has a fixed half-volt window and past a point the loop
+asks for more than the electronics can deliver. 0.035 fits under both, and it is
+the instability ceiling that binds, because the actuator budget at that gain comes
+to 0.2001 volts of the 0.250 available.
 
-Now how the numbers were set. A magnitude of 0.030 was fixed on channel zero
-against an oscilloscope, watching the sensor trace: six-fold amplitude reduction
-with no rail clipping. It is the only value in this project ever fixed that way.
+Channel two is positive and it is not a typo. Its sensor and its coil are mounted
+the opposite way round, so on that one channel opposing the motion means the
+opposite sign. Three separate measurements agree, including that it damps fastest
+of the four while running positive.
 
-The bound is 0.040, which is the measured onset of instability and railing. The
-shipping value sits just under it at 0.035, and nothing should exceed that
-unattended.
-
-Ki and Kd take each channel's sign because all three terms drive one coil
-through one loop. Their magnitudes are set by the actuator budget rather than by
-tuning for damping: peak coil demand comes to 0.2001 volts inside a plus or minus
-0.25 volt window.
-
-Channels four to seven run at zero gain because their coil sign is not
-determined, and a wrong-signed channel pumps its mode rather than damping it.
-
-And the integrator clamp is a backstop that has never engaged: measured peak
-integrator output is 0.084 volts against a 0.150 volt limit.}
-
-% ================================================================ 8
-\begin{frame}{ch2 runs \emph{positive}, on purpose}
-  \begin{columns}[T]
-    \begin{column}{0.52\textwidth}
-      \centering
-      \begin{tikzpicture}
-        \begin{axis}[width=6.4cm, height=4.4cm,
-                     xlabel={time (s)}, ylabel={$e^{-\gamma t}$},
-                     xmin=0, xmax=16, ymin=0, ymax=1.02,
-                     axis lines=left, legend pos=north east,
-                     legend cell align=left]
-          \addplot[domain=0:16, samples=80, thick] {exp(-0.2197*x)};
-          \addlegendentry{A0 $\gamma=0.2197$}
-          \addplot[domain=0:16, samples=80, dashed] {exp(-0.1821*x)};
-          \addlegendentry{A1 $\gamma=0.1821$}
-          \addplot[domain=0:16, samples=80, very thick] {exp(-0.2796*x)};
-          \addlegendentry{\textbf{A2 $\gamma=0.2796$}}
-          \addplot[domain=0:16, samples=80, dotted, thick] {exp(-0.1982*x)};
-          \addlegendentry{A3 $\gamma=0.1982$}
-        \end{axis}
-      \end{tikzpicture}\\
-      {\scriptsize Envelopes from the \emph{measured} decay constants of the v0
-      campaign ($R^2 = 0.65$--$0.92$), all four channels damping together.}
-    \end{column}
-    \begin{column}{0.46\textwidth}
-      \footnotesize
-      A2 damps \textbf{fastest} of the four, at $K = +0.010$ where A0/A1/A3 ran
-      at $-0.030$.
-
-      \vspace{2mm}
-      A positive gain on a normally-wired channel \emph{pumps}. The only reading
-      that fits: \textbf{ch2's coil or OSEM is mounted the other way round}.
-
-      \vspace{2mm}
-      \textbf{Confirmed three times.} On the bench ch2 ran positive alongside
-      three negative channels and came out best, ratio 0.01--0.03 against ch0's
-      0.08. A fixed-frequency refit then put ch2's residue at $+13.573$ against
-      $-7.851 / -8.867 / -5.282$, in \textbf{both} modes.
-
-      \vspace{2mm}
-      \alert{This is not a bug and must never be ``corrected''.} The simulator
-      encodes it as \texttt{COIL\_GAIN[2]} $= -4.15$.
-    \end{column}
-  \end{columns}
-\end{frame}
-\note{Channel two is the story that keeps paying off.
-
-The v0 campaign fits an exponential decay to each channel with all four damping
-together. A2 has the largest decay constant of the four, 0.2796 per second, and
-it was running at plus 0.010 while the others ran at minus 0.030. A positive gain
-on a correctly-wired channel would pump the resonance, not damp it. The only
-consistent reading is that channel two's coil or OSEM is mounted the other way
-round.
-
-It has now been confirmed three separate ways. The decay fit. A four-channel
-bench run where ch2 came out the best-damping axis. And a fixed-frequency refit
-that put ch2's residue at plus 13.573 against roughly minus 8 for the others, in
-both modes rather than one. So the most effective channel of the four was also
-the most under-driven, which is where the diagonal-reallocation item on the open
-list comes from.
-
-The R-squared values behind the decay fits are 0.65 to 0.92, so one significant
-figure is the honest precision.}
+And channels four to seven sit at zero because nobody knows which way their coils
+push. A guessed sign there would feed the motion.}
 
 % ================================================================ 10
-\begin{frame}{The gain schedule, and the baseline everything scales off}
+\begin{frame}{The gain is not one fixed number}
+  \scriptsize
   \begin{columns}[T]
-    \begin{column}{0.53\textwidth}
-      \footnotesize
-      \begin{align*}
-        \mathrm{RMS}_{\mathrm{base}} &= \sqrt{\tfrac{1}{N}\textstyle\sum \mathrm{bp}(t_i)^2}
-          \quad \text{at gain} = 0 \\
-        r(t) &= \mathrm{RMS}_{\mathrm{win}}[\mathrm{bp}(t)] \big/ \mathrm{RMS}_{\mathrm{base}} \\
-        K(t) &= K_{\mathrm{steady}} + s(r)\,(K_{\mathrm{cap}} - K_{\mathrm{steady}}) \\
-        s(r) &= \mathrm{clip}\!\left(\tfrac{r-0.2}{0.4},\,0,\,1\right)
-      \end{align*}
+    \begin{column}{0.50\textwidth}
+      \textbf{What a gain schedule is.} The gain changes with \emph{how far the
+      mirror currently is from rest}. Two values are declared, a
+      \textbf{steady} one for small motion and a \textbf{capture} one for large,
+      and the controller blends between them.
 
-      \vspace{2mm}
-      {\footnotesize Slew-limited at \texttt{GAIN\_SLEW\_PER\_S} $= 0.02$, so no
-      gain step can itself kick a transient. The same ramp is the startup
-      soft-start: $0 \to$ capture gain in 1.75\,s.}
+      \vspace{1.5mm}
+      \textbf{How ``far from rest'' is measured.} Once per run, gain forced to
+      zero, the controller records the typical size of the sensor signal: the
+      \textbf{baseline}, meaning this room tonight with nothing driving.
+      Everything afterwards is a \textbf{ratio} to it, so $r = 1$ is ``as lively
+      as when we were not pushing''.
+
+      \vspace{1.5mm}
+      \textbf{The blend.} Full capture above $r = 0.6$, tapering to steady by
+      $r = 0.2$, rate-limited to $0.02$ per second so no gain change can itself
+      jolt the mirror. That ramp is also the startup soft-start, 1.75\,s.
+
+      \vspace{1.5mm}
+      \textbf{In the shipping controller both values are $\pm 0.035$.} The
+      blend therefore does nothing, and the rate limit and soft-start are its
+      only live effects. \alert{\textbf{No reason for having two levels is recorded
+      anywhere in the project.}}
     \end{column}
-    \begin{column}{0.45\textwidth}
+    \begin{column}{0.48\textwidth}
       \centering
       \begin{tikzpicture}
-        \begin{axis}[width=5.8cm, height=4.0cm,
-                     xlabel={ratio $r$ (amplitude / own baseline)},
-                     ylabel={$|K|$}, scaled y ticks=false,
+        \begin{axis}[width=5.8cm, height=3.6cm,
+                     xlabel={$r$ = amplitude / own baseline},
+                     ylabel={$|K_p|$}, scaled y ticks=false,
                      xmin=0, xmax=1.0, ymin=0.028, ymax=0.037,
                      axis lines=left, ytick={0.030,0.035},
                      yticklabels={$0.030$, $0.035$}]
@@ -534,80 +564,49 @@ figure is the honest precision.}
           \draw[dashed] (axis cs:0.35,0.028) -- (axis cs:0.35,0.037);
           \node[font=\scriptsize, anchor=west] at (axis cs:0.36,0.0295) {lock line 0.35};
         \end{axis}
-      \end{tikzpicture}
+      \end{tikzpicture}\\
+      {\scriptsize The declared shape. Shown with two distinct levels; the
+      shipping controller sets both to $0.035$.}
+
+      \vspace{2mm}
+      \raggedright
+      \textbf{That one baseline does three jobs}, which is why so much later
+      work is about how it is measured:
+      \begin{itemize}\setlength{\itemsep}{1pt}
+        \item the runaway breaker trips above $1.8 \times$ baseline
+        \item the blend runs between $0.2\times$ and $0.6\times$
+        \item \texttt{LOCKED} means below $0.35\times$, held 5\,s
+      \end{itemize}
     \end{column}
   \end{columns}
-  \vspace{2mm}
-  \centering\footnotesize
-  \textbf{One number, three jobs.} The runaway breaker trips above
-  $1.8\times$ baseline. The scheduler blends between $0.2\times$ and
-  $0.6\times$. \texttt{LOCKED} means below $0.35\times$ held for 5\,s.
-
-  \vspace{1mm}
-  \alert{Everything downstream of calibration is a ratio against this one
-  number, measured once, in one window.}
 \end{frame}
-\note{Two more pieces of the baseline law.
+\note{Two ideas here, and neither is standard vocabulary, so take them slowly.
 
-The gain schedule blends between each channel's steady gain and its stronger
-capture gain according to how large the oscillation is relative to that channel's
-own calibrated baseline. Full capture above 0.6 of baseline, tapering to steady
-by 0.2, every change slew-limited at 0.02 per second so the gain change cannot
-itself kick the optic. That ramp is also the startup soft-start.
+A gain schedule just means the gain is not one fixed number: it changes with how
+far the mirror currently is from rest. Two values are declared, a steady one for
+small motion and a stronger capture one for large motion, and the controller
+blends between them.
 
-The load-bearing part is baseline RMS. It is measured once per calibration with
-the gain forced to zero, and three different things scale off it. The runaway
-breaker trips above 1.8 times baseline. The scheduler blends between 0.2 and 0.6.
-The lock detector, which produces the run's actual deliverable, fires below 0.35
-times baseline held for five seconds.
+That needs a yardstick for how far from rest, and the yardstick is the baseline.
+Once per run, with the gain forced to zero, the controller records the typical
+size of the sensor signal. That is this room on this night with nothing driving.
+Everything afterwards is quoted as a ratio to it, so a ratio of one means as
+lively as when we were not pushing.
 
-That is a lot of weight on one number measured in one window, and it is why four
-separate versions spend their effort on when and how that number is measured.}
+The blend is full capture above 0.6 of baseline, tapering to steady by 0.2, and
+every change is rate-limited to 0.02 per second so that the gain change cannot
+itself jolt the mirror. That same ramp is the startup soft-start.
 
-% ================================================================ 11
-\begin{frame}{Three layers, one wire}
-  \centering
-  \begin{tikzpicture}[node distance=8mm]
-    \node[blk, minimum width=3.0cm] (ctl) {\texttt{osem.vN.py}: control law, safety, logging};
-    \node[blk, minimum width=3.0cm, below=of ctl] (py) {\texttt{pyDAC.py}: transport};
-    \node[blk, minimum width=3.0cm, below=of py] (ino) {\texttt{arduino.ino}: ADC stream $+$ AD5628 SPI};
-    \draw[flow] (ctl) -- node[right, font=\scriptsize] {\texttt{set\_voltage(ch, V)}} (py);
-    \draw[flow] (py) -- node[right, font=\scriptsize] {serial @ 500000} (ino);
-    \draw[flow] (ino.west) -- ++(-1.0,0) |- node[pos=0.25, left, font=\scriptsize, align=right]
-      {counts\\0--1023} (ctl.west);
-  \end{tikzpicture}
+Now the honest part. In the shipping controller both values are the same, plus or
+minus 0.035. So the blend does nothing at all, and the rate limit and soft-start
+are the only live effects of the schedule. And I could not find any recorded
+justification for having two levels in the first place, in the source, in the
+version notes or anywhere else. I am flagging that rather than inventing a
+motivation for it.
 
-  \vspace{3mm}
-  {\footnotesize
-  \begin{tabular}{@{}lll@{}}
-    \toprule
-    direction & message & meaning \\
-    \midrule
-    MCU $\to$ host & \texttt{READY} & sent once after \texttt{setup()} \\
-    host $\to$ MCU & \texttt{SET <ch> <volts>} & sets DAC 0--7; replies \texttt{OK ch=.. v=..} \\
-    host $\to$ MCU & \texttt{STREAM} / \texttt{STOP} & replies \texttt{STREAMING} / \texttt{STOPPED} \\
-    MCU $\to$ host & \texttt{a0,...,a7} & free-running ADC counts, one line per loop \\
-    \bottomrule
-  \end{tabular}}
-
-  \vspace{2mm}
-  {\footnotesize Opening the port toggles DTR, resets the board and zeroes all
-  eight DAC channels: \textbf{connecting is itself a safing action}.
-  \alert{\texttt{OK ch=.. v=..} shares the wire with the data rows}, which is
-  defect 7.}
-\end{frame}
-\note{The stack is three layers across one language boundary. The Arduino sketch
-owns the ADC and the SPI DAC. pyDAC is pure transport: open the port, wait for
-READY, turn set-voltage calls into SET commands. The controller owns the control
-law, the safety interlocks and the logging.
-
-Two details to carry forward. First, SET commands and the sample stream share one
-wire, so an OK acknowledgement arrives buried inside sample lines. That costs the
-loop rate on the next slide, and it produces the worst defect in the deck.
-
-Second, a safety property that comes free: opening the serial port toggles DTR,
-which resets the board, and the sketch's setup function zeroes all eight DAC
-channels before anything else runs. Merely connecting de-energises the coils.}
+The right-hand list is why the baseline matters out of proportion to its size.
+One number, measured once in one window, sets the fault threshold, the gain blend
+and the definition of success.}
 
 % ================================================================ 12
 \begin{frame}{The wire is the bottleneck, and the loop rate falls with coil count}
@@ -662,7 +661,7 @@ channels before anything else runs. Merely connecting de-energises the coils.}
       \alert{Less sensitive exactly as the rig got harder to control.}
 
       \vspace{1.5mm}
-      \alert{And it costs phase.} Margin at 3.75\,Hz: \textbf{73.5$^\circ$} on
+      And it costs phase. Margin at 3.75\,Hz: \textbf{73.5$^\circ$} on
       4 coils, \textbf{45.5$^\circ$} on 8, \textbf{105.0$^\circ$} once the ack
       wait goes. \textbf{Every gain in the rig was fixed on a 4-coil loop.}
     \end{column}
@@ -680,81 +679,16 @@ comparing runs. 357.1 hertz while calibrating, where no coil is written, and 18.
 while damping five coils. Same optic, same minute, a factor of 19.6 that is purely
 the transport.
 
-That reframes the minus 0.040 claim. It was measured on one coil at 73 hertz. The
-phase budget makes it concrete: 73.5 degrees of margin at 3.75 hertz on four
-coils, 45.5 on eight, and 105.0 once the ack wait is removed. Whatever minus 0.040
-means, it was not measured on the loop we run now.
+That also fixes what the gains mean. The phase budget makes it concrete: 73.5
+degrees of margin at 3.75 hertz on four coils, 45.5 on eight, and 105.0 once the
+ack wait is removed. Every gain in the rig was fixed on the four-coil loop, so
+carrying those gains onto eight coils halves the margin they were chosen with.
 
 And exactly one threshold in the codebase was counted in samples rather than
 seconds. Thirty consecutive saturated samples is 0.41 seconds on one coil and
 2.40 on eight, so the saturation interlock got less sensitive precisely as the rig
 got harder to control.}
 
-% ================================================================ 13
-\begin{frame}{Four sensors, one rigid body}
-  \begin{columns}[T]
-    \begin{column}{0.42\textwidth}
-      \centering
-      \begin{tikzpicture}[scale=0.95]
-        \draw[thick, fill=gray!10] (-1.6,-1.6) rectangle (1.6,1.6);
-        \foreach \x/\y/\n in {-1.6/-1.6/A0, -1.6/1.6/A1, 1.6/-1.6/A2, 1.6/1.6/A3}
-          \filldraw (\x,\y) circle (2.2pt) node[font=\scriptsize, inner sep=4pt,
-            anchor={\ifdim\x pt<0pt east\else west\fi}] {\n};
-        \draw[->] (-2.3,0) -- (2.3,0) node[right, font=\scriptsize] {$x$};
-        \draw[->] (0,-2.3) -- (0,2.3) node[above, font=\scriptsize] {$y$};
-      \end{tikzpicture}\\
-      {\scriptsize $z_i = \mathrm{LONG} + \mathrm{PITCH}\cdot y_i
-                          + \mathrm{YAW}\cdot x_i$}
-    \end{column}
-    \begin{column}{0.56\textwidth}
-      {\footnotesize
-      \begin{tabular}{@{}lcccc@{}}
-        \toprule
-        mode & $z_0$ & $z_1$ & $z_2$ & $z_3$ \\
-        \midrule
-        LONG      & $+$ & $+$ & $+$ & $+$ \\
-        PITCH     & $-$ & $+$ & $-$ & $+$ \\
-        YAW       & $-$ & $-$ & $+$ & $+$ \\
-        \textbf{BUTTERFLY} & $+$ & $-$ & $-$ & $+$ \\
-        \bottomrule
-      \end{tabular}}
-
-      \vspace{2mm}
-      \footnotesize
-      \textbf{Four sensors, three rigid-body freedoms.} BUTTERFLY is identically
-      zero for a rigid body, so any reading in it is one sensor disagreeing with
-      the other three.
-
-      \vspace{2mm}
-      \textbf{Two measured consequences the project rests on.} One OSEM/coil
-      pair damps the \emph{whole} mass, $\approx$70\,s. Four together settle it
-      in $\approx$17\,s.
-
-      \vspace{1mm}
-      That $4\times$ is why v1 exists, and it is why a quorum of \emph{one}
-      healthy channel is enough.
-    \end{column}
-  \end{columns}
-\end{frame}
-\note{The four OSEMs are not four independent oscillators. They are four sensors
-watching one mass, so their readings are projections of the same few degrees of
-freedom.
-
-With four corners and three rigid-body freedoms there is a fourth combination,
-butterfly, that no rigid-body motion can produce. Any signal there is one sensor
-disagreeing with the other three, which is a consistency check that needs no
-threshold in ADC counts. Remember it: the MIMO slide in Part V is about losing
-exactly this check.
-
-Two measured facts follow. Driving a single OSEM-coil pair damps all four
-channels, about seventy seconds for the whole system. Running four independent
-loops together settles it in about seventeen. That four-fold improvement is the
-justification for v1, and the seventy-second single-channel result is what later
-justifies letting the rig run on one healthy axis.
-
-Note what this is not: it is still four independent SISO loops. Each OSEM only
-ever drives its own coil. There is no decoupling between modes anywhere in the
-ladder.}
 
 % ================================================================ 14
 \begin{frame}{The supervisor: three states}
@@ -779,35 +713,27 @@ ladder.}
   returns every DAC channel to bias.}
 
   \vspace{1mm}
-  {\footnotesize \alert{What does \emph{not} run in \texttt{FAULT}:} the gain
+  {\footnotesize What does \emph{not} run in \texttt{FAULT}: the gain
   schedule, the runaway check and the lock update. Any flag those set on the way
   in is therefore never recomputed while the fault is held.}
 \end{frame}
 \note{One string variable, three values. It gates actuation and is written to
-every CSV row. The simulator drives the shipping code through this same state
+every CSV row, and the simulator drives the shipping code through this same state
 machine rather than reimplementing it.
 
-Calibrating: gains forced to zero, outputs held at bias, accumulating the squared
-bandpassed signal. On exit it sets baseline RMS.
+Two structural points. There is no way out of DAMPING except into FAULT, and no
+terminal state: Ctrl-C leaves through a finally block that returns every DAC
+channel to bias.
 
-Damping: the only state that actuates. Per sample it schedules gains, checks for
-runaway, updates the lock detector, and actuates.
-
-Fault: all outputs to bias, gain zeroed every sample, waiting for five seconds of
-all-clear before recalibrating.
-
-Two structural notes. There is no way out of DAMPING except into FAULT, and no
-terminal state. Ctrl-C leaves through a finally block that returns every DAC
-channel to bias and closes the log.
-
-And note what does not run in FAULT: the schedule update, the runaway check and
-the lock update are all skipped. That omission is the first defect.}
+And the box at the bottom is the first defect. The schedule update, the runaway
+check and the lock update are all skipped in FAULT, so a flag set on the way in
+is never recomputed.}
 
 % ================================================================ PART II
-\section{The ladder: v0 to v3}
+\section{The ladder}
 
 % ================================================================ 15
-\begin{frame}{v0: the baseline}
+\begin{frame}{\texttt{zero}: the original}
   \begin{columns}[T]
     \begin{column}{0.55\textwidth}
       \footnotesize
@@ -815,7 +741,7 @@ the lock update are all skipped. That omission is the first defect.}
       P-only: $u = -K\cdot v$, \texttt{KI\_GAIN} $=$ \texttt{KD\_GAIN} $= 0$.
 
       \vspace{2mm}
-      \textbf{What v0 got right, and every version since inherits:}
+      \textbf{What \texttt{zero} got right, and every version since inherits:}
       \begin{enumerate}\setlength{\itemsep}{1pt}
         \item Runs continuously, not as fixed-duration sweep steps.
         \item Measures its \emph{own} baseline every restart.
@@ -833,7 +759,7 @@ the lock update are all skipped. That omission is the first defect.}
       {\scriptsize
       \begin{tabular}{@{}lr@{}}
         \toprule
-        \multicolumn{2}{@{}l}{\textbf{v0, through \texttt{harness.py}}} \\
+        \multicolumn{2}{@{}l}{\textbf{\texttt{zero}, through \texttt{harness.py}}} \\
         \midrule
         ch0 amplitude ratio & 0.188 \\
         time to lock        & 12.1\,s \\
@@ -846,16 +772,16 @@ the lock update are all skipped. That omission is the first defect.}
       \vspace{3mm}
       \footnotesize
       \raggedright
-      \textbf{Three defects shipped with it}, present in v0, v1 and v2:
-      \texttt{saturation-latch}, \texttt{rail-threshold},
-      \texttt{runaway-baseline}.
+      \textbf{Three defects shipped with it} and survived into the next two
+      builds: \texttt{saturation-latch}, \texttt{rail-threshold},
+      \texttt{runaway-baseline}. All three are fixed in \texttt{alpha}.
 
       \vspace{2mm}
-      Plus a fourth nobody found until v9, and a fifth until v12.
+      Plus a fourth nobody found until \texttt{beta}, and a fifth until \texttt{delta}.
     \end{column}
   \end{columns}
 \end{frame}
-\note{v0 is the 2026-07-15 bench configuration: channel zero only, pure velocity
+\note{the zero build is the 2026-07-15 bench configuration: channel zero only, pure velocity
 feedback, I and D zeroed. It is the only entry in the ladder confirmed against a
 scope.
 
@@ -867,159 +793,15 @@ zero, and the bandpassed signal then flatlines near zero, which looks like
 perfect stability to an RMS check at the exact moment the sensor has gone blind.
 So rail state is checked on raw counts, not on scaled voltage.
 
-It shipped three defects, a fourth nobody found until v9, and a fifth until v12.}
-
-% ================================================================ 16
-\begin{frame}{v1: one line changed}
-  \centering
-  \begin{tikzpicture}
-    \begin{axis}[width=10.0cm, height=3.6cm, xbar, bar width=13pt,
-                 symbolic y coords={four channels, one channel},
-                 ytick=data, xmin=0, xmax=82,
-                 xlabel={settling time (s), measured},
-                 nodes near coords,
-                 every node near coord/.append style={font=\scriptsize},
-                 enlarge y limits=0.55]
-      \addplot coordinates {(70,one channel) (17,four channels)};
-    \end{axis}
-  \end{tikzpicture}
-
-  \vspace{1mm}
-  \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      \footnotesize
-      \texttt{ENABLE\_CHANNEL = [True]*4}. Nothing else moved: same gains,
-      filters, safety code, same three defects.
-
-      \vspace{2mm}
-      v0's docstring claim that only ch0 was validated was \textbf{already two
-      days out of date}. \S4 of the report documents all four damping
-      simultaneously.
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \footnotesize
-      \textbf{Why $4\times$, when it is still four SISO loops?} The four loops
-      act \emph{in parallel} over the coupled modes, so the overall rate is
-      closer to the \emph{sum} of their contributions than to the slowest
-      single coupling path.
-
-      \vspace{2mm}
-      Measured: ch0 ratio $0.188 \to \mathbf{0.025}$, lock
-      $12.1 \to \mathbf{10.7}$\,s.
-    \end{column}
-  \end{columns}
-\end{frame}
-\note{v1 is a one-line diff: enable all four channels. Seventy seconds down to
-seventeen.
-
-And this is still four independent SISO loops. No MIMO, no decoupling, each OSEM
-driving only its own coil. The gain comes from parallel coverage of the coupled
-modes.
-
-Note the quirk. v0 shipped with three of four channels disabled and a docstring
-saying only channel zero was validated, but the measurement showing all four
-damping together was already two days old. v1 is the repo catching up to its
-own evidence.}
-
-% ================================================================ 17
-\begin{frame}{v2: I and D switched on, and the prediction that held}
-  \centering
-  \begin{tikzpicture}
-    \begin{axis}[width=9.6cm, height=3.8cm, ybar, bar width=20pt,
-                 symbolic x coords={v0 (ch0 only), v1 (P-only), v2 (full PID), v3 (full PID)},
-                 xtick=data, ymin=0, ymax=0.23,
-                 ylabel={ch0 amplitude ratio},
-                 nodes near coords={\pgfmathprintnumber[fixed,zerofill,precision=3]{\pgfplotspointmeta}},
-                 every node near coord/.append style={font=\scriptsize},
-                 x tick label style={font=\scriptsize},
-                 enlarge x limits=0.16]
-      \addplot coordinates {(v0 (ch0 only),0.188) (v1 (P-only),0.025)
-                            (v2 (full PID),0.028) (v3 (full PID),0.029)};
-    \end{axis}
-  \end{tikzpicture}
-
-  \vspace{1mm}
-  {\footnotesize
-  \textbf{I and D bought nothing in damping}, as predicted, because neither
-  dissipates. On hardware v2 was \emph{worse}: its integrator was non-zero in
-  \textbf{63\%} of samples and pushed the pinned-actuator streak from
-  \textbf{28 to 31} against a threshold of \textbf{30}.
-
-  \vspace{2mm}
-  Peak $|I|$ was $0.084$\,V against a $0.150$\,V clamp, so
-  \textbf{\texttt{I\_CLAMP\_V} never engaged}. Bounded is not the same as
-  unwinding, which is why v3 replaces the clamp with back-calculation.}
-\end{frame}
-\note{v2 gives Ki and Kd real values for the first time. The PID structure had
-been in the file since v0; both gains were simply zero.
-
-The measured result: no better damping, 0.028 against v1's 0.025, which is
-noise. Exactly what the docstring predicted, for the reason on the P-I-D slide.
-
-But it was not neutral. On hardware v2 was actively worse, and in a way that
-sets up the next three slides. Its integrator was non-zero in 63 percent of
-samples and it pushed the longest pinned-actuator streak from 28 samples to 31
-against a threshold of 30. Three samples either side of that threshold is the
-whole difference between a fault that clears in five seconds and one that needs
-a human.
-
-Peak integrator output was 0.084 volts against a 0.150 volt clamp. The clamp
-never engaged. Bounded is not the same as unwinding.
-
-One caveat the repo is careful about: this was not isolated from Kd. A clean test
-would zero one and keep the other.}
-
-% ================================================================ 18
-\begin{frame}{On the bench, 2026-08-03: the only hardware evidence for v1--v3}
-  \centering
-  {\footnotesize
-  \begin{tabular}{@{}lccc@{}}
-    \toprule
-     & \textbf{v1} & \textbf{v2} & \textbf{v3} \\
-    \midrule
-    Law                        & P-only & full PID & full PID \\
-    Lock time                  & 13.8\,s & 13.9\,s & 14.5\,s \\
-    Baseline (ch0)             & 0.6316\,V & 0.3158\,V & 0.1804\,V \\
-    Peak $|\mathrm{bp}|$       & 3.141\,V & 2.837\,V & 0.410\,V \\
-    ADC clipped                & 2.19\% & \textbf{10.40\%} & 0.00\% \\
-    Samples with non-zero $I$  & 0 of 6939 & 4709 of 7513 & all \\
-    Longest pinned run         & 28 & \textbf{31} & 0 \\
-    Trip type                  & runaway & \textbf{saturation} & none \\
-    Outcome                    & recovered in 5.0\,s & \alert{\textbf{latched $\sim$50\,s}} & no fault \\
-    \bottomrule
-  \end{tabular}}
-
-  \vspace{3mm}
-  {\footnotesize
-  \alert{Do not compare \texttt{ratio} across these runs.} It is normalised to
-  each run's own baseline and those differ by $3.5\times$. Normalising the
-  absolute locked RMS gives $0.139 / 0.128 / 0.115$: indistinguishable.
-  \textbf{These runs rank failure behaviour, not damping quality.}}
-\end{frame}
-\note{First hardware runs since v0. This table is the only hardware evidence in
-the repo for v1, v2 and v3.
-
-Read across the bottom four rows. v1 clipped the ADC on 2.19 percent of samples,
-never got its integrator going, reached a 28-sample pinned run, tripped the
-runaway breaker and cleared in five seconds. v2 clipped ten percent, ran its
-integrator most of the time, reached 31 samples against a threshold of 30,
-tripped saturation instead, and latched a fault for the remaining fifty seconds.
-
-The last line is the discipline point. The ratio column is normalised to each
-run's own baseline, and those baselines differ by three and a half. Normalise the
-absolute locked RMS instead and you get 0.139, 0.128 and 0.115: indistinguishable.
-These runs prove things about failure behaviour. They do not rank the three
-versions on damping quality.
-
-That baseline spread is itself defect 3, and it is three slides away.}
+It shipped three defects, a fourth nobody found until beta, and a fifth until delta.}
 
 % ================================================================ 19
 \begin{frame}{Defect 1: \texttt{saturation-latch}}
   \begin{columns}[T]
     \begin{column}{0.50\textwidth}
       \footnotesize
-      \rawdata\ v2 on the bench, ch0 output against the \texttt{VMAX} $= 0.5$\,V
-      rail:
+      \rawdata\ An early four-channel run, ch0 output against the
+      \texttt{VMAX} $= 0.5$\,V rail:
 
       \vspace{1mm}
       \centering
@@ -1031,19 +813,20 @@ That baseline spread is itself defect 3, and it is three slides away.}
         0.4987 & 0 \\
         0.5000 & 1 \\
         $\;\;\vdots$ & $\;\;\vdots$ \\
-        0.5000 & 30 \quad\rm\alert{trip} \\
+        0.5000 & 30 \quad\rm trip \\
         0.5000 & 31 \\
         \bottomrule
       \end{tabular}}
 
       \vspace{1.5mm}
       \raggedright
-      v1 reached \textbf{28} and never tripped. v2's integrator added the three
-      samples that crossed \textbf{30}.
+      Without the integral term the streak reached \textbf{28} and never
+      tripped. Switching it on added the three samples that crossed
+      \textbf{30}.
 
       \vspace{1.5mm}
       \textbf{The smoking gun.} Across \textbf{16{,}966} \texttt{FAULT} samples
-      v2 logged \textbf{one} distinct ratio value: \textbf{3.6803}.
+      \alert{the run logged \textbf{one} distinct ratio value: \textbf{3.6803}.}
     \end{column}
     \begin{column}{0.47\textwidth}
       \footnotesize
@@ -1061,20 +844,20 @@ That baseline spread is itself defect 3, and it is three slides away.}
           node[pos=0.5, font=\tiny, align=center, fill=white, inner sep=1pt]
           {needs\\\texttt{all\_clear}} (D.west);
       \end{tikzpicture}\\
-      {\scriptsize \alert{The flag can never clear: permanent fault.}}
+      {\scriptsize The flag can never clear: permanent fault.}
 
       \vspace{1.5mm}
       \raggedright
       A \emph{runaway} trip recovered fine. \textbf{Only saturation deadlocked.}
 
       \vspace{1.5mm}
-      \thefix\ v3 maintains the flag in \texttt{actuate()}, so it refreshes every
+      \thefix\ \texttt{alpha} maintains the flag in \texttt{actuate()}, so it refreshes every
       sample in every state. In \texttt{FAULT} the output is at bias, so it
       clears itself.
 
       \vspace{1mm}
-      v2 latched $\sim$50\,s. \textbf{v3, same bench: 0 pinned samples, 0.00\%
-      ADC clipped, no fault.}
+      That run latched $\sim$50\,s. \textbf{With the fix, same bench: 0 pinned
+      samples, 0.00\% ADC clipped, no fault.}
     \end{column}
   \end{columns}
 \end{frame}
@@ -1082,11 +865,11 @@ That baseline spread is itself defect 3, and it is three slides away.}
 hardware.
 
 The data column is the mechanism. The saturation interlock counts consecutive
-samples with the output pinned at a rail. v1 reached 28 against a threshold of
-30 and never tripped. v2's integrator contributed the extra push and the streak
-reached 31. Three samples decided whether the run recovered.
+samples with the output pinned at a rail. Without the integral term the streak
+reached 28 against a threshold of 30 and never tripped. Switching the integral
+term on contributed the extra push and the streak reached 31. Three samples decided whether the run recovered.
 
-The failure is not the trip, it is what happens next. v0 recomputes the
+The failure is not the trip, it is what happens next. the zero build recomputes the
 saturated flag only inside check-runaway, and check-runaway does not run in the
 FAULT state. So a saturation trip sets the flag, enters FAULT, and nothing can
 ever clear it: permanent fault requiring a manual restart, in a module that
@@ -1100,7 +883,7 @@ sixteen thousand different values.
 
 The fix is to maintain the flag in actuate, where the output is actually known,
 so it refreshes every sample in every state. In FAULT the output is held at bias,
-so it clears on its own. v3 on the same bench had zero pinned samples and no
+so it clears on its own. alpha on the same bench had zero pinned samples and no
 fault at all.}
 
 % ================================================================ 20
@@ -1108,7 +891,7 @@ fault at all.}
   \begin{columns}[T]
     \begin{column}{0.50\textwidth}
       \footnotesize
-      \rawdata\ v0's test: raw counts below \texttt{RAIL\_LOW\_COUNTS} $= 3$ of
+      \rawdata\ \texttt{zero}'s test: raw counts below \texttt{RAIL\_LOW\_COUNTS} $= 3$ of
       1023, i.e. \textbf{14.7\,mV}, for \textbf{250 consecutive} samples.
 
       \vspace{1mm}
@@ -1123,7 +906,7 @@ fault at all.}
         \midrule
         0 1 2 0 1 & 5 \\
         0 2 1 3 0 & 10 \\
-        \alert{4} & \alert{$\to$ 0} \\
+        4 & $\to$ 0 \\
         1 0 2 & 3 \\
         \bottomrule
       \end{tabular}}
@@ -1134,7 +917,7 @@ fault at all.}
       blind the whole time.
 
       \vspace{2mm}
-      \textbf{On hardware:} v1 logged \textbf{246} genuinely clipped ADC samples
+      \textbf{On hardware:} a four-channel run logged \textbf{246} genuinely clipped ADC samples
       (2.19\% of the run) and \alert{\textbf{the rail flag never set once}}.
     \end{column}
     \begin{column}{0.47\textwidth}
@@ -1145,7 +928,7 @@ fault at all.}
       the rack} while the loop declares itself locked on a dead sensor.
 
       \vspace{2mm}
-      \thefix\ v3: threshold 3 $\to$ \textbf{12 counts}, and the test becomes
+      \thefix\ \texttt{alpha}: threshold 3 $\to$ \textbf{12 counts}, and the test becomes
       \textbf{80\% of a 0.5\,s window} instead of an unbroken run. Noise now
       \emph{dilutes} the evidence instead of erasing it.
 
@@ -1165,13 +948,13 @@ fault at all.}
                      nodes near coords={\pgfmathprintnumber[fixed,zerofill,precision=2]{\pgfplotspointmeta}},
                      every node near coord/.append style={font=\tiny}]
           \addplot coordinates {(1,0.51) (2,0.51)};
-          \addlegendentry{v0/v1/v2}
+          \addlegendentry{before the fix}
           \addplot coordinates {(1,0.41) (2,0.41) (3,0.41) (4,0.41)};
-          \addlegendentry{v3 onward}
+          \addlegendentry{after}
           \node[font=\tiny, anchor=south, align=center] at (axis cs:2.85,0.46)
-            {\alert{never}\\\alert{arms}};
+            {never\\arms};
           \node[font=\tiny, anchor=south, align=center] at (axis cs:3.85,0.46)
-            {\alert{never}\\\alert{arms}};
+            {never\\arms};
         \end{axis}
       \end{tikzpicture}
     \end{column}
@@ -1179,7 +962,7 @@ fault at all.}
 \end{frame}
 \note{The second defect is a threshold sitting in the noise.
 
-v0 required raw counts below 3 out of 1023, about fifteen millivolts, for 250
+the zero build required raw counts below 3 out of 1023, about fifteen millivolts, for 250
 consecutive samples. The word consecutive is the bug. The little table is the
 whole mechanism: a blind channel pinned at zero still has about a count of dark
 noise, so every so often a sample pokes above 3 and resets the counter to zero.
@@ -1190,13 +973,13 @@ flatlines, so it reports an amplitude ratio near zero and reads as the steadiest
 axis on the rack, while the loop stays in DAMPING and declares itself locked on
 a dead sensor.
 
-v3 moves the threshold to 12 counts and, more importantly, changes the test from
+alpha moves the threshold to 12 counts and, more importantly, changes the test from
 an unbroken run to eighty percent of a half-second window. Noise now dilutes the
 evidence instead of erasing it. The chart shows it: at ten and twenty millivolts
-of injected noise the old interlock never arms at all, while v3 arms in 0.41
+of injected noise the old interlock never arms at all, while alpha arms in 0.41
 seconds regardless.
 
-Reproduced on hardware: v1 logged 246 genuinely clipped ADC samples, 2.19 percent
+Reproduced on hardware: a four-channel run logged 246 genuinely clipped ADC samples, 2.19 percent
 of the run, and the rail flag never set once, because the clipping is transient
 and the check needed 250 in a row.}
 
@@ -1212,7 +995,7 @@ and the check needed 250 in a row.}
       {\scriptsize
       \begin{tabular}{@{}lccc@{}}
         \toprule
-        & v1 & v2 & \textbf{v3} \\
+        & run 1 & run 2 & \textbf{run 3} \\
         \midrule
         baseline (V) & 0.6316 & 0.3158 & \textbf{0.1804} \\
         runaway line, $1.8\times$ & 1.137 & 0.568 & \textbf{0.325} \\
@@ -1223,8 +1006,8 @@ and the check needed 250 in a row.}
       \vspace{2mm}
       \raggedright
       \textbf{A $3.5\times$ spread in the floor is a $3.5\times$ spread in every
-      threshold derived from it.} v1 could call itself \texttt{LOCKED} at 0.221\,V
-      of residual motion where v3 needed 0.063\,V.
+      threshold derived from it.} Run 1 could call itself \texttt{LOCKED} at 0.221\,V
+      of residual motion where \texttt{alpha} needed 0.063\,V.
 
       \vspace{2mm}
       \textbf{Absolute locked RMS, normalised:} $0.139 / 0.128 / 0.115$.
@@ -1237,18 +1020,18 @@ and the check needed 250 in a row.}
       breaker and makes the lock claim easy to satisfy.
 
       \vspace{2mm}
-      \thefix\ v3: calibrate 20\,s, take the \textbf{median of 5 sub-windows},
+      \thefix\ \texttt{alpha}: calibrate 20\,s, take the \textbf{median of 5 sub-windows},
       so one bad sub-window is outvoted. Worst shock skew
       $39.3\% \to \mathbf{19.7\%}$ against a 35\% assertion line (simulator,
       one 6\,V/s impulse swept across the window).
 
       \vspace{2mm}
-      \alert{\textbf{Improved, not solved.}} Gain is zero during calibration, so
+      \textbf{Improved, not solved.} Gain is zero during calibration, so
       a shock rings down over a timescale comparable to the window and there is
       no clean sub-window left to prefer. The code labels it a partial fix.
 
       \vspace{1mm}
-      \textbf{The completion is v12's \texttt{baseline-sanity}}, and it took
+      \textbf{The completion is \texttt{delta}'s \texttt{baseline-sanity}}, and it took
       nine more versions.
     \end{column}
   \end{columns}
@@ -1259,167 +1042,32 @@ Start with the data, because it makes the cost concrete. Three runs on the same
 rig on the same afternoon calibrated channel zero's floor at 0.6316, 0.3158 and
 0.1804 volts. Everything downstream is a ratio against that number, so the
 runaway trip line moves from 1.137 volts to 0.325, and the lock line from 0.221
-to 0.063. v1 could call itself locked at three and a half times the residual
-motion v3 required.
+to 0.063. Run one could call itself locked at three and a half times the residual
+motion alpha required.
 
 And we know the optic was not actually behaving differently, because the absolute
 locked RMS normalises to 0.139, 0.128 and 0.115. Equally well damped. Only the
 yardstick moved.
 
-v0 measured the baseline as a single RMS over one 8-second window. v3 calibrates
+the zero build measured the baseline as a single RMS over one 8-second window. alpha calibrates
 for twenty seconds and takes the median of five sub-windows, so one bad
 sub-window gets outvoted. Worst-case skew 39.3 percent down to 19.7, against an
 assertion line at 35.
 
-Read that as a bound rather than a ranking. On a retired seven-point sweep v0
-came out better than v3 at two of the shock times. What the median buys is a
+Read that as a bound rather than a ranking. On a retired seven-point sweep the zero build
+came out better than alpha at two of the shock times. What the median buys is a
 bound on the damage wherever the transient lands.
 
 It does not help against sustained disturbance, because gain is zero during
 calibration so a shock rings down over a timescale comparable to the window. The
-code labels this a partial fix. The completion is v12's baseline-sanity, and it
+code labels this a partial fix. The completion is delta's baseline-sanity, and it
 took nine more versions to arrive.}
 
-% ================================================================ 22
-\begin{frame}{v3: the control law becomes a real PID}
-  \centering
-  {\footnotesize
-  \begin{tabular}{@{}p{0.30\textwidth}p{0.62\textwidth}@{}}
-    \toprule
-    \textbf{change} & \textbf{why} \\
-    \midrule
-    derivative on \emph{measurement}, not on error
-      & identical while the setpoint is a constant zero, but it cannot produce a
-        derivative kick if that ever changes \\
-    \addlinespace
-    \textbf{back-calculation anti-windup}, \texttt{TRACK\_TC\_S} $= 0.5$\,s
-      & the old scheme froze the accumulator at a hard limit; this bleeds it back
-        at a defined time constant, so recovery from saturation does not depend
-        on which side of a conditional the error fell on \\
-    \addlinespace
-    one \texttt{reset()}, on every entry to a non-actuating state
-      & exactly one definition of bumpless re-entry \\
-    \bottomrule
-  \end{tabular}}
-
-  \vspace{3mm}
-  {\footnotesize
-  Two kinds of change kept separate: \textbf{the control law} above, \textbf{the
-  three defect fixes} on the previous slides. A bench comparison can then
-  attribute an effect to one or the other.
-
-  \vspace{2mm}
-  \texttt{Channel.p\_term} / \texttt{i\_term} / \texttt{d\_term} / \texttt{ki} /
-  \texttt{kd} survive as \emph{properties}, because the logger, the status line
-  and the simulator's live gain editing use those names.
-
-  \vspace{2mm}
-  \textbf{v3 is the minimal PID baseline to A/B against}, and one of four
-  controllers with \texttt{BENCH\_STATUS = validated}.}
-\end{frame}
-\note{v3 does two separable things, and keeping them separate is the point:
-restructure the control law, and fix the three defects.
-
-The control law changes are standard practice. Derivative on measurement rather
-than on error, algebraically the same here but it cannot kick if the setpoint
-ever changes. Back-calculation anti-windup replacing a hard clamp plus
-conditional integration: the old scheme froze the accumulator at a limit, and
-recovery then depended on which side of a conditional the error happened to fall.
-And exactly one reset method, called on every entry to a non-actuating state.
-
-One engineering detail worth noting: the per-channel P, I and D terms survive as
-properties on the Channel object, because the logger, the status line and the
-browser simulator's live gain editing all use those names. Refactors that break
-the observability of a running rig are not free.
-
-v3 is still in the tree and is the minimal PID baseline, the thing to A/B against
-when you want to know whether a supervisor change actually helped. It is also the
-baseline for the Ki/Kd experiment in the open list.}
-
-% ================================================================ PART III
-\section{The fork in the road}
-
-% ================================================================ 23
-\begin{frame}{The v4 that failed: modal (MIMO) damping}
-  \begin{columns}[T]
-    \begin{column}{0.5\textwidth}
-      \footnotesize
-      \textbf{The idea, and it is a good one.} Four loops each fighting a plant
-      the other three are also driving is the wrong decomposition. Control the
-      \emph{motion}, not the sensors:
-      \begin{enumerate}\setlength{\itemsep}{1pt}
-        \item Accumulate the $4\times4$ covariance during calibration. Its
-              eigenvectors \emph{are} the observed modes.
-        \item A new \texttt{SYSID} state: dither each coil in turn, measure how
-              the modes answer, giving the actuation matrix $B$.
-        \item Damp per \emph{mode}; distribute through $B^{+}$.
-      \end{enumerate}
-
-      \vspace{2mm}
-      \textbf{Its own selling point:} it would \emph{discover} that ch2 pushes
-      the other way instead of having to be told.
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \footnotesize
-      \textbf{It did not.} Written and deleted the same day, 2026-08-03.
-
-      \vspace{2mm}
-      \centering
-      {\scriptsize\setlength{\tabcolsep}{3pt}
-      \begin{tabular}{@{}ll@{}}
-        \toprule
-        ground truth & $[-0.59,\, -0.45,\, \mathbf{+2.45},\, -0.51]$ \\
-        \midrule
-        vel $\times$ PRBS & $[+2.0,\, +0.2,\, -0.53,\, -1.27]$ \\
-        acc $\times$ PRBS & $[-0.71,\, -0.47,\, -0.86,\, -1.96]$ \\
-        \bottomrule
-      \end{tabular}}
-
-      \vspace{2mm}
-      \raggedright
-      \textbf{Neither recovered ch2's sign.} Two causes, both diagnosed.
-      Zero-lag correlation on \emph{velocity} has no coherent term, because
-      force acts on \emph{acceleration}. And a $\sim$40-bit PRBS gives
-      $\sim$\textbf{16\%} inter-channel crosstalk, the size of the differences
-      being measured.
-
-      \vspace{2mm}
-      Its \emph{mode estimator} was fine: 98.8\% / 1.2\% mode content.
-    \end{column}
-  \end{columns}
-  \vspace{1mm}
-  \centering\footnotesize
-  \alert{The hand-measured constant beat the automatic method.} The fix is a
-  better measurement, not more cleverness. That becomes v6.
-\end{frame}
-\note{There were two different files called osem.v4.py. This is the first: a
-modal MIMO controller, written and deleted on the same day.
-
-The idea is better than what shipped. Four independent loops on one rigid body is
-the wrong decomposition. So: learn the modes from the covariance of the sensor
-vector during calibration, learn the actuation matrix by dithering each coil,
-damp per mode, distribute through the pseudo-inverse. Its headline selling point
-was that it would discover channel two's inverted sign rather than being told.
-
-It failed at exactly that. Ground truth has channel two at plus 2.45 against
-about minus 0.5 for the others. The velocity-times-PRBS estimate got the sign
-wrong on three of four channels; the acceleration estimate got channel two wrong
-too.
-
-The diagnosis is clean and worth carrying: a zero-lag correlation on velocity has
-no coherent term to find, because force acts on acceleration; and a forty-bit
-PRBS gives about sixteen percent inter-channel crosstalk, the same size as the
-differences being measured. Its mode estimator was fine.
-
-The lesson: the hand-measured constant from a July report beat the automatic
-method. The fix is a better measurement, which becomes v6. And Part V has the
-epilogue, because MIMO is now closed by measurement rather than by failure.}
-
 % ================================================================ PART IV
-\section{The supervisor ladder: v4 to v12}
+\section{The supervisor ladder}
 
 % ================================================================ 24
-\begin{frame}{v4: \texttt{auto-disable}, demote the axis, do not freeze the rig}
+\begin{frame}{\texttt{alpha}: park one blind sensor, do not freeze the rig}
   \begin{columns}[T]
     \begin{column}{0.44\textwidth}
       \centering
@@ -1437,19 +1085,19 @@ epilogue, because MIMO is now closed by measurement rather than by failure.}
     \end{column}
     \begin{column}{0.54\textwidth}
       \footnotesize
-      \textbf{The problem.} v3 freezes all four channels on any one rail. One
-      OSEM losing its flag stops \emph{all} damping, \alert{at the moment of
-      largest excursion}, which is what made the flag leave range.
+      \textbf{The problem.} \texttt{alpha} freezes all four channels on any one rail. One
+      OSEM losing its flag stops \emph{all} damping, at the moment of
+      largest excursion, which is what made the flag leave range.
 
       \vspace{2mm}
-      \textbf{A quorum of one is not a guess}: the v0 campaign measured one
+      \textbf{A quorum of one is not a guess}: the \texttt{zero} campaign measured one
       OSEM/coil pair damping the whole rigid body.
 
       \vspace{2mm}
       {\scriptsize\setlength{\tabcolsep}{4pt}
       \begin{tabular}{@{}ll>{\raggedright\arraybackslash}p{0.46\linewidth}@{}}
         \toprule
-        condition & v4 & why \\
+        condition & \texttt{alpha} & why \\
         \midrule
         rail & \textbf{demote} & local \emph{sensing} failure: that measurement
           is garbage \\
@@ -1461,17 +1109,17 @@ epilogue, because MIMO is now closed by measurement rather than by failure.}
       \vspace{2mm}
       Saturation is deliberately \emph{not} demoted: a saturated channel is
       still pushing the right way at full authority.
-      \textbf{First fired on hardware under v10}: ch2 railed, 3 of 4 kept
+      \textbf{First fired on hardware under the eight-channel step}: ch2 railed, 3 of 4 kept
       damping, re-armed 2\,s later.
     \end{column}
   \end{columns}
 \end{frame}
-\note{v4, the second file of that name, is v3 plus exactly one behavioural
+\note{alpha, the second file of that name, is alpha plus exactly one behavioural
 change, so a bench comparison isolates it. It gives identical damping numbers to
-v3, because in a quiet lab nothing ever demotes. The whole change is dormant
+alpha, because in a quiet lab nothing ever demotes. The whole change is dormant
 until something goes wrong.
 
-The problem: v3 freezes all four channels on any one rail. The stated reason was
+The problem: alpha freezes all four channels on any one rail. The stated reason was
 that all four OSEMs sit on one rigid body so one blind sensor makes the optic's
 position untrustworthy globally. True for reconstructing the optic's state, but
 no version does that. They are four independent SISO loops. So all damping
@@ -1493,83 +1141,8 @@ back from zero.
 
 It took until 2026-08-06 for this path to run on hardware for the first time.}
 
-% ================================================================ 25
-\begin{frame}{v5: four channels become four lanes}
-  \begin{columns}[T]
-    \begin{column}{0.52\textwidth}
-      \centering
-      {\footnotesize
-      \begin{tabular}{@{}lrrrr@{}}
-        \toprule
-         & total & code & logic & \texttt{main()} \\
-        \midrule
-        v3 & 908 & 515 & 400 & 64 \\
-        v4 & 1172 & 577 & 460 & 64 \\
-        \textbf{v5} & \textbf{533} & \textbf{356} & \textbf{270} & \textbf{48} \\
-        \bottomrule
-      \end{tabular}}
-
-      \vspace{2mm}
-      {\footnotesize \texttt{Channel} went from \textbf{231 lines to 13}. It
-      stopped being where state lives and became a \emph{view} onto the
-      controller's arrays, so \texttt{sim/server.py} and \texttt{harness.py}
-      kept working unchanged.}
-
-      \vspace{2mm}
-      {\footnotesize \textbf{This is what made eight channels a config change
-      rather than a rewrite.}}
-    \end{column}
-    \begin{column}{0.46\textwidth}
-      \footnotesize
-      \textbf{Evidence it is the same controller.} Every printed observable
-      matches v4 exactly, on two different plants:
-
-      \vspace{1mm}
-      \centering
-      {\scriptsize
-      \begin{tabular}{@{}ll@{}}
-        \toprule
-        observable & v4, and v5 identically \\
-        \midrule
-        ratios & 0.029 / 0.098 / 0.045 / 0.132 \\
-        lock & 10.6\,s \\
-        peak $P$/$I$/$D$ & 0.0881 / 0.0644 / 0.0412\,V \\
-        re-arm & 2.10\,s \\
-        \bottomrule
-      \end{tabular}}
-
-      \vspace{2mm}
-      \raggedright
-      \textbf{One regression, in the direction you would not guess:}
-      \textbf{57.5\,$\mu$s/step against v4's 42.4}. numpy's per-call overhead on
-      a length-4 array beats four scalar operations. Both are $\sim$50$\times$
-      inside the 2.88\,ms budget, so it is irrelevant on hardware.
-    \end{column}
-  \end{columns}
-\end{frame}
-\note{v5 is two changes kept separable. First the shape: four channels become
-four lanes of one numpy array instead of four objects each running identical
-scalar arithmetic. Every filter, the PID, the gain schedule and each interlock
-becomes one expression rather than four.
-
-The file halved. The interesting number is that the per-channel class went from
-231 lines to 13, because it stopped being where state lives and became a view
-onto the controller's arrays. Attribute access forwards straight through, which
-is what let the simulator and the harness keep working unchanged, including live
-gain editing from the browser UI. And it is what made going to eight channels a
-configuration change rather than a rewrite.
-
-The evidence that a rewrite is behaviour-preserving is the table: every printed
-observable matches v4 exactly, on two different plant models, verified before
-anything new was added on top.
-
-One honest regression. Vectorising made it slower, 57.5 microseconds per step
-against 42.4, because numpy's per-call overhead on a length-four array is larger
-than four scalar operations. Both are about fifty times inside the budget, so it
-only makes the simulator suite slower.}
-
 % ================================================================ 26
-\begin{frame}{v5: \texttt{fast-refault}, stop re-measuring during the event}
+\begin{frame}{\texttt{beta}: stop re-measuring during the event}
   \begin{columns}[T]
     \begin{column}{0.48\textwidth}
       \centering
@@ -1581,10 +1154,10 @@ only makes the simulator suite slower.}
                      legend cell align=left, mark size=1.7pt]
           \addplot[thick, mark=*] coordinates
             {(2.2,0.550) (2.5,1.409) (3.0,1.908) (3.5,2.633)};
-          \addlegendentry{v4}
+          \addlegendentry{without \texttt{fast-refault}}
           \addplot[thick, dashed, mark=square*] coordinates
             {(2.2,0.269) (2.5,0.307) (3.0,0.451) (3.5,0.773)};
-          \addlegendentry{v5}
+          \addlegendentry{with it}
         \end{axis}
       \end{tikzpicture}\\
       {\scriptsize Simulator \emph{ground truth} over 300\,s, not the
@@ -1592,7 +1165,7 @@ only makes the simulator suite slower.}
     \end{column}
     \begin{column}{0.5\textwidth}
       \footnotesize
-      \textbf{The problem.} v0--v4 answer \emph{every} fault the same way: wait
+      \textbf{The problem.} Every build before this one answers \emph{every} fault the same way: wait
       for all-clear, then recalibrate. That is \texttt{CALIBRATION\_S} of open
       loop at zero gain. Correct for a transient, wrong for a disturbance that
       has not gone away: the optic rings straight back up to the amplitude that
@@ -1605,9 +1178,9 @@ only makes the simulator suite slower.}
         \toprule
         200\,s @ drive 2.5 & \% DAMPING & faults & locks \\
         \midrule
-        v0 / v1 / v2 & 0.6\% & 1 & never \\
-        v3 / v4      & 4.1\% & 7 & never \\
-        \textbf{v5}  & \textbf{87.5\%} & \textbf{1} & \textbf{10.2\,s} \\
+        earliest builds & 0.6\% & 1 & never \\
+        with the 3 defect fixes & 4.1\% & 7 & never \\
+        \textbf{with \texttt{fast-refault}} & \textbf{87.5\%} & \textbf{1} & \textbf{10.2\,s} \\
         \bottomrule
       \end{tabular}}
 
@@ -1619,20 +1192,20 @@ only makes the simulator suite slower.}
       \texttt{MAX\_BASELINE\_REUSE} $= 4$.
 
       \vspace{1mm}
-      \alert{Found by stressing the simulator across clipping regimes, not by
-      reading the code.}
+      Found by stressing the simulator across clipping regimes, not by
+      reading the code.
     \end{column}
   \end{columns}
 \end{frame}
-\note{Every version up to v4 answers every fault identically: wait for all-clear,
+\note{Every version up to alpha answers every fault identically: wait for all-clear,
 then recalibrate. Twenty seconds of open loop at zero gain. Exactly right for a
 transient, exactly wrong for a disturbance that is still present, because during
 those twenty seconds the optic rings back up to the amplitude that faulted it and
 faults again on contact. The result is a supervisor-level feedback loop that
 spends its life measuring instead of damping.
 
-Over two hundred seconds of sustained clipping, v3 and v4 spend four percent of
-samples damping across seven faults and never lock. v5 spends 87.5 percent and
+Over two hundred seconds of sustained clipping, alpha and alpha spend four percent of
+samples damping across seven faults and never lock. With fast-refault that becomes 87.5 percent and
 locks in ten seconds.
 
 The plot is the optic itself, simulator ground truth rather than the controller's
@@ -1643,91 +1216,15 @@ And note how it was found: by stressing the rebuilt simulator across clipping
 regimes, not by reading the code.
 
 What it does not fix: at the highest drive, with 56 percent of samples clipping,
-v5 still exhausts its reuses. That regime is a sensor problem, not a control
+it still exhausts its reuses. That regime is a sensor problem, not a control
 problem.}
-
-% ================================================================ 27
-\begin{frame}{v5.5: eight OSEMs, a config change rather than a rewrite}
-  \begin{columns}[T]
-    \begin{column}{0.5\textwidth}
-      \footnotesize
-      v5 with \texttt{N = 8} and the full map \texttt{DAC\_CHANNELS =
-      [1,3,5,7,0,2,4,6]}. \textbf{Not a new rung}: same control law, constants,
-      \texttt{FIXES} and state machine.
-
-      \vspace{2mm}
-      All eight sit on one rigid body, so every semantic held unchanged: quorum
-      of one, one global \texttt{FAULT}, one lock claim.
-
-      \vspace{2mm}
-      \textbf{Channels 4--7 shipped disabled.} Their sign was unknown, and a
-      wrong-signed channel \emph{pumps}. ch2's sign was \emph{discovered} from
-      bench data, not predicted.
-
-      \vspace{2mm}
-      \textbf{It never announced \texttt{LOCKED}}, and it faulted the whole rig
-      \textbf{ten times in 145\,s}.
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \scriptsize
-      \textbf{The surviving four were not comfortably damping either.} Bench,
-      eight channels:
-
-      \vspace{1mm}
-      \centering
-      {\scriptsize
-      \begin{tabular}{@{}lcccc@{}}
-        \toprule
-        $t$ & ch0 & ch1 & ch2 & ch3 \\
-        \midrule
-        135.3\,s & 0.71 & 0.68 & 0.81 & 0.78 \\
-        145.4\,s & 0.13 & 0.12 & 0.05 & 0.08 \\
-        \bottomrule
-      \end{tabular}}
-
-      \vspace{1mm}
-      \raggedright
-      At $t = 135.3$\,s the gain was still ramping from zero for the third time
-      ($-0.0148$ of $-0.030$). They reached \texttt{LOCK} only on the last
-      status line of the run, and \textbf{ch5 never did}, so the rig itself
-      never claimed \texttt{LOCKED}.
-
-      \vspace{2mm}
-      \textbf{ch5 never showed \texttt{LOCK} at all}, and the rig-level claim
-      needs \emph{every} live channel. That quorum rule is still unfixed, and
-      it is open defect 1.
-    \end{column}
-  \end{columns}
-\end{frame}
-\note{v5.5 is the eight-channel commissioning build: v5 with N equal to eight and
-the full eight-pair coil map. Explicitly not a new rung.
-
-Going from four to eight channels was a configuration change rather than a
-rewrite, which is a direct dividend of v5's array refactor.
-
-It never announced LOCKED and it faulted the whole rig ten times in a hundred
-and forty-five seconds. The next slide is the arithmetic of why.
-
-Be careful with the version of this slide you may have seen before. It said six
-faults in a hundred and twenty seconds and said the surviving four channels were
-damping comfortably throughout. Both were wrong. Six in a hundred and twenty is
-the other eight-channel run from that afternoon. And the four good channels were
-not fine: a hundred and thirty-five seconds in they were still around 0.7 with
-the gain ramping back from zero for the third time, and they only reached 0.13
-and showed LOCK on the very last status line. Channel five never did. The failure
-was worse than the deck said, not milder.
-
-One more correction. At the time the simulator modelled a four-OSEM body and
-skipped this file. That is now stale: SIM_CHANNELS is four or eight, the
-eight-OSEM body is built from the 08-04 and 08-06 logs, and v10, v11 and v12 are
-simulated rather than skipped.}
 
 % ================================================================ 28
 \begin{frame}{Defect 4: a near-zero baseline makes noise look like a runaway}
   \begin{columns}[T]
     \begin{column}{0.50\textwidth}
       \footnotesize
-      \rawdata\ v5.5 calibrated baselines on the bench:
+      \rawdata\ Calibrated baselines at the eight-OSEM step, on the bench:
 
       \vspace{1mm}
       \centering
@@ -1770,7 +1267,7 @@ simulated rather than skipped.}
       or a7.}}
 
       \vspace{2mm}
-      \thefix\ v10's \texttt{baseline-floor}. At the end of every calibration,
+      \thefix\ \texttt{baseline-floor}, now in \texttt{delta}. At the end of every calibration,
       demote any channel whose baseline is under \textbf{10\% of the median}
       across enabled channels.
 
@@ -1797,12 +1294,12 @@ feedback" does not say which loop is feeding it. So a channel measuring nothing
 but its own noise takes the entire rig down. Ten whole-rig faults in a hundred
 and forty-five seconds, nine of them naming a4, a6 or a7.
 
-The fix is v10's baseline-floor, which has its own slide later, and the number
+The fix is baseline-floor, and the number
 that moved is the last line: the same eight OSEMs went from ten faults in 145
 seconds to forty seconds of unbroken damping with zero faults.}
 
 % ================================================================ 29
-\begin{frame}{v6: measuring the actuation matrix properly}
+\begin{frame}{\texttt{sysid}: measuring which coil moves what}
   \begin{columns}[T]
     \begin{column}{0.46\textwidth}
       \centering
@@ -1827,30 +1324,31 @@ seconds to forty seconds of unbroken damping with zero faults.}
       closes no loop.
 
       \vspace{1.5mm}
-      \textbf{Stepped sine, one coil at a time.} While coil $j$ drives, no other
-      coil is. Nothing to disentangle, no matrix to invert, no assumption about
-      quadrature: \textbf{magnitude and phase both fall out of the lock-in}.
-      That is what the modal v4 got wrong.
+      \textbf{Stepped sine, one coil at a time.} Drive one coil at a single
+      frequency and measure only the response \emph{at that same frequency},
+      which rejects everything else. While coil $j$ drives, no other coil is, so
+      there is nothing to disentangle and \textbf{both the size and the timing of
+      the response fall straight out}.
 
       \vspace{1.5mm}
-      \alert{Only \textbf{4 of 12} frequencies were usable}: ch2 railed in
+      Only \textbf{4 of 12} frequencies were usable: ch2 railed in
       \textbf{17 of 48} steps, and two survivors are ambient-dominated.
 
       \vspace{1.5mm}
-      \textbf{v6.1 (multisine) failed outright}: ch2 railed in \textbf{all 4}
+      \textbf{\texttt{sysid}.1 (multisine) failed outright}: ch2 railed in \textbf{all 4}
       passes, and pass 1 ran at \textbf{14.8\,Hz} effective against
       $\sim$252\,Hz, giving a spurious $\sim$\textbf{4700\,V/V} against
       $\sim$70.
 
       \vspace{1.5mm}
       \textbf{One cause for both:} open loop, nothing damping, ch2 clips.
-      \alert{\textbf{And the rank check is superseded}}: the ringdown finds
+      \textbf{And the rank check is superseded}: the ringdown finds
       \textbf{three} modes, and the full refit puts the allocator at
       $3 \times 4$, cond \textbf{1.41}.
     \end{column}
   \end{columns}
 \end{frame}
-\note{v6 is not a controller. It declares KIND equals sysid, exposes no
+\note{sysid is not a controller. It declares KIND equals sysid, exposes no
 Controller class, damps nothing, and both the harness and the bench runner refuse
 to simulate it.
 
@@ -1859,7 +1357,6 @@ OSEMs do, recovering the actuation matrix by lock-in detection. Why stepped sine
 rather than something cleverer: while coil j is driving, no other coil is. There
 is nothing to disentangle, no matrix to invert, and both quadratures come out of
 the lock-in together, so magnitude and phase are measured rather than inferred.
-That is exactly the pair of mistakes that killed the modal v4.
 
 It passed its own rank check: two directions above ten percent.
 
@@ -1916,14 +1413,14 @@ is the way past it, and it is still on the open list.}
       \textbf{Sensors a4--a7 respond to nothing}, $\leq 8$\,counts/V.
 
       \vspace{1.5mm}
-      \alert{We read that as ``a4--a7 are not wired''. It was wrong.} A DC slope
+      We read that as ``a4--a7 are not wired''. It was wrong. A DC slope
       against a fixed threshold cannot separate \emph{no sensor} from \emph{a
       working sensor with small gain}. \textbf{Wrong statistic, not wrong data.}
 
       \vspace{1.5mm}
-      \alert{Their own diagonals are $+8 / +4 / +7$} against a block mean of
+      Their own diagonals are $+8 / +4 / +7$ against a block mean of
       \textbf{4}. Those signs are coin flips, and \textbf{a wrong sign pumps},
-      so v11 and v12 ship a4/a6/a7 at \textbf{zero gain}.
+      so the 500000-baud step and \texttt{delta} ship a4/a6/a7 at \textbf{zero gain}.
 
       \vspace{1.5mm}
       a3: the common-mode sweep read $+43$\,counts/V, coil3 $\to$ a3 alone
@@ -1940,16 +1437,16 @@ magnitude is 66 counts per volt. Coils four to seven onto the wired sensors is
 than eight counts per volt.
 
 We concluded that the four extra OSEMs were not connected, and wrote that into
-the repository. It was wrong, and the next slide is the correction. Hold on to
-the shape of the mistake: a DC slope compared against a fixed threshold cannot
-tell a sensor that is absent from a sensor that is present with a small gain.
-Nothing here is bad data. Every number in this table is real.
+the repository. It was wrong. The shape of the mistake is the part to keep: a DC
+slope compared against a fixed threshold cannot tell a sensor that is absent from
+a sensor that is present with a small gain. Nothing here is bad data. Every number
+in this table is real.
 
 There is a second thing this table cannot support. Read the diagonal of the
 lower-right block: plus eight, plus four, plus seven, in a block whose mean
 absolute response is four. Those diagonals are at or barely above the noise of
 the block they sit in, and a sign read off a number like that is a coin flip
-dressed as a measurement. A wrong-signed channel pumps, so v11 and v12 enable all
+dressed as a measurement. A wrong-signed channel pumps, so the 500000-baud step and delta enable all
 three as sensors at exactly zero gain.
 
 One trap worth calling out, because it nearly cost a sign error. A common-mode
@@ -1995,14 +1492,14 @@ a3. Coil three onto a3 alone is minus 51. Opposite sign.}
         & \multicolumn{2}{@{}l}{power in 0.4--3\,Hz} \\
         \midrule
         a0--a3 & 77--99\% & the three modes \\
-        a5 & 22--71\% & \alert{in band here, not in the residue fit} \\
+        a5 & 22--71\% & in band here, not in the residue fit \\
         a4, a6, a7 & 0.1--9\% & a narrow \textbf{6.19\,Hz} line
           (12.4\,Hz harmonic on a7) \\
         \bottomrule
       \end{tabular}}
 
       \vspace{1.5mm}
-      \alert{\textbf{Not an Arduino or sampling problem.}} a3 is read
+      \textbf{Not an Arduino or sampling problem.} a3 is read
       \emph{immediately before} a4 and carries a large 1.64\,Hz signal, yet
       $r(\mathrm{a4},\mathrm{a3}) = -0.029 / +0.004$. a5, read straight
       \emph{after} a4, is clean.
@@ -2021,15 +1518,11 @@ repository were wrong.
 First: all eight OSEMs are electrically connected. Confirmed on an oscilloscope.
 The claim that a4 to a7 were not wired was simply wrong.
 
-What is true is a split between in-band and out-of-band. a0 to a3 put 77 to 99
-percent of their power inside the 0.4 to 3 hertz band the loop closes on. a4, a6
-and a7 put 0.1 to 9 percent in band; what dominates them is a narrow interference
-line at 6.19 hertz with a harmonic at 12.4 on a7. They carry real signal, raw
-standard deviations of 13 to 105 counts, and they do move on a hard kick, seen on
-a scope.
+The split is in-band against out-of-band, and the table has it. What the table
+does not say is that a4, a6 and a7 carry real signal, raw standard deviations of
+13 to 105 counts, and do move on a hard kick, seen on a scope. They are not dead.
 
-Second correction, and this one is a retraction of something this deck used to
-say confidently: we do not know why. The story was that their flags sit outside
+Second correction, and this one is a retraction: we do not know why. The story was that their flags sit outside
 the linear partial-shadow region. The resting counts do not support it. a4 sits
 at 567.5 counts against a mid-scale of 511.5, with a thirty-count swing. That is
 inside its range, not pinned at an end. a7 is at 734.7 and a6 at 860.6, higher
@@ -2049,170 +1542,15 @@ a raw time-domain correlation. Both are blind to a small coherent signal. The
 spectral test found the answer immediately on exactly the same data. Wrong
 statistic, not wrong data.}
 
-% ================================================================ 32
-\begin{frame}{v7: \texttt{bias-trim}, move where the optic hangs}
-  \begin{columns}[T]
-    \begin{column}{0.5\textwidth}
-      \centering
-      \begin{tikzpicture}
-        \begin{axis}[width=6.8cm, height=4.2cm, ybar, bar width=9pt,
-                     xtick={1,2,3,4}, xticklabels={a0,a1,a2,a3},
-                     xmin=0.4, xmax=4.6, ymin=480, ymax=800,
-                     ytick={500,600,700},
-                     ylabel={resting counts},
-                     legend style={at={(0.5,-0.22)}, anchor=north,
-                                   legend columns=2, draw=none, fill=none},
-                     nodes near coords,
-                     every node near coord/.append style={font=\tiny}]
-          \addplot[every node near coord/.append style={yshift=7pt}]
-            coordinates {(1,591) (2,630) (3,712) (4,679)};
-          \addlegendentry{start}
-          \addplot coordinates {(1,549) (2,603) (3,670) (4,679)};
-          \addlegendentry{after trim}
-          \draw[dashed, thick] (axis cs:0.4,511.5) -- (axis cs:4.6,511.5);
-        \end{axis}
-      \end{tikzpicture}\\
-      {\scriptsize Dashed: ADC mid-scale, 511.5 counts. Bench 2026-08-04.
-       a3 was already at its best step.}
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \footnotesize
-      Coil bias is a \textbf{DC force}, so stepping it moves where the optic
-      hangs. One \texttt{BIAS\_QUANTUM} $= 0.25$\,V at a time, kept only if the
-      \textbf{total} offset across all channels improved.
-
-      \vspace{2mm}
-      \centering
-      {\scriptsize
-      \begin{tabular}{@{}lcc@{}}
-        \toprule
-        bench 2026-08-04 & start & end \\
-        \midrule
-        \textbf{v7 (trim)} & 565 & \textbf{455} counts \\
-        v5 (control) & 566 & 546 (drift) \\
-        \bottomrule
-      \end{tabular}}
-
-      \vspace{2mm}
-      \raggedright
-      Lock times 11.2 / 11.0 / 12.4\,s: \textbf{the trim costs nothing}.
-
-      \vspace{2mm}
-      \textbf{Two steps were rejected and frozen} by the \emph{total} test:
-      ch1 $\to$ 0.50\,V ($486 \to 528$) and ch3 $\to$ 1.25\,V ($538 \to 561$).
-      Each helped its own channel and hurt the rig, which is the
-      inter-coil coupling v6 measured.
-
-      \vspace{2mm}
-      \alert{It cannot finish the job.} Centring wants $-1.93 \ldots +3.77$\,V
-      against a 2.5\,V DAC. The rest is mechanical or TIA offset.
-    \end{column}
-  \end{columns}
-\end{frame}
-\note{v7 attacks the open hardware problem: no OSEM rests at mid-scale, so every
-channel clips its top rail long before the bottom.
-
-The lever is that coil bias exerts a DC force, so it moves the rest position. The
-design decision worth noting is that this is deliberately not a one-shot
-least-squares solve. That solve wants minus 1.93 to plus 3.77 volts against a DAC
-that only has 2.5, so most of it is unreachable, and it assumes a matrix measured
-on a different day still holds. Instead v7 trims iteratively: one quarter-volt
-quantum at a time, kept only if the total offset improved.
-
-Total, not per-channel, and that matters. Four coils drive two degrees of
-freedom, so the channels are coupled and helping a0 can hurt a2. Two steps were
-rejected and frozen on that test.
-
-A second dividend of accept-or-revert: the sign table came from the per-coil DC
-matrix, and a wrong sign would otherwise walk a sensor into its rail. With
-revert-on-worse, a wrong sign costs exactly one step.
-
-On hardware it took total offset from 565 counts to 455 with no cost in lock
-time. It cannot finish the job, and the file says so.}
-
-% ================================================================ 33
-\begin{frame}{v8: stop paying 20\,s of zero gain for a baseline}
-  \begin{columns}[T]
-    \begin{column}{0.47\textwidth}
-      \centering
-      \begin{tikzpicture}
-        \begin{axis}[width=6.4cm, height=4.0cm, ybar, bar width=13pt,
-                     xtick={1,2,3,4,5}, xticklabels={5,8,10,15,20},
-                     xmin=0.4, xmax=5.6, ymin=0, ymax=112,
-                     ytick={0,25,50,75,100},
-                     xlabel={\texttt{CALIBRATION\_S} (s)},
-                     ylabel={worst shock skew (\%)},
-                     nodes near coords={\pgfmathprintnumber[fixed,zerofill,precision=1]{\pgfplotspointmeta}},
-                     every node near coord/.append style={font=\tiny}]
-          \addplot coordinates {(1,74.3) (2,86.5) (3,41.0) (4,57.9) (5,20.1)};
-          \draw[dashed, thick] (axis cs:0.4,35) -- (axis cs:5.6,35);
-        \end{axis}
-      \end{tikzpicture}\\
-      {\scriptsize Dashed: the 35\% assertion line. \textbf{Every shorter window
-      fails}, some worse than the unfixed defect (39.3\%).}
-    \end{column}
-    \begin{column}{0.51\textwidth}
-      \footnotesize\raggedright
-      \textbf{The cost.} Bench, four channels: 20\,s calibration plus
-      $\sim$11\,s to lock is \textbf{65\% of wall clock at zero gain}, plus
-      25\,s of open loop after every fault.
-
-      \vspace{1.5mm}
-      \textbf{1. \texttt{fast-calib}.} \texttt{CALIBRATION\_S} becomes a
-      \emph{ceiling}. Sub-windows accumulate; calibration ends as soon as the
-      trailing ones agree the floor has stopped moving. Simulator: $20.00 \to
-      \mathbf{6.01}$\,s, lock $30.6 \to \mathbf{16.5}$\,s, and shock skew
-      \emph{improves} $19.7 \to 17.6\%$.
-
-      \vspace{1.5mm}
-      \textbf{2. \texttt{warm-restart}.} A fault after a \emph{healthy}
-      engagement re-engages on the baseline in hand. Two 15\,V/s kicks: v4/v5
-      never re-lock inside 115\,s; v8 re-engages 5\,s after all-clear and
-      re-locks 10.7\,s later.
-
-      \vspace{1.5mm}
-      \alert{On the bench \texttt{fast-calib} never fired.}
-      \texttt{CALIB\_AGREE\_TOL = 1.20} was tuned on simulator noise, one RNG
-      seed. It degrades to v5's estimator, which is the designed fallback, but
-      the saving is \textbf{unconfirmed on hardware}.
-    \end{column}
-  \end{columns}
-\end{frame}
-\note{v8 attacks the biggest single waste in the system. Twenty seconds of
-calibration plus eleven to lock means sixty-five percent of wall clock with the
-gain at zero. After a fault it is worse: a single kick costs about forty seconds
-of not damping.
-
-The obvious answer, just use a shorter window, is wrong, and the chart shows why.
-The twenty-second window does not exist because a quiet lab needs it; three
-seconds and twenty seconds agree within one percent over eight seeds. It exists
-for the case where a shock lands inside the window. Sweep the window length and
-every shorter value fails the 35 percent line, some worse than the unfixed
-defect. The cause is the ringdown: median-of-sub-windows only helps when the
-window is comparable to the decay time.
-
-So instead: make it a ceiling with a convergence test. In the simulator that is
-twenty seconds down to six and total time-to-lock from thirty to sixteen and a
-half, and the shock-skew number improves rather than degrades, because a shock
-inside the window is exactly the case that refuses to converge early.
-
-warm-restart makes borrowing the baseline the default on the fault path. That
-breaks the project's standing rule that baselines are never borrowed, so it is
-bounded by four explicit re-measure cases.
-
-And the honest part: on the bench fast-calib never fired once. Its agreement
-tolerance was tuned on simulator noise with one seed. It degrades safely, but the
-saving is unconfirmed on hardware.}
-
 % ================================================================ 34
 \begin{frame}{Defect 5: the runaway breaker was asking the wrong question}
   \centering
   \begin{tikzpicture}[font=\scriptsize]
     \node[blk, minimum width=6.8cm, anchor=west] (lev) at (0,0.72)
-      {\textbf{level test} (v0--v8):
+      {\textbf{level test} (every build before \texttt{beta}):
        $\mathrm{env} > 1.8 \times \mathrm{baseline}$, sustained 2\,s};
     \node[blk, minimum width=6.8cm, anchor=west] (grow) at (0,-0.72)
-      {\textbf{growth test} (new in v9):
+      {\textbf{growth test} (new in \texttt{beta}):
        $\mathrm{env} > 1.02 \times \mathrm{env}(t - \mathrm{LAG})$};
     \node[blk, minimum width=2.2cm, anchor=west] (and) at (8.0,0)
       {\textbf{both} $\Rightarrow$ \texttt{FAULT}};
@@ -2232,12 +1570,12 @@ saving is unconfirmed on hardware.}
       \emph{succeeding}.
 
       \vspace{2mm}
-      \alert{A level test cannot tell them apart.} After a kick it trips on a
+      A level test cannot tell them apart. After a kick it trips on a
       timer, every \texttt{RUNAWAY\_SUSTAIN\_S}, all the way down the ringdown.
     \end{column}
     \begin{column}{0.49\textwidth}
       \footnotesize
-      \textbf{This defect was in every version back to v0.} v8 merely re-engaged
+      \textbf{This defect was in every version back to \texttt{zero}.} The build just before \texttt{beta} merely re-engaged
       fast enough to hit it repeatedly, which is how it was found.
 
       \vspace{2mm}
@@ -2245,15 +1583,15 @@ saving is unconfirmed on hardware.}
       noise alone cannot read as growth.
 
       \vspace{2mm}
-      \alert{\texttt{RUNAWAY\_TREND\_LAG\_S = 2.0} was chosen before the mode
-      frequencies were known.} That turns out to be the next defect, and it took
+      \texttt{RUNAWAY\_TREND\_LAG\_S = 2.0} was chosen before the mode
+      frequencies were known. That turns out to be the next defect, and it took
       three more versions to find.
     \end{column}
   \end{columns}
 \end{frame}
 \note{The best single result in the project, and it needs three slides.
 
-The runaway breaker, from v0 through v8, was a level test: is the envelope above
+The runaway breaker, from the zero build right up to beta, was a level test: is the envelope above
 1.8 times baseline, sustained two seconds. That sounds reasonable and it is
 wrong, for a reason obvious once stated.
 
@@ -2264,11 +1602,11 @@ perfectly good control, the breaker trips on a timer and keeps tripping, every
 two seconds, all the way down, until the amplitude happens to fall under the line
 by luck.
 
-v9 keeps the level test and adds a growth test: the envelope must also exceed
+beta keeps the level test and adds a growth test: the envelope must also exceed
 where it was one lag ago, by two percent. Both conditions, both sustained.
 
-The thing to appreciate: this defect was present in every version back to v0. It
-took until v8 to find, and only because v8 re-engaged fast enough after a fault
+The thing to appreciate: this defect was present in every version back to the zero build. It
+took until the build just before beta to find, and only because that build re-engaged fast enough after a fault
 to make the pattern visible.
 
 Note the last box, because it is a trap being set. The lag was picked at two
@@ -2276,7 +1614,7 @@ seconds before anybody had measured the mode frequencies. That is the next defec
 and it took three more versions.}
 
 % ================================================================ 35
-\begin{frame}{v9: the bench evidence, the envelope \emph{falling} through every fault}
+\begin{frame}{The defect on the bench: the envelope \emph{falling} through every fault}
   \centering
   \begin{tikzpicture}
     \begin{axis}[width=10.0cm, height=4.8cm,
@@ -2307,12 +1645,12 @@ and it took three more versions.}
   \end{tikzpicture}
 
   \vspace{-1mm}
-  {\footnotesize Measured on \textbf{v8, hardware, 240\,s, three kicks}:
+  {\footnotesize Measured on \textbf{the build just before \texttt{beta}: hardware, 240\,s, three kicks}:
   \textbf{ten faults}, and the envelope was \emph{falling} through them.
-  \alert{Only the re-engagement that happened to start at 1.64, just under the
-  line, survived.}}
+  Only the re-engagement that happened to start at 1.64, just under the
+  line, survived.}
 \end{frame}
-\note{Here is the defect caught in the act, on hardware. v8, two hundred and
+\note{Here is the defect caught in the act, on hardware. The build just before beta, two hundred and
 forty seconds, three kicks, ten faults. Each line is one re-engagement after a
 fault, and the y-axis is the amplitude ratio the breaker is watching.
 
@@ -2327,31 +1665,35 @@ locked. The only thing separating the successful engagement from the three
 failures is where it happened to start relative to an arbitrary threshold.}
 
 % ================================================================ 36
-\begin{frame}{v9: what the growth gate bought}
+\begin{frame}{\texttt{beta}: what the growth test bought}
   \begin{columns}[T]
-    \begin{column}{0.56\textwidth}
+    \begin{column}{0.54\textwidth}
       \centering
       \begin{tikzpicture}
-        \begin{axis}[width=7.4cm, height=4.6cm, ybar stacked, bar width=20pt,
-                     symbolic x coords={v5,v8,v9,v10},
+        \begin{axis}[width=7.0cm, height=4.4cm, ybar stacked, bar width=26pt,
+                     symbolic x coords={level test only, beta},
                      xtick=data, ymin=0, ymax=100,
                      ylabel={\% of wall-clock time},
-                     legend style={at={(0.5,-0.24)}, anchor=north, legend columns=3},
+                     x tick label style={font=\scriptsize},
+                     legend style={at={(0.5,-0.22)}, anchor=north, legend columns=3,
+                                   font=\tiny},
                      nodes near coords={\pgfmathprintnumber[fixed,zerofill,precision=1]{\pgfplotspointmeta}},
                      every node near coord/.append style={font=\tiny,
                        fill=white, fill opacity=0.85, text opacity=1,
                        inner sep=0.6pt},
-                     enlarge x limits=0.22]
-          \addplot coordinates {(v5,81.0) (v8,70.3) (v9,83.1) (v10,74.1)};
+                     enlarge x limits=0.55]
+          \addplot coordinates {(level test only,70.3) (beta,83.1)};
           \addlegendentry{DAMPING}
-          \addplot coordinates {(v5,2.1) (v8,21.2) (v9,8.5) (v10,15.0)};
+          \addplot coordinates {(level test only,21.2) (beta,8.5)};
           \addlegendentry{FAULT}
-          \addplot coordinates {(v5,16.8) (v8,8.4) (v9,8.4) (v10,10.9)};
+          \addplot coordinates {(level test only,8.4) (beta,8.4)};
           \addlegendentry{CALIBRATING}
         \end{axis}
-      \end{tikzpicture}
+      \end{tikzpicture}\\
+      {\scriptsize The same build with and without the growth test, on the same
+      240\,s three-kick schedule.}
     \end{column}
-    \begin{column}{0.42\textwidth}
+    \begin{column}{0.44\textwidth}
       \footnotesize
       \centering
       {\footnotesize
@@ -2359,83 +1701,75 @@ failures is where it happened to start relative to an arbitrary threshold.}
         \toprule
         same 3-kick schedule & faults & locks \\
         \midrule
-        v5 (control) & 1 & 2 \\
-        v8 & \alert{\textbf{10}} & 4 \\
-        \textbf{v9} & \textbf{4} & \textbf{4} \\
-        v10 (08-06) & 8 & 3 \\
+        level test only & \textbf{10} & 4 \\
+        \textbf{\texttt{beta}} & \textbf{4} & \textbf{4} \\
         \bottomrule
       \end{tabular}}
 
       \vspace{2mm}
       \raggedright
-      \textbf{v9 re-locked after \emph{every} kick}, at $t = 31.3 / 83.8 /
-      151.3 / 205.3$\,s. v5's low fault time is not calm: it locked
-      \textbf{2 of 4}.
+      \textbf{\texttt{beta} re-locked after \emph{every} kick}, at
+      $t = 31.3 / 83.8 / 151.3 / 205.3$\,s.
 
       \vspace{2mm}
-      v9's \texttt{FAULT} time is \textbf{20.2\,s} $=$
-      \texttt{FAULT\_CLEAR\_SUSTAIN\_S} $5$\,s $\times$ 4 recoveries.
-      \textbf{Cost, not thrash.}
+      \texttt{beta}'s \texttt{FAULT} time is \textbf{20.2\,s} $=$ the mandatory
+      5\,s all-clear $\times$ 4 recoveries. \textbf{Cost, not thrash.}
 
       \vspace{2mm}
-      \alert{\textbf{v9 still holds the best DAMPING fraction on record},
-      83.1\%.} Every later comparison has to say what schedule it ran.
+      \textbf{83.1\% is still the best \texttt{DAMPING} fraction on record.}
+      Every later comparison has to say what kick schedule it ran.
     \end{column}
   \end{columns}
 \end{frame}
-\note{Same three-kick schedule, four versions, on hardware. Every bar is a
-percentage of wall-clock time integrated from the CSV timestamps, not a count of
-rows. The next slide explains why that distinction is not pedantry.
+\note{The same build with and without the growth test, on the same three-kick
+schedule, so this is a controlled comparison rather than two different programs.
 
-v8 spends 21 percent in FAULT across ten faults. v9 cuts that to 8.5 percent
-across four and takes damping time to 83.1 percent, while re-locking after every
-kick.
+Without it: 21 percent of the run in FAULT across ten faults. With it: 8.5
+percent across four, and damping time up to 83.1 percent, while re-locking after
+every single kick.
 
-Read v5 carefully. It has the least fault time of the four, two percent, but it
-locked only twice out of four opportunities. Low fault time is not the same as
-control.
+What is left is understood rather than mysterious. 8.5 percent of 238 seconds is
+20.2 seconds, which is exactly five seconds of mandatory all-clear times four
+recoveries. Cost, not thrash.
 
-What is left in v9 is understood: 8.5 percent of 238 seconds is 20.2 seconds,
-which is exactly five seconds of mandatory all-clear times four recoveries. Cost,
-not thrash.
-
-And the caution I want standing for the rest of the deck. v9's 83.1 percent is
-still the best DAMPING fraction on record, on this three-kick schedule. Later
-runs used different kick schedules, so any comparison against it has to say which
-schedule it ran on.}
+And the caution I want standing for the rest of the deck: 83.1 percent is still
+the best damping fraction anyone has measured here, on this schedule. Later runs
+used different kick schedules, so any comparison against it has to say which.}
 
 % ================================================================ 37
 \begin{frame}{Defect 6: two estimators, one inverted conclusion}
   \begin{columns}[T]
-    \begin{column}{0.54\textwidth}
+    \begin{column}{0.52\textwidth}
       \centering
       \begin{tikzpicture}
-        \begin{axis}[width=7.2cm, height=4.2cm, ybar, bar width=10pt,
-                     symbolic x coords={v5,v8,v9,v10},
+        \begin{axis}[width=7.0cm, height=4.2cm, ybar, bar width=16pt,
+                     symbolic x coords={beta, eight-channel run},
                      xtick=data, ymin=0, ymax=100,
                      ylabel={\% \texttt{DAMPING}},
-                     legend style={at={(0.5,-0.26)}, anchor=north,
+                     x tick label style={font=\scriptsize},
+                     legend style={at={(0.5,-0.24)}, anchor=north,
                                    legend columns=1, draw=none, fill=none},
                      nodes near coords={\pgfmathprintnumber[fixed,zerofill,precision=1]{\pgfplotspointmeta}},
                      every node near coord/.append style={font=\tiny},
-                     enlarge x limits=0.20]
-          \addplot coordinates {(v5,23.9) (v8,15.1) (v9,26.6) (v10,16.5)};
-          \addlegendentry{counting CSV \emph{rows}}
-          \addplot coordinates {(v5,81.0) (v8,70.3) (v9,83.1) (v10,74.1)};
+                     enlarge x limits=0.45]
+          \addplot coordinates {(beta,26.6) (eight-channel run,16.5)};
+          \addlegendentry{counting rows of the log}
+          \addplot coordinates {(beta,83.1) (eight-channel run,74.1)};
           \addlegendentry{integrating \emph{time}}
         \end{axis}
       \end{tikzpicture}\\
-      {\scriptsize Identical CSVs and state column. Only the weighting differs.}
+      {\scriptsize Identical logs and state column. Only the weighting differs.}
     \end{column}
-    \begin{column}{0.44\textwidth}
+    \begin{column}{0.46\textwidth}
       \footnotesize\raggedright
-      \rawdata\ v10's \textbf{74.1\%} (time) against v9's \textbf{26.6\%}
-      (rows) $= 2.8\times$.
+      \rawdata\ The eight-channel run's \textbf{74.1\%} (time) against
+      \texttt{beta}'s \textbf{26.6\%} (rows) $= 2.8\times$.
 
       \vspace{1.5mm}
-      \goeswrong\ That reads as ``v10 nearly tripled the damping duty''. The two
-      halves came from different estimators. \textbf{Like for like, either way,
-      v9 wins}: time \textbf{83.1} vs 74.1; rows \textbf{26.6} vs 16.5.
+      \goeswrong\ That reads as ``the newer build nearly tripled the damping
+      duty''. The two halves came from different estimators. \textbf{Like for
+      like, either way, \texttt{beta} wins}: time \textbf{83.1} vs 74.1; rows
+      \textbf{26.6} vs 16.5.
 
       \vspace{1.5mm}
       \textbf{Why rows lie.} The loop samples at \textbf{24--26\,Hz} while
@@ -2444,9 +1778,9 @@ schedule it ran on.}
       it samples.
 
       \vspace{1.5mm}
-      \alert{The distortion is not constant}: rows understate \texttt{DAMPING}
-      by $3.1\times$ on v9 and $4.5\times$ on v10. Row-based figures are not
-      comparable to \emph{each other} either.
+      The distortion is not constant: rows understate \texttt{DAMPING} by
+      $3.1\times$ on \texttt{beta} and $4.5\times$ on the other. Row-based
+      figures are not comparable to \emph{each other} either.
 
       \vspace{1.5mm}
       \thefix\ Integrate timestamps.
@@ -2457,104 +1791,95 @@ schedule it ran on.}
 deck. This is a defect in the analysis rather than in the controller, and it
 nearly shipped.
 
-Both bar groups come from exactly the same CSV files and the same state column.
-The only difference is the weighting: short bars count rows, tall bars integrate
+Both bar groups come from exactly the same logs and the same state column. The
+only difference is the weighting: short bars count rows, tall bars integrate
 timestamps.
 
-The mistake was to divide one by the other. v10's time-weighted duty is 74.1
-percent. v9's row-weighted duty is 26.6. Put those side by side and v10 looks
-like it nearly tripled the damping duty, a factor of 2.8, a headline result, and
-completely fictitious. Measured the same way, either way you like, v9 is ahead.
+The mistake was to divide one by the other, which makes the newer build look like
+it nearly tripled the damping duty. Measured the same way, either way you like,
+beta is ahead.
 
-The mechanism is the loop-rate result from Part One. The controller only pays the
+The mechanism is the loop-rate result from earlier. The controller only pays the
 serial round trip while actuating, so it samples at 24 to 26 hertz while damping
-and around 345 hertz while sitting in FAULT or CALIBRATING. A row count therefore
-weights each state by how fast it happens to sample, which is a measure of how
-little the controller was doing.
+and around 345 hertz otherwise. A row count therefore weights each state by how
+fast it happens to sample, which is a measure of how little the controller was
+doing.
 
-The detail I would emphasise is the last one. The distortion is not a constant
-you could correct for: rows understate damping by 3.1 times on v9 and 4.5 on v10.
-So row-based duty cycles are not comparable to each other either, before you even
-mix estimators.
+And the distortion is not a constant you could correct for, so row-based duty
+cycles are not comparable to each other either, before you even mix estimators.
 
-And how it was caught: not by a clever check, just by noticing that two numbers
-being compared came from different places.}
+How it was caught: not by a clever check, just by noticing that two numbers being
+compared came from different places.}
 
 % ================================================================ 38
-\begin{frame}{v10: merging the branches, and \texttt{soft-saturation}}
+\begin{frame}{\texttt{delta}: a clipped loop is weakened, not broken}
   \begin{columns}[T]
-    \begin{column}{0.42\textwidth}
+    \begin{column}{0.34\textwidth}
       \centering
-      \begin{tikzpicture}[font=\tiny, scale=0.82, every node/.style={transform shape}]
-        \node[blk] (v5)  at ( 0.0, 3.3) {v5};
-        \node[blk] (v7)  at (-2.1, 1.9) {v7\\\texttt{bias-trim}};
-        \node[blk] (v8)  at ( 2.1, 1.9) {v8\\\texttt{fast-calib}\\\texttt{warm-restart}};
-        \node[blk] (v9)  at ( 2.1, 0.3) {v9\\\texttt{runaway-trend}};
-        \node[blk] (v10) at ( 0.0,-1.2) {\textbf{v10}\\\texttt{soft-saturation}\\\texttt{baseline-floor}};
-        \node[blk] (v11) at ( 0.0,-2.7) {v11\\\texttt{sat-window}\\\texttt{fast-transport}};
-        \node[blk] (v12) at ( 0.0,-4.2) {\textbf{v12}\\\texttt{sample-guard}, \texttt{decimate}\\\texttt{baseline-sanity}, LAG};
-        \draw[flow] (v5) -- (v7);
-        \draw[flow] (v5) -- (v8);
-        \draw[flow] (v8) -- (v9);
-        \draw[flow] (v7) |- (v10);
-        \draw[flow] (v9) |- (v10);
-        \draw[flow] (v10) -- (v11);
-        \draw[flow] (v11) -- (v12);
-      \end{tikzpicture}
+      \begin{tikzpicture}[font=\scriptsize, node distance=7mm]
+        \node[blk, minimum width=2.6cm] (z) {\texttt{zero}\\{\tiny one channel}};
+        \node[blk, minimum width=2.6cm, below=of z] (al) {\texttt{alpha}\\{\tiny 3 defects fixed}\\{\tiny \texttt{auto-disable}}};
+        \node[blk, minimum width=2.6cm, below=of al] (be) {\texttt{beta}\\{\tiny \texttt{runaway-trend}}\\{\tiny \texttt{fast-refault}}};
+        \node[blk, minimum width=2.6cm, below=of be] (de) {\textbf{\texttt{delta}}\\{\tiny eight channels}\\{\tiny 17 fixes}};
+        \draw[flow] (z) -- (al);
+        \draw[flow] (al) -- (be);
+        \draw[flow] (be) -- (de);
+      \end{tikzpicture}\\[1mm]
+      {\scriptsize Four kept rungs. Further builds ran between them and are in
+      version control only.}
     \end{column}
-    \begin{column}{0.56\textwidth}
+    \begin{column}{0.64\textwidth}
       \footnotesize
-      \textbf{The new fix.} v9 faulted the whole rig after 30 consecutive pinned
-      samples. But \textbf{clipping removes authority in one direction only}: an
-      output pinned at \texttt{vmax} still pulls \emph{down} at full strength. A
+      \textbf{The fix.} Earlier builds faulted the whole rig after 30
+      consecutive samples with an output pinned at its limit. But
+      \textbf{clipping removes push in one direction only}: an output stuck at
+      the top of its range can still pull all the way down at full strength. A
       clipped loop is a \textbf{weakened} loop, not a broken one, and it is
-      usually the thing bringing the optic back.
+      usually the thing bringing the mirror back.
 
       \vspace{2mm}
       \centering
-      {\scriptsize $\texttt{sat\_trip} = (\texttt{sat\_streak} > 30)
-         \ \wedge\ \neg\big(\mathrm{env} < 0.98\,\mathrm{env}(t-\mathrm{LAG})\big)$}
+      {\scriptsize $\texttt{sat\_trip} = (\text{streak} > 30)
+         \ \wedge\ \neg(\text{amplitude falling})$}
 
       \vspace{2mm}
       \raggedright
-      \textbf{The same level-against-trend correction \texttt{runaway-trend}
-      made, one interlock over.} Same history, same lag, so ``falling'' means
-      one thing to both.
+      \textbf{The same level-against-trend correction the runaway breaker got,
+      one interlock over.} Same history, same lag, so ``falling'' means one
+      thing to both.
 
       \vspace{2mm}
-      \textbf{Why the merge needed a third change.} A bias step \emph{is} a
-      force step: it rings the pendulum inside the band both trend tests read.
-      So a step \textbf{invalidates} the history instead of suspending the
-      interlocks, which would open a 16\,s hole every 15\,s.
+      \textbf{And a coupling worth knowing.} Nudging a coil's resting current
+      \emph{is} a force step: it rings the pendulum inside the band both trend
+      tests read. So a nudge \textbf{invalidates} the history instead of
+      suspending the interlocks, which would open a 16\,s hole every 15\,s.
     \end{column}
   \end{columns}
 \end{frame}
-\note{v7 and v9 were parallel branches off v5, and v10 merges them plus one new
-fix.
+\note{The named ladder on the left, because this is the point where it is worth
+showing. Four kept rungs: zero, alpha, beta, delta. Other builds ran between
+them and are in version control only; I am not going to pretend the project went
+in four clean steps.
 
-The new fix generalises v9's insight to the neighbouring interlock. v9 still
-faulted the whole rig after thirty consecutive samples with an output pinned. But
-clipping removes authority in one direction only: an output pinned at the top
-rail can still pull all the way down at full strength. So a clipped loop is a
-weakened loop, not a broken one, and it is usually the thing bringing the optic
-back. Faulting replaces a half-strength actuator with a frozen one, which is
-strictly worse.
+The fix itself generalises beta's insight to the neighbouring interlock. Earlier
+builds faulted the whole rig after thirty consecutive samples with an output
+pinned. But clipping removes push in one direction only: an output stuck at the
+top of its range can still pull all the way down at full strength. So a clipped
+loop is a weakened loop, not a broken one, and it is usually the thing bringing
+the mirror back. Faulting replaces a half-strength actuator with a frozen one,
+which is strictly worse.
 
-So the trip now needs the streak and a non-falling envelope. It reuses v9's
-envelope history and the same lag, so "falling" means exactly one thing across
-both interlocks. Note that this couples soft-saturation to the lag value, which
-matters when v12 changes it.
+So the trip now needs the streak and a non-falling amplitude, reusing the same
+history and the same lag so that falling means exactly one thing across both
+interlocks.
 
-The merge was not a paste. A bias step is a force step: it rings the pendulum
-inside the band both trend tests read. Suspending the interlocks for a ringdown
-would open a sixteen-second hole every fifteen seconds. So instead a trim step
-invalidates the history it would have corrupted: the envelope deque is cleared
-and the timers reset. The level halves keep working throughout; the trend halves
-resume one lag later. The baseline is deliberately not invalidated, because it is
-a bandpassed floor and a bias step is DC.}
+And one coupling worth knowing. Nudging a coil's resting current is a force step:
+it rings the pendulum inside the band both trend tests read. Suspending the
+interlocks for that would open a sixteen second hole every fifteen seconds. So
+instead a nudge invalidates the history it would have corrupted.}
 
 % ================================================================ 39
-\begin{frame}{v10 on the bench, 2026-08-06: \texttt{bias-trim} inside a live loop}
+\begin{frame}{\texttt{bias-trim} inside a live loop}
   \begin{columns}[T]
     \begin{column}{0.49\textwidth}
       \centering
@@ -2567,10 +1892,10 @@ a bandpassed floor and a bias step is DC.}
         ch3 $\to$ 0.75\,V & $560 \to 532$ & kept \\
         ch3 $\to$ 1.00\,V & $532 \to 507$ & kept \\
         ch1 $\to$ 0.50\,V & $507 \to \mathbf{472}$ & kept \\
-        ch3 $\to$ 1.25\,V & $472 \to 564$ & \alert{reverted} \\
+        ch3 $\to$ 1.25\,V & $472 \to 564$ & reverted \\
         ch1 $\to$ 0.75\,V & $489 \to 477$ & kept \\
-        ch1 $\to$ 1.00\,V & $477 \to 481$ & \alert{reverted} \\
-        ch0 $\to$ 0.50\,V & $501 \to 522$ & \alert{reverted} \\
+        ch1 $\to$ 1.00\,V & $477 \to 481$ & reverted \\
+        ch0 $\to$ 0.50\,V & $501 \to 522$ & reverted \\
         \bottomrule
       \end{tabular}}\\[1.5mm]
       {\scriptsize Total $|$offset from mid-scale$|$, four OSEMs, counts.}
@@ -2584,22 +1909,22 @@ a bandpassed floor and a bias step is DC.}
       \vspace{1.5mm}
       \textbf{More faults, no thrash.} 35.7\,s of \texttt{FAULT} over 7 trips is
       \textbf{5.1\,s each}, the mandatory \texttt{FAULT\_CLEAR\_SUSTAIN\_S}, as
-      v9's 5.05\,s.
+      \texttt{beta}'s 5.05\,s.
 
       \vspace{1.5mm}
-      \alert{\textbf{ch3 caused 7 of the 8 events}} (ch1 and ch2 one each). It
+      \textbf{ch3 caused 7 of the 8 events} (ch1 and ch2 one each). It
       has the \textbf{weakest coil} at $-51$\,counts/V against ch0's $-105$ and
       ch2's $+213$, and it is the channel the trim stepped three times.
       \textbf{A bias step is a force step.} \emph{Trim the weakest coil last.}
 
       \vspace{1.5mm}
-      \alert{\textbf{\texttt{soft-saturation} never fired}}: every trip was the
+      \textbf{\texttt{soft-saturation} never fired}: every trip was the
       runaway breaker. But \texttt{auto-disable} did, for the first time on
       hardware: ch2 railed, \textbf{3 of 4} kept damping, re-armed 2\,s later.
     \end{column}
   \end{columns}
 \end{frame}
-\note{v10 ran on hardware on the same 240-second three-kick schedule as v9, and
+\note{the eight-channel step ran on hardware on the same 240-second three-kick schedule as beta, and
 it is the first time bias-trim ran inside a live damping loop.
 
 Eight steps were attempted, five kept, three reverted and frozen. The reverts are
@@ -2608,7 +1933,7 @@ the point: each helped its own channel and made the total offset worse. ch3 at
 step would have stood. Best total offset reached was 472 counts from 576.
 
 None of the extra faults is thrash. Thirty-five point seven seconds of FAULT over
-seven global trips is 5.1 seconds each, exactly the mandatory all-clear hold. v9
+seven global trips is 5.1 seconds each, exactly the mandatory all-clear hold. beta
 was 5.05.
 
 And we know why there were more. Channel three caused seven of the eight events.
@@ -2618,13 +1943,13 @@ to arrest a kick. It is also the channel the trim stepped three times, and a bia
 step is a force step: the trim was perturbing the axis with the least margin.
 That is actionable. Trim the weakest channel last, not first.
 
-Finally, the caveat that matters most. soft-saturation, the fix v10 exists for,
+Finally, the caveat that matters most. soft-saturation, the fix the eight-channel step exists for,
 never fired once. Every trip was the runaway breaker. What did get confirmed for
-the first time is auto-disable, from v4: channel two railed, the other three kept
+the first time is auto-disable, from alpha: channel two railed, the other three kept
 damping, and it re-armed two seconds later.}
 
 % ================================================================ 40
-\begin{frame}{v10: \texttt{baseline-floor}, the guard v5.5 needed}
+\begin{frame}{\texttt{baseline-floor}: the guard eight channels needed}
   \begin{columns}[T]
     \begin{column}{0.50\textwidth}
       \centering
@@ -2671,22 +1996,18 @@ damping, and it re-armed two seconds later.}
       night a real channel and a dead one fall together.
 
       \vspace{1.5mm}
-      \alert{\textbf{And note what did \emph{not} save v5.5.}} Those three were
-      \emph{config-disabled} in v10 and still had to be demoted: the runaway
+      \textbf{And note what a config switch did \emph{not} do.} Those three were
+      switched off in the configuration and still had to be demoted: the runaway
       breaker gates on \texttt{healthy}, not on \texttt{enabled}.
-      \alert{Switching a channel off does not take it out of the interlocks.}
+      Switching a channel off does not take it out of the interlocks.
     \end{column}
   \end{columns}
 \end{frame}
-\note{The v5.5 failure mode fixed, in a two-line rule.
+\note{The eight-OSEM failure mode fixed, in a two-line rule.
 
-At the end of every calibration, a channel whose baseline is under ten percent of
-the median baseline across enabled channels is demoted, held at bias and taken
-out of the interlocks, and the rest keep damping.
-
-Two design points. Relative rather than a level in volts, because an absolute
-floor would depend on the seismic background and each OSEM's alignment. On a
-quieter night a real channel and a dead one fall together.
+Two design points behind it. Relative rather than a level in volts, because an
+absolute floor would depend on the seismic background and each OSEM's alignment:
+on a quieter night a real channel and a dead one fall together.
 
 Median rather than mean, and that buys a safety property outright. The largest
 enabled baseline is always at least the median, which is by definition above ten
@@ -2702,7 +2023,7 @@ ten-fold gap. And it is biased toward keeping: demoting a good sensor costs one
 loop, keeping a dead one costs the whole rig.
 
 The last box is the one I would not have predicted. Those three channels were
-already config-disabled in v10 and still had to be demoted, because the runaway
+already switched off in the configuration and still had to be demoted, because the runaway
 breaker gates on healthy rather than on enabled. Switching a channel off in the
 config does not take it out of the interlocks. On the bench it was the disabled
 channels that would have done the damage.}
@@ -2738,7 +2059,7 @@ channels that would have done the damage.}
       \scriptsize\raggedright
       \texttt{STEADY\_GAIN[5]} $= -0.015$ was a \textbf{prediction}: a5's DC
       diagonal is $-7$\,counts/V against a block mean of \textbf{4}, under
-      $2\times$ the noise. \alert{A wrong sign \emph{pumps}.}
+      $2\times$ the noise. A wrong sign \emph{pumps}.
 
       \vspace{1.5mm}
       \textbf{It damped: $0.0860 \to 0.0420$\,V}, while ch0 fell
@@ -2750,13 +2071,13 @@ channels that would have done the damage.}
       \textbf{3--12} out of every real channel.
 
       \vspace{1.5mm}
-      \alert{\textbf{Then the newer measurement retracted it.}} The
+      \textbf{Then the newer measurement retracted it.} The
       fixed-frequency refit (2026-08-06) finds a5's residue \textbf{not
       distinguishable from its own noise}, and a gain on a channel that measures
       noise \emph{injects} actuator noise while damping nothing.
 
       \vspace{1.5mm}
-      \textbf{v12 ships \texttt{STEADY\_GAIN[5]} $= 0$.} The two measurements
+      \textbf{\texttt{delta} ships \texttt{STEADY\_GAIN[5]} $= 0$.} The two measurements
       disagree and \textbf{the one with error bars wins}. a5 is still in the
       quorum while nothing drives it, which is what holds the rig out of
       \texttt{LOCKED}.
@@ -2781,7 +2102,7 @@ to twelve out of every real channel.
 
 Now the second act. A fixed-frequency refit of the eight-coil dither run on the
 same day finds a5's residue not distinguishable from its own noise. A gain on a
-channel that measures noise injects actuator noise while damping nothing. So v12
+channel that measures noise injects actuator noise while damping nothing. So delta
 drops a5 to zero gain. Two measurements disagree, and the one with error bars
 wins. That is the rule I would want people to take from this slide, not the
 happy first result.
@@ -2790,7 +2111,7 @@ And a5 staying in the quorum while being driven by nothing is exactly the bug
 that stops the rig announcing LOCKED. That is slide 50.}
 
 % ================================================================ 42
-\begin{frame}{v11: all eight, and the transport stops throttling the loop}
+\begin{frame}{\texttt{delta}: eight channels, and the wire stops throttling the loop}
   \footnotesize
   \begin{columns}[T]
     \begin{column}{0.52\textwidth}
@@ -2813,7 +2134,7 @@ that stops the rig announcing LOCKED. That is slide 50.}
       \vspace{2mm}
       \textbf{2. \texttt{fast-transport}.} \texttt{pyDAC2.FastDAC} writes and
       returns with no ack wait, and the baud goes $115200 \to 500000$.
-      \textbf{18\,Hz $\to$ 1111\,Hz.} \alert{Requires a reflash}; a host at the
+      \textbf{18\,Hz $\to$ 1111\,Hz.} Requires a reflash; a host at the
       wrong baud fails preflight with ``never sent \texttt{READY}''.
     \end{column}
     \begin{column}{0.46\textwidth}
@@ -2827,7 +2148,7 @@ that stops the rig announcing LOCKED. That is slide 50.}
       measurement the rig makes every time it calibrates}.
 
       \vspace{2mm}
-      \alert{\textbf{And then it damped worse than everything before it.}}
+      \textbf{And then it damped worse than everything before it.}
 
       \vspace{1mm}
       \centering
@@ -2836,20 +2157,20 @@ that stops the rig announcing LOCKED. That is slide 50.}
         \toprule
         240\,s, 3 kicks & DAMPING & FAULT & faults \\
         \midrule
-        v9 (4ch, 23\,Hz) & \textbf{83.1\%} & 8.5\% & 4 \\
-        v10 (8ch, 18\,Hz) & 74.1\% & 15.0\% & 8 \\
-        \alert{v11 (8ch, 1111\,Hz)} & \alert{\textbf{42.3\%}} &
-          \alert{25.3\%} & \alert{11} \\
+        \texttt{beta} (4ch, 23\,Hz) & \textbf{83.1\%} & 8.5\% & 4 \\
+        the eight-channel step (8ch, 18\,Hz) & 74.1\% & 15.0\% & 8 \\
+        the 500000-baud step (8ch, 1111\,Hz) & \textbf{42.3\%} &
+          25.3\% & 11 \\
         \bottomrule
       \end{tabular}}
 
       \vspace{1.5mm}
       \raggedright
-      \textbf{A 49$\times$ faster wire made the damping worse.}
+      \alert{\textbf{A 49$\times$ faster wire made the damping worse.}}
     \end{column}
   \end{columns}
 \end{frame}
-\note{v11 is three changes about one thing: an eight-channel rig runs a loop a
+\note{the 500000-baud step is three changes about one thing: an eight-channel rig runs a loop a
 four-channel rig does not. No gain and no threshold is retuned.
 
 sat-window first, and the ordering matters. Max consecutive saturated counted
@@ -2870,8 +2191,8 @@ both locally, and no controller has ever branched on an OK.
 Third, all eight enabled with a4, a6 and a7 at zero gain, letting baseline-floor
 demote them every calibration.
 
-And then the result. v11 damped 42.3 percent of the run against v9's 83.1 and
-v10's 74.1, with eleven faults. A forty-nine-fold faster wire made the damping
+And then the result. the 500000-baud step damped 42.3 percent of the run against beta's 83.1 and
+the eight-channel step's 74.1, with eleven faults. A forty-nine-fold faster wire made the damping
 worse. That is the setup for the two best defect slides in the deck.}
 
 % ================================================================ 43
@@ -2890,8 +2211,8 @@ worse. That is the setup for the two best defect slides in the deck.}
         \rm valid, every field in 0..1023 \\
         612,634,701,688,559,548,861,733 \\
         \midrule
-        \rm torn: 8 fields, first char a digit, \rm\alert{accepted} \\
-        612,634,\alert{522676},688,559,548,861,733 \\
+        \rm torn: 8 fields, first char a digit, \rm accepted \\
+        612,634,522676,688,559,548,861,733 \\
         \bottomrule
       \end{tabular}}
 
@@ -2902,7 +2223,7 @@ worse. That is the setup for the two best defect slides in the deck.}
       and a buffer boundary splices two fields' digits together.
 
       \vspace{2mm}
-      \alert{\textbf{The speed-up created the defect.}} v11's own 240\,s log
+      \alert{\textbf{The speed-up created the defect.}} the 500000-baud step's own 240\,s log
       carries \textbf{ten} rows with a count outside 0..1023 (5659, 65690,
       522676). \textbf{Zero} such rows appear in any of the \textbf{four} slower
       logs from the same session.
@@ -2922,8 +2243,8 @@ worse. That is the setup for the two best defect slides in the deck.}
         2 & $\times\,5.02/1023$ & $= 2564.8$\,V raw \\
         3 & $\times\,\alpha_{\mathrm{LP}} = 0.0178$ &
             $= \mathbf{+45.6}$\,\textbf{V} into bp \\
-        4 & rings down, $\tau = 0.398$\,s & the 0.4\,Hz highpass \\
-        5 & $v$ peaks & $= \mathbf{1401}$\,\textbf{V/s} \\
+        4 & rings down, $\tau_{\mathrm{HP}} = 0.398$\,s & the 0.4\,Hz highpass \\
+        5 & $\hat{v}$ peaks & $= \mathbf{1401}$\,\textbf{V/s} \\
         6 & $P = 0.030 \times 1401$ &
             $= \mathbf{42}$\,\textbf{V demanded} \\
         \midrule
@@ -2938,8 +2259,8 @@ worse. That is the setup for the two best defect slides in the deck.}
       \vspace{2mm}
       \raggedright
       One bad character pins the actuator for the whole 0.4\,s ringdown of the
-      highpass. \alert{\textbf{Four of v11's twelve entries to \texttt{FAULT}
-      follow a torn line within 2\,s}}, and the first starts the
+      highpass. \textbf{Four of the 500000-baud step's twelve entries to \texttt{FAULT}
+      follow a torn line within 2\,s}, and the first starts the
       4\,s-\texttt{DAMPING} / 5\,s-\texttt{FAULT} thrash that eats the middle of
       the run.
     \end{column}
@@ -2957,7 +2278,7 @@ stopped draining it, so the board's OK replies now arrive interleaved with data
 rows, and a buffer boundary splices two fields' digits together.
 
 The evidence that the speed-up created the defect is on the left. Ten such rows
-in v11's own 240 second log, and zero in any of the four slower logs from the
+in the 500000-baud step's own 240 second log, and zero in any of the four slower logs from the
 same session.
 
 The right column is the cost of one of them, and it is worth reading out. 522676
@@ -2969,11 +2290,11 @@ is four hundred milliseconds of corrupted signal. The velocity estimate peaks at
 1401 volts per second, and P times that is 42 volts demanded into a rail of half
 a volt.
 
-Four of v11's twelve entries to FAULT follow a torn line within two seconds, and
+Four of the 500000-baud step's twelve entries to FAULT follow a torn line within two seconds, and
 the first one starts the thrash that eats the middle of the run.}
 
 % ================================================================ 44
-\begin{frame}{v12: \texttt{sample-guard} and \texttt{decimate}, and why they ship together}
+\begin{frame}{\texttt{sample-guard} and \texttt{decimate}, and why they ship together}
   \begin{columns}[T]
     \begin{column}{0.49\textwidth}
       \footnotesize
@@ -2982,14 +2303,14 @@ the first one starts the thrash that eats the middle of the run.}
       the way an \texttt{OK} line is. Three lines.
 
       \vspace{1.5mm}
-      Replayed offline over the same v11 log, ch0's velocity estimate:
+      Replayed offline over the same the 500000-baud step log, ch0's velocity estimate:
 
       \vspace{1mm}
       \centering
       {\scriptsize
       \begin{tabular}{@{}lrr@{}}
         \toprule
-        ch0 velocity & v11 & \textbf{+guard} \\
+        ch0 velocity & the 500000-baud step & \textbf{+guard} \\
         \midrule
         rms (V/s) & 13.109 & \textbf{5.413} \\
         peak (V/s) & 1441 & \textbf{41} \\
@@ -3016,10 +2337,10 @@ the first one starts the thrash that eats the middle of the run.}
       {\scriptsize
       \begin{tabular}{@{}lrr@{}}
         \toprule
-        ch0 velocity rms (V/s) & \textbf{with} guard & \alert{\textbf{without}} \\
+        ch0 velocity rms (V/s) & \textbf{with} guard & \textbf{without} \\
         \midrule
-        v11 & 13.109 & 13.109 \\
-        $+$ decimate & \textbf{4.732} & \alert{\textbf{23.4}} \\
+        the 500000-baud step & 13.109 & 13.109 \\
+        $+$ decimate & \textbf{4.732} & \textbf{23.4} \\
         \bottomrule
       \end{tabular}}
 
@@ -3031,7 +2352,7 @@ the first one starts the thrash that eats the middle of the run.}
 
       \vspace{1.5mm}
       {\scriptsize Phase cost is measured: 100\,Hz gives back 13.1$^\circ$ at
-      3.75\,Hz against v11's wire, and still holds 18.4$^\circ$ \emph{more} than
+      3.75\,Hz against the 500000-baud step's wire, and still holds 18.4$^\circ$ \emph{more} than
       the four-coil configuration every gain here was validated at.}
     \end{column}
   \end{columns}
@@ -3039,7 +2360,7 @@ the first one starts the thrash that eats the middle of the run.}
 \note{Two fixes, and the reason they cannot be separated.
 
 sample-guard is three lines: a count outside the ADC range is a framing error and
-is dropped like an OK line. Replayed offline over the same v11 log, ch0's
+is dropped like an OK line. Replayed offline over the same the 500000-baud step log, ch0's
 velocity estimate goes from 13.1 to 5.4 volts per second rms, and the peak from
 1441 to 41. A thirty-five fold reduction in peak, recovered from data already on
 disk with no bench time at all.
@@ -3058,7 +2379,7 @@ a whole control step instead of confining it to one sample. That is why the two
 ship together and why the guard goes first.
 
 And the phase cost was measured rather than assumed. 100 hertz gives back 13.1
-degrees at 3.75 hertz against v11's raw wire, and still holds 18.4 degrees more
+degrees at 3.75 hertz against the 500000-baud step's raw wire, and still holds 18.4 degrees more
 margin than the four-coil configuration in which every gain in the file was
 originally validated.}
 
@@ -3088,8 +2409,8 @@ originally validated.}
 
       \vspace{2mm}
       \raggedright
-      \alert{\texttt{RUNAWAY\_TREND\_LAG\_S = 2.0} sits inside all three.} It
-      was chosen in v9, before any of these frequencies was known.
+      \texttt{RUNAWAY\_TREND\_LAG\_S = 2.0} sits inside all three. It
+      was chosen in \texttt{beta}, before any of these frequencies was known.
 
       \vspace{2mm}
       \goeswrong\ $\mathrm{env}(t)$ and $\mathrm{env}(t-2\mathrm{s})$ land on
@@ -3125,12 +2446,12 @@ originally validated.}
     \end{column}
   \end{columns}
 \end{frame}
-\note{The defect that made v12 damp, and it is my favourite in the deck because
+\note{The defect that made delta damp, and it is my favourite in the deck because
 the mechanism is arithmetic you can do on a napkin.
 
 The runaway growth test compares the envelope now against the envelope one lag
 ago and faults if it grew by more than two percent. The lag was set to two
-seconds in v9, before anyone had measured the mode frequencies.
+seconds in beta, before anyone had measured the mode frequencies.
 
 The frequencies are now known to half a millihertz: 0.7155, 0.9949 and 1.6396
 hertz. Three modes beating against each other give beat periods of 3.578, 1.551
@@ -3152,7 +2473,8 @@ The optic was being damped. The supervisor was watching a beat.}
   \begin{columns}[T]
     \begin{column}{0.48\textwidth}
       \footnotesize
-      \rawdata\ Measured closed-loop decay, $\tau = 56$--$130$\,s. How far does
+      \rawdata\ $\tau_{\mathrm{env}}$, the decay of the \emph{envelope the
+      breaker watches} after a kick, measures \textbf{56--130\,s}. How far does
       that fall in one lag?
 
       \vspace{1mm}
@@ -3160,9 +2482,9 @@ The optic was being damped. The supervisor was watching a beat.}
       {\scriptsize
       \begin{tabular}{@{}lcc@{}}
         \toprule
-        & $\tau = 56$\,s & $\tau = 130$\,s \\
+        & $\tau_{\mathrm{env}} = 56$\,s & $130$\,s \\
         \midrule
-        fall in \textbf{2\,s} & 3.5\% & \alert{\textbf{1.5\%}} \\
+        fall in \textbf{2\,s} & 3.5\% & \textbf{1.5\%} \\
         fall in \textbf{10\,s} & \textbf{16.4\%} & \textbf{7.4\%} \\
         \midrule
         \multicolumn{3}{@{}l}{threshold: 2\%} \\
@@ -3172,13 +2494,13 @@ The optic was being damped. The supervisor was watching a beat.}
       \vspace{1.5mm}
       \raggedright
       \goeswrong\ At \texttt{LAG} $= 2$\,s a genuine ringdown moves
-      \textbf{1.5--3.6\%}, straddling the 2\% line. \alert{The breaker could not
-      tell a real decay from a beat, in either direction.}
+      \textbf{1.5--3.6\%}, straddling the 2\% line. The breaker could not
+      tell a real decay from a beat, in either direction.
 
       \vspace{1.5mm}
       \thefix\ \texttt{RUNAWAY\_TREND\_LAG\_S} $2.0 \to \mathbf{10.0}$\,s:
       \textbf{2.8$\times$} the longest beat, \textbf{5.6--13$\times$} shorter
-      than $\tau$.
+      than $\tau_{\mathrm{env}}$.
 
       \vspace{1.5mm}
       \textbf{The remaining 14.4\% is not thrash.} $7 \times 5$\,s of mandatory
@@ -3198,7 +2520,7 @@ The optic was being damped. The supervisor was watching a beat.}
         \multicolumn{5}{@{}l}{\emph{whole suite, everything else identical}} \\
         \texttt{LAG} $= 2.0$ & \multicolumn{4}{l}{43 passed / 7 failed} \\
         \textbf{\texttt{LAG} $= 10.0$} & \multicolumn{4}{l}{42 passed /
-          \alert{8 failed}} \\
+          8 failed} \\
         \bottomrule
       \end{tabular}}\\[1mm]
       {\scriptsize Two runs, 244.5\,s, five hand kicks.}
@@ -3212,12 +2534,12 @@ The optic was being damped. The supervisor was watching a beat.}
 
       \vspace{1mm}
       \textbf{The wrong sign is still caught}: the companion
-      \texttt{faults > 0} passes at both. \alert{A breaker that no longer reads a
+      \texttt{faults > 0} passes at both. A breaker that no longer reads a
       1.55\,s beat as growth also fires less often on something genuinely
-      growing.}
+      growing.
 
       \vspace{1.5mm}
-      \alert{\textbf{Not a win over v9's 83.1\%}}: different kick schedule.
+      \textbf{Not a win over \texttt{beta}'s 83.1\%}: different kick schedule.
     \end{column}
   \end{columns}
 \end{frame}
@@ -3230,18 +2552,12 @@ percent, straddling the two percent threshold the test uses. So the breaker coul
 not reliably see a real decay either. It was not that the test was too sensitive;
 it was that at a two-second lag there was almost no signal in it at all.
 
-The fix is one constant. Ten seconds is 2.8 times the longest beat period, so the
-beat averages out, and 5.6 to 13 times shorter than the decay constant, so a real
-ringdown now moves 7 to 16 percent, comfortably clear of two.
+The fix is one constant, and the two tables on the right are the result, measured
+back to back on the same evening with the same gains.
 
-The right-hand table is the result, measured back to back on the same evening
-with the same gains. Damping time from 54.1 percent to 77.5, fault time from 25.2
-to 14.4, calibration from 20.7 to 8.2, and fault entries from 10 to 7.
-
-And the remaining fault time is accounted for exactly: seven entries times the
-five-second mandatory all-clear hold is 35 seconds, which is 14.3 percent of the
-244 second run against the 14.4 measured. It is the hold, not the breaker
-re-tripping.
+The remaining fault time is accounted for exactly: seven entries times the
+five-second mandatory hold is 35 seconds against the 14.4 percent measured. It is
+the hold, not the breaker re-tripping.
 
 Now the honest cost, and I want it said rather than skipped. Run the whole suite
 at each lag value with everything else identical and the score goes from 43
@@ -3255,9 +2571,9 @@ that no longer reads a 1.55 second beat as growth also fires less often on
 something that genuinely is growing.
 
 The last box is the discipline point and I want it said out loud. Do not put
-77.5 next to v9's 83.1 and call it a win or a loss. v9's three kicks were
-scripted; v12's five were by hand at unrecorded strength and hard enough to clip
-every channel. The comparisons that are controlled are v12 against v11 and v12
+77.5 next to beta's 83.1 and call it a win or a loss. beta's three kicks were
+scripted; delta's five were by hand at unrecorded strength and hard enough to clip
+every channel. The comparisons that are controlled are delta against the 500000-baud step and delta
 against itself across the lag change, and both are on this slide.}
 
 % ================================================================ 47
@@ -3266,10 +2582,10 @@ against itself across the lag change, and both are on this slide.}
     \begin{column}{0.50\textwidth}
       \footnotesize
       \rawdata\ Caught on hardware: a fresh calibration produced a noise floor
-      \alert{\textbf{11.5$\times$}} the trusted one.
+      \textbf{11.5$\times$} the trusted one.
 
       \vspace{1mm}
-      What that does to every derived threshold, taking v3's ch0 floor as the
+      What that does to every derived threshold, taking \texttt{alpha}'s ch0 floor as the
       trusted value:
 
       \vspace{1mm}
@@ -3277,11 +2593,11 @@ against itself across the lag change, and both are on this slide.}
       {\scriptsize
       \begin{tabular}{@{}lcc@{}}
         \toprule
-        & trusted & \alert{inflated $11.5\times$} \\
+        & trusted & inflated $11.5\times$ \\
         \midrule
-        baseline (V) & 0.1804 & \alert{2.075} \\
-        runaway line, $1.8\times$ & 0.325 & \alert{3.735} \\
-        lock line, $0.35\times$ & 0.063 & \alert{0.726} \\
+        baseline (V) & 0.1804 & 2.075 \\
+        runaway line, $1.8\times$ & 0.325 & 3.735 \\
+        lock line, $0.35\times$ & 0.063 & 0.726 \\
         \bottomrule
       \end{tabular}}
 
@@ -3292,7 +2608,7 @@ against itself across the lag change, and both are on this slide.}
       calibration measured the \emph{ringing}, not the room.
 
       \vspace{1mm}
-      \alert{And \texttt{persist-baseline} would carry it across restarts.}
+      And \texttt{persist-baseline} would carry it across restarts.
     \end{column}
     \begin{column}{0.48\textwidth}
       \footnotesize
@@ -3307,7 +2623,7 @@ against itself across the lag change, and both are on this slide.}
 
       \vspace{2.5mm}
       \textbf{What the persistence buys.} The noise floor is a property of the
-      room, not of the run, so v12 writes it to disk and reuses it across
+      room, not of the run, so \texttt{delta} writes it to disk and reuses it across
       restarts, behind a config fingerprint, an age limit and a sanity check.
 
       \vspace{1mm}
@@ -3323,8 +2639,8 @@ against itself across the lag change, and both are on this slide.}
 
       \vspace{1.5mm}
       \raggedright
-      {\scriptsize This completes defect 3, nine versions later. v3 made one bad
-      sub-window outvotable; v12 makes a bad \emph{whole calibration} refusable.}
+      {\scriptsize This completes defect 3, nine versions later. \texttt{alpha} made one bad
+      sub-window outvotable; \texttt{delta} makes a bad \emph{whole calibration} refusable.}
     \end{column}
   \end{columns}
 \end{frame}
@@ -3336,7 +2652,7 @@ not. Stationarity is not quietness: a calibration taken while the optic is still
 ringing measures the ringing.
 
 This was caught on hardware. A fresh calibration produced a floor 11.5 times the
-trusted one. The left column is what that costs, using v3's channel zero floor as
+trusted one. The left column is what that costs, using alpha's channel zero floor as
 the trusted number. The runaway trip line goes from 0.325 volts to 3.7, so the
 breaker is effectively blind, and the lock line goes from 0.063 to 0.726, so the
 rig would announce LOCKED at 11.5 times the residual motion it should demand.
@@ -3352,7 +2668,7 @@ three, so if the room genuinely did get louder the controller cannot sit there
 refusing reality forever.
 
 The persistence itself is what takes cold-start calibration from twenty seconds
-to two, and twenty seconds of zero gain was the single biggest waste v8 went
+to two, and twenty seconds of zero gain was the single biggest waste the build before beta went
 after.}
 
 % ================================================================ PART V
@@ -3364,12 +2680,12 @@ after.}
     \begin{column}{0.52\textwidth}
       \footnotesize
       \rawdata\ \textbf{Zero} \texttt{*** LOCKED ***} lines in \emph{every} run
-      of the 2026-08-06 session: v10, v11 and v12 have never printed it. The
+      of the 2026-08-06 session: the eight-channel step, the 500000-baud step and \texttt{delta} have never printed it. The
       lock time is \textbf{the deliverable}.
 
       \vspace{1.5mm}
       \textbf{But the rig does lock.} The four \texttt{ch\{i\}\_locked} columns
-      are simultaneously 1 for \textbf{6 distinct episodes} on the good v12 run,
+      are simultaneously 1 for \textbf{6 distinct episodes} on the good \texttt{delta} run,
       and \textbf{3} on the run before it.
 
       \vspace{2mm}
@@ -3394,8 +2710,8 @@ after.}
         a2 & yes & yes & $<0.35$ & 1 \\
         a3 & yes & yes & $<0.35$ & 1 \\
         \midrule
-        \textbf{a5} & \alert{\textbf{yes}} & \alert{\textbf{no}} &
-          \alert{\textbf{1.26--2.53}} & \alert{\textbf{0}} \\
+        \textbf{a5} & \textbf{yes} & \textbf{no} &
+          \textbf{1.26--2.53} & \textbf{0} \\
         \midrule
         a4 & no (\texttt{NOSIG}) & no & n/a & n/a \\
         a6 & no (\texttt{NOSIG}) & no & n/a & n/a \\
@@ -3410,7 +2726,7 @@ after.}
       \texttt{STEADY\_GAIN[5]} $= 0$ so nothing drives it.
 
       \vspace{1.5mm}
-      \thefix\ \alert{\textbf{Not yet applied.}} Drop zero-gain channels from
+      \thefix\ \textbf{Not yet applied.} Drop zero-gain channels from
       the quorum. \textbf{One line}, and first on the open list.
     \end{column}
   \end{columns}
@@ -3418,18 +2734,18 @@ after.}
 \note{The open defect that matters most, because the lock time is the stated
 deliverable and we have not produced one since 2026-08-04.
 
-Zero LOCKED lines in every run of the 08-06 session. v10, v11 and v12 have never
+Zero LOCKED lines in every run of the 08-06 session. the eight-channel step, the 500000-baud step and delta have never
 printed it.
 
 The first thing to establish is that this is not a damping failure. The CSV
-carries a per-channel locked flag, and on the good v12 run the four real channels
+carries a per-channel locked flag, and on the good delta run the four real channels
 are simultaneously locked for six distinct episodes. The rig locks. It just
 cannot say so.
 
 The table is the cause. The announcement requires every live channel to be
 locked, where live means enabled and healthy, and ENABLE_CHANNEL is true on all
 eight. a4, a6 and a7 demote themselves to NOSIG, so they drop out of live. a5
-does not: it stays healthy, so it stays in the quorum. But v12 ships a5 at zero
+does not: it stays healthy, so it stays in the quorum. But delta ships a5 at zero
 gain, for the good reason on the a5 slide, so nothing drives it, and it sits at
 a ratio between 1.26 and 2.53 against a lock line of 0.35.
 
@@ -3442,14 +2758,14 @@ list.}
 % ================================================================ 49
 \begin{frame}{Open defect 2: no OSEM rests at mid-scale}
   \footnotesize
-  The ADC reads \textbf{0 to 1023 counts}, so \textbf{mid-scale is 511.5}. A
-  channel resting away from mid-scale has \textbf{asymmetric room} before it
-  reaches a rail: \textbf{above} $= 1023 - $ resting, \textbf{below} $=$ resting.
+  The ADC reads \textbf{0 to 1023 counts}, so \textbf{mid-scale is 511.5}. Room
+  before a rail is \textbf{above} $= 1023 -$ resting, \textbf{below} $=$ resting.
+
+  \vspace{1mm}
   \begin{columns}[T]
-    \begin{column}{0.50\textwidth}
-      \vspace{1mm}
+    \begin{column}{0.49\textwidth}
       \rawdata\ Resting counts, \texttt{CALIBRATING}, 22\,246 samples, outputs
-      held at bias:
+      at bias:
 
       \vspace{1mm}
       \centering
@@ -3459,33 +2775,28 @@ list.}
         & ch0 & ch1 & \textbf{ch2} & ch3 \\
         \midrule
         resting count & 601.2 & 630.3 & \textbf{686.5} & 681.8 \\
-        \midrule
         room above & 422 & 393 & \textbf{336} & 341 \\
         room below & 601 & 630 & \textbf{686} & 682 \\
         \bottomrule
       \end{tabular}}
 
-      \vspace{2mm}
+      \vspace{1.5mm}
       \raggedright
       \textbf{Every channel rests \emph{above} mid-scale, so every channel meets
-      its \emph{top} rail first.} ch2 is worst: \textbf{2.0$\times$} as much room
-      below as above.
+      its \emph{top} rail first.} ch2 is worst, with \textbf{2.0$\times$} as much
+      room below as above.
     \end{column}
-    \begin{column}{0.47\textwidth}
-      \vspace{1mm}
+    \begin{column}{0.48\textwidth}
       \goeswrong\ \textbf{A railed sensor is outside its linear region}, so the
-      velocity estimate derived from it is wrong \alert{exactly when the optic
-      is moving hardest and the loop is pushing hardest}.
+      velocity estimate from it is wrong exactly when the optic is moving
+      hardest and the loop is pushing hardest.
 
       \vspace{1.5mm}
-      Fraction of samples at or beyond a rail, over \textbf{251{,}280} samples:
-
-      \vspace{1mm}
       \centering
       {\scriptsize\setlength{\tabcolsep}{4pt}
       \begin{tabular}{@{}lcccc@{}}
         \toprule
-        & ch0 & ch1 & \textbf{ch2} & ch3 \\
+        of 251\,280 samples & ch0 & ch1 & \textbf{ch2} & ch3 \\
         \midrule
         railed & 2.9\% & 0.8\% & \textbf{3.6\%} & 0.9\% \\
         \texttt{rail} interlock caught & 136 & 0 & 51 & 0 \\
@@ -3494,30 +2805,24 @@ list.}
 
       \vspace{1.5mm}
       \raggedright
-      The interlock requires the pin to be \emph{sustained}, so it caught
-      \textbf{187} of \textbf{20{,}696} railed samples.
-      \alert{\textbf{About 99\% of this clipping is invisible to every
-      interlock.}}
-
-      \vspace{2mm}
-      \thefix\ \alert{\textbf{Proposed, not yet run: the bias sweep.}} Coil bias
-      is a static force, so step one channel $0.10 \to 0.40$\,V at zero gain and
-      log the resting counts. \textbf{If they move}, the offset is
-      electromagnetic and a per-channel bias trim removes it. \textbf{If they do
-      not}, it is mechanical flag alignment. \textbf{Two commands and a log.}
+      The interlock needs the pin \emph{sustained}, so it caught \textbf{187} of
+      \textbf{20{,}696}. \alert{\textbf{About 99\% of this clipping is invisible
+      to every interlock.}}
     \end{column}
   \end{columns}
+
+  \vspace{2mm}
+  {\footnotesize \thefix\ \textbf{Proposed, not yet run: the bias
+  sweep.} Coil bias is a static force, so step one channel $0.10 \to 0.40$\,V at
+  zero gain and log the resting counts. \textbf{If they move}, the offset is
+  electromagnetic and a bias trim removes it; \textbf{if not}, it is mechanical
+  flag alignment. \textbf{Two commands and a log.}}
 \end{frame}
 \note{The open hardware defect underneath every number in this deck, and it
 starts from the sensor geometry.
 
-The ADC reads zero to 1023 counts, so mid-scale is 511.5. A channel that rests
-away from mid-scale has asymmetric room before it reaches a rail: the room above
-is 1023 minus the resting count, the room below is the resting count itself.
-
-Measured with the outputs held at bias: 601, 630, 686 and 682 counts. Every one
-of them rests above mid-scale, so every one meets its top rail first. Channel two
-is worst, with 336 counts above and 686 below, a factor of two.
+Every channel rests above mid-scale, so every one meets its top rail first, and
+channel two is worst at a factor of two.
 
 Now the consequence, which is the point of the slide. A railed sensor is outside
 its linear region. So the velocity estimate derived from it is wrong exactly when
@@ -3541,7 +2846,7 @@ worth having.}
   \begin{tikzpicture}
     \begin{axis}[width=10.6cm, height=2.0cm, xbar stacked, bar width=15pt,
                  xmin=0, xmax=0.32, ymin=-0.6, ymax=1.6,
-                 ytick={0,1}, yticklabels={\textbf{v12}, shipping},
+                 ytick={0,1}, yticklabels={\textbf{\texttt{delta}}, shipping},
                  y tick label style={font=\scriptsize},
                  xlabel={peak term contribution to the coil command (V)},
                  xtick={0,0.05,0.10,0.15,0.20,0.25,0.30},
@@ -3577,13 +2882,13 @@ worth having.}
     \end{column}
     \begin{column}{0.48\textwidth}
       \footnotesize\raggedright
-      \alert{Nothing in this project justifies \texttt{KI\_GAIN} or
-      \texttt{KD\_GAIN}.} Not a scope trace, not a sweep, not a sentence.
-      $-0.030$ has one. And v2 measured what they buy: \textbf{0.028} against
-      v1's P-only \textbf{0.025}.
+      Nothing in this project justifies \texttt{KI\_GAIN} or
+      \texttt{KD\_GAIN}. Not a scope trace, not a sweep, not a sentence.
+      $-0.030$ has one. And the early four-channel build measured what they buy: \textbf{0.028} against
+      the early four-channel build's P-only \textbf{0.025}.
 
       \vspace{1.5mm}
-      \thefix\ v12 cuts $K_i$ and $K_d$ to 15\% and raises $K_p$ to the
+      \thefix\ \texttt{delta} cuts $K_i$ and $K_d$ to 15\% and raises $K_p$ to the
       $0.035$ ceiling.
 
       \vspace{1mm}
@@ -3591,7 +2896,7 @@ worth having.}
       {\footnotesize
       \begin{tabular}{@{}lcc@{}}
         \toprule
-        & shipping & \textbf{v12} \\
+        & shipping & \textbf{\texttt{delta}} \\
         \midrule
         peak demand & 0.2998\,V & \textbf{0.2001\,V} \\
         authority that \emph{damps} & 43\% & \textbf{88\%} \\
@@ -3600,214 +2905,100 @@ worth having.}
 
       \vspace{1.5mm}
       \raggedright
-      {\scriptsize Still to be confirmed on the bench. v3 is the A/B baseline.}
+      {\scriptsize Still to be confirmed on the bench. \texttt{alpha} is the A/B baseline.}
     \end{column}
   \end{columns}
 \end{frame}
 \note{This is the number I would act on first, and it converts the previous
 slide's clipping from a hardware complaint into an arithmetic error.
 
-Take the peak contribution each PID term makes to the coil command under the
-gains that actually ran on the bench. P is 0.1279 volts, I is 0.1135, D is
-0.0584. They sum to 0.2998 volts against an actuator half-window of 0.250. The
-shipped gains were twenty percent over budget. That is the clipping, stated as
-arithmetic rather than as a symptom.
+The bar chart is the peak contribution each term makes to the coil command. The
+shipped gains summed to twenty percent over the actuator window, which is the
+clipping stated as arithmetic rather than as a symptom.
 
-Now put it next to the P-I-D slide from Part One. P is the only term that removes
-energy. The largest single item in the budget is the integrator at 0.1135 volts,
-thirty-eight percent of the whole thing, and it dissipates nothing. There is a
-sharper version of that: the integrator sits behind the 0.4 hertz highpass, so
+The largest single item in that budget is the integrator, thirty-eight percent,
+and it dissipates nothing. There is a sharper version of that: the integrator sits behind the 0.4 hertz highpass, so
 its output is exactly minus Ki times the bandpassed signal, and the bandpassed
 signal carries no DC for an integrator to reject. It is not a weak term, it is
 the wrong term.
 
 And nothing in this project justifies either Ki or Kd. Minus 0.030 has a scope
-trace. These two have nothing. They were switched on in v2 to see
+trace. These two have nothing. They were switched on in the early four-channel build to see
 what would happen, the answer was no improvement, and they were carried in every
 version since.
 
-v12 cuts Ki and Kd to fifteen percent and raises Kp to the 0.035 ceiling. Peak
+delta cuts Ki and Kd to fifteen percent and raises Kp to the 0.035 ceiling. Peak
 demand goes to 0.2001 volts, inside the window, and the share of actuator
 authority spent on terms that actually remove energy goes from 43 percent to 88.
-That is not yet confirmed on the bench, and v3 is the baseline to A/B it
+That is not yet confirmed on the bench, and alpha is the baseline to A/B it
 against.}
 
-% ================================================================ 51
-\begin{frame}{MIMO is closed, by measurement rather than by failure}
+% ================================================================ 50b
+\begin{frame}{Four gains, two observable degrees of freedom}
   \begin{columns}[T]
-    \begin{column}{0.50\textwidth}
-      \footnotesize
-      \rawdata\ Full fixed-frequency refit of the 8-coil dither run. Three
-      modes, but only \textbf{three} sensors have a determined residue row:
-      \textbf{a0, a2, a3}.
-
-      \vspace{1mm}
-      a1 never reaches the \textbf{6 usable tones} it needs. Its noise floor is
-      \textbf{0.024\,V} against a0's \textbf{0.0047\,V}.
-
-      \vspace{2mm}
-      \alert{\textbf{So $\Phi$ comes out SQUARE.}} Three modes, three usable
-      sensors.
-
-      \vspace{2mm}
-      \goeswrong\ Three consequences, and each kills a separate argument for
-      doing this at all:
-      \begin{enumerate}\setlength{\itemsep}{1pt}
-        \item \textbf{No graceful degradation.} Drop any one sensor and $\Phi$
-              can no longer span the modes.
-        \item \textbf{No sensor-disagreement check.} A square $\Phi$ reproduces
-              any reading exactly. Measured residual \textbf{1.8e--16}.
-        \item \textbf{It fails when needed.} A hard kick railed all three of
-              those sensors.
-      \end{enumerate}
-    \end{column}
     \begin{column}{0.48\textwidth}
       \footnotesize
-      \textbf{It is a sensor problem, not a coil problem.} The allocator is
-      fine:
-
-      \vspace{1mm}
-      \centering
-      {\scriptsize
-      \begin{tabular}{@{}ll@{}}
-        \toprule
-        $A$ & $3 \times 4$ \\
-        cond & \textbf{1.41} \\
-        singular values & 1.000 / 0.885 / 0.711 \\
-        \bottomrule
-      \end{tabular}}
-
-      \vspace{1mm}
-      {\scriptsize Coils 0--3 drive all three modes with a spare direction.}
-
-      \vspace{2mm}
-      \raggedright
-      \textbf{Coils 4--7 are separately useless, for an unrelated reason.}
-      Pairwise column cosine \textbf{+0.966}: one shared direction, at
-      \textbf{1/4 to 1/7} the strength of coils 0--3.
-
-      \vspace{2mm}
-      \thefix\ \textbf{None. Do not re-attempt it.} Unblocking means determining
-      a1's row: 6 usable tones against the 2--5 it currently reaches. More dwell
-      or more drive on the tones a1 responds to. \textbf{A bench session, not a
-      hardware change.}
+      \rawdata\ Fit the plant from the dither run and ask what the added damping
+      depends on:
 
       \vspace{1.5mm}
-      \alert{\textbf{MIMO needs better sensors and better coils}}, in that
-      order.
-    \end{column}
-  \end{columns}
-\end{frame}
-\note{The epilogue to the modal v4, and it is a negative result with a clean
-argument, which is why it gets a slide.
-
-A full fixed-frequency refit of the eight-coil dither run says: three modes, and
-only three sensors with a determined residue row, a0, a2 and a3. a1 never reaches
-the six usable tones it needs, because its noise floor is 0.024 volts against
-a0's 0.0047.
-
-Three modes and three usable sensors means the modal projection matrix comes out
-square. And a square projection kills every remaining argument for modal control,
-one at a time.
-
-It kills graceful degradation, because dropping any one sensor leaves you unable
-to span the modes. It deletes the sensor-disagreement check from the four-sensor
-slide in Part One, because a square matrix reproduces any reading exactly, and
-that is measured: residual 1.8 times ten to the minus sixteen. And it fails
-exactly when you would want it, because a hard kick railed all three of those
-sensors at once.
-
-The important qualifier: this is a sensor problem, not a coil problem. The
-allocator is in good shape. Three by four, condition number 1.41, singular values
-1.000, 0.885 and 0.711. Coils zero to three drive all three modes with a spare
-direction.
-
-Coils four to seven are separately useless for an unrelated reason: their pairwise
-column cosine is plus 0.966, so they are one shared direction, at a quarter to a
-seventh of the strength of the working coils.
-
-So the conclusion is recorded here so it is not re-attempted. MIMO needs better
-sensors and better coils. If it is ever revisited, the specific unblocking step is
-determining a1's row, which is a bench session and not a hardware change.}
-
-% ================================================================ 52
-\begin{frame}{Open defect 4: a file that refused to run, and did not}
-  \begin{columns}[T]
-    \begin{column}{0.50\textwidth}
-      \footnotesize
-      \rawdata\ \texttt{osem.v13.py} declares
-      \texttt{KIND = "skeleton"} and its own docstring says it must not drive
-      the optic.
-
-      \vspace{1mm}
       \centering
-      {\scriptsize\ttfamily
-      \begin{tabular}{@{}l@{}}
+      {\footnotesize
+      \begin{tabular}{@{}lc@{}}
         \toprule
-        \rm before \\
-        def \_unused\_main(): raise SystemExit(...) \\
-        def main(): \ \ \ \ \ \ \ \# runs v12's loop \\
+        free gains per term, ch0--ch3 & \textbf{4} \\
+        observable degrees of freedom & \textbf{2} \\
         \midrule
-        \rm after \\
-        def main(): raise SystemExit(...) \\
-        def \_run\_as\_v12(): \ \# deliberate path only \\
+        \textbf{undetermined dimension} & \textbf{2} \\
         \bottomrule
       \end{tabular}}
 
       \vspace{2mm}
       \raggedright
-      \goeswrong\ The refusal was \textbf{defined and never called}.
-      \alert{\textbf{\texttt{make run V=v13} would have driven the optic}} from
-      a file whose own docstring forbids it.
+      Damping constrains exactly \textbf{two linear functionals} of a
+      four-element gain vector.
     \end{column}
-    \begin{column}{0.48\textwidth}
-      \footnotesize
-      \thefix\ Swap the names. \texttt{main()} refuses;
-      \texttt{\_run\_as\_v12()} is the deliberate path.
+    \begin{column}{0.49\textwidth}
+      \footnotesize\raggedright
+      \alert{\textbf{So a two-dimensional family of gain vectors damps
+      identically.}} Every direction inside it is indistinguishable by
+      measurement, and the optimiser picks its point \textbf{by minimum actuator
+      effort, not by measurement}.
 
       \vspace{2mm}
-      \textbf{A second one, equally invisible.} v13 does not define the
-      module-level constants a controller must, so \texttt{S.load()} raised
-      \texttt{AttributeError} on \texttt{ENVELOPE\_WINDOW\_S} and took
-      \texttt{make list} down with it. Fixed by the \texttt{KIND} declaration,
-      and \texttt{harness.declared()} now reads the
-      \texttt{VERSION\_TAG, BENCH\_STATUS} tuple so a file that is never loaded
-      can still report its own status.
+      \textbf{This is ill-posedness, not a missing experiment.} More dither does
+      not shrink a null space.
 
       \vspace{2mm}
-      \textbf{And one still standing.} \texttt{\_run\_as\_v12()} does
-      \texttt{v12.Controller = Controller}: it \emph{mutates the v12 module}.
-      That is not the shipping form. \texttt{bench.py} prints the gain vectors
-      out of the file about to run, and a controller importing its body from
-      another file defeats exactly that check.
-      \textbf{Flatten it before treating it as a version.}
+      \textbf{Flat is as good as any point in that family.} At the $0.035$
+      ceiling, flat $\pm 0.035$ reaches \textbf{90\% of the achievable maximum},
+      worst-mode added decay \textbf{0.0739\,s$^{-1}$}.
+
+      \vspace{2mm}
+      \textbf{The measurable lever is the actuator budget, not the gain
+      shape.}
     \end{column}
   \end{columns}
 \end{frame}
-\note{A process defect rather than a control defect, and it is here because both
-halves of it were invisible.
+\note{A measured fact about the diagonal loop that ships.
 
-osem.v13.py declares KIND equals skeleton and its own docstring says it must not
-drive the optic. It was written to carry a three-mode modal law, and that law is
-unreachable because MIMO is closed by measurement. What is left is v12's control
-law plus a modal observer logging at zero force.
+Fit the plant from the dither run and ask what the added damping actually depends
+on. There are four free gains across channels zero to three, but only two
+observable degrees of freedom, so the undetermined dimension is two. Damping
+constrains exactly two linear functionals of a four-element gain vector.
 
-The refusal was defined as underscore-unused-main and never called. The live main
-ran v12's loop. So make run V equals v13 would have driven the optic from a file
-whose own docstring forbids it. The fix is to swap the names.
+That means a two-dimensional family of gain vectors damps identically. Every
+direction inside it is indistinguishable by measurement. The optimiser still has
+to return one point, and it picks by minimum actuator effort rather than by
+measurement, which it states outright.
 
-The second one is the same shape. v13 does not define the module-level constants
-a controller must, so loading it raised AttributeError and took make list down
-with it. Fixed by the KIND declaration, and the harness now reads the version tag
-and bench status out of a tuple, so a file that is never loaded can still report
-its own status.
+The word that matters is ill-posed rather than unmeasured. More dither does not
+shrink a null space.
 
-And one is still standing. The deliberate path mutates the v12 module by
-assigning to v12.Controller. That is fine for a skeleton driven deliberately, but
-it is not the shipping form. This repo's rule is that every controller is
-standalone, because bench.py prints the gain vectors out of the file that is
-about to run, and a controller importing its body from another file defeats
-exactly that check. Flatten it before treating it as a version.}
+The practical consequence is that flat is as good as any other point in that
+family: at the 0.035 ceiling, flat reaches ninety percent of the achievable
+maximum with a worst-mode added decay of 0.0739 per second. The lever that is
+measurable, and that does pay, is the actuator budget rather than the gain shape.}
 
 % ================================================================ PART VI
 \section{Closing}
@@ -3850,8 +3041,8 @@ exactly that check. Flatten it before treating it as a version.}
       \text{added}}$ damping, so it falls monotonically with gain.
 
       \vspace{2mm}
-      \alert{\textbf{The floor falls with gain, and gain is capped at
-      $|K_p| = 0.035$ by the instability bound.}} Those two facts are the vice
+      \textbf{The floor falls with gain, and gain is capped at
+      $|K_p| = 0.035$ by the instability bound.} Those two facts are the vice
       the project sits in.
 
       \vspace{2mm}
@@ -3893,8 +3084,8 @@ from 0.009 to 0.009 while you are sitting at 0.23.}
 
       \vspace{2mm}
       \textbf{\texttt{SIM\_CHANNELS = (4, 8)}}, against a \emph{measured}
-      eight-OSEM body. \alert{Four- and eight-channel controllers are both
-      simulated.} Only \texttt{osem.v6.py} and \texttt{osem.v13.py} are skipped,
+      eight-OSEM body. Four- and eight-channel controllers are both
+      simulated. Only \texttt{osem.\texttt{sysid}.py} and \texttt{osem.the unwritten build.py} are skipped,
       both by \texttt{KIND}.
 
       \vspace{2mm}
@@ -3905,7 +3096,7 @@ from 0.009 to 0.009 while you are sitting at 0.23.}
     \end{column}
     \begin{column}{0.5\textwidth}
       \footnotesize
-      \alert{\textbf{What it cannot tell you:}}
+      \textbf{What it cannot tell you:}
       \begin{itemize}\setlength{\itemsep}{2pt}
         \item \textbf{A safe gain.} More negative $K_p$ is monotonically more
               damping all the way to $-0.6$. The ADC model reproduces
@@ -3920,29 +3111,22 @@ from 0.009 to 0.009 while you are sitting at 0.23.}
       \vspace{2mm}
       \textbf{\texttt{make check}: 220 passed, 11 failed} in 925\,s.
       \texttt{sample-guard}, \texttt{decimate} and all five
-      \texttt{persist-baseline} assertions pass. \alert{The 11 failures are in
+      \texttt{persist-baseline} assertions pass. The 11 failures are in
       \texttt{warm-restart} / baseline-reuse and are \emph{not yet
-      attributed}}: only 2 of the 11 were ever read.
+      attributed}: only 2 of the 11 were ever read.
     \end{column}
   \end{columns}
 \end{frame}
 \note{A slide about epistemics, because it is what keeps the numbers in this deck
 trustworthy.
 
-The simulator's strength is that it runs the real controller. Every version is
-imported and stepped, not reimplemented. Only the serial module and the DAC
-controller are stubbed.
+The strength is that it runs the real controller: every version is imported and
+stepped, not reimplemented, with only the serial module and the DAC controller
+stubbed. So a behavioural result here is a result about the code that runs on the
+bench.
 
-And a correction to what this deck used to say. It used to say eight-channel
-controllers are skipped by design because the simulator models a four-OSEM body.
-That is now stale. SIM_CHANNELS is four or eight, sim/server.py carries a measured
-eight-OSEM body built from the 08-04 and 08-06 logs, and v10, v11 and v12 are
-simulated rather than skipped. Only v6 and v13 are skipped, both by their KIND
-declaration.
-
-The plant is a linear second-order oscillator per mode with exactly one
-nonlinearity, the ADC. That is why clipping emerges on its own in simulation,
-with the bench's actual asymmetry.
+The one nonlinearity is the ADC, which is why clipping emerges on its own in
+simulation with the bench's actual asymmetry.
 
 The blind spots. It cannot tell you a safe gain, because the plant is linear and
 damping increases monotonically to minus 0.6. It cannot catch a wrong coil map,
@@ -3951,7 +3135,7 @@ controller declares. And it could not have found the torn serial frame, because
 the transport is exactly the thing that is stubbed.
 
 Finally, be honest about the suite as it stands: 220 passed and 11 failed. The
-fixes v12 introduced all pass. The failures are in warm-restart and baseline
+fixes delta introduced all pass. The failures are in warm-restart and baseline
 reuse, and they are not yet attributed, because the run that produced them was
 captured through tail minus 25, so only two of the eleven were ever read. Re-run
 it and read all of it before trusting any of them.}
@@ -3966,20 +3150,17 @@ it and read all of it before trusting any of them.}
     \item \textbf{The bias sweep.} Step one channel $0.10 \to 0.40$\,V at zero
           gain, log resting counts. Settles whether the 601/630/687/682 offset
           is electromagnetic or mechanical. \textbf{No code.}
-    \item \textbf{Confirm v12's gain cut on the bench.} Peak demand
+    \item \textbf{Confirm \texttt{delta}'s gain cut on the bench.} Peak demand
           $0.2998 \to 0.2001$\,V, dissipative share $43\% \to 88\%$.
-    \item \textbf{Diagonal reallocation.} Residues want ch2-dominant, ratios
-          $\approx [1.00, 0.83, -3.82, 0.90]$, worth \textbf{1.6--1.8$\times$}
-          more damping. Check the $\pm 0.25$\,V budget first.
     \item \textbf{Cut \texttt{LOCK\_SUSTAIN\_S} $= 5.0$}, on its own: five of
           the ten-second budget confirming a lock that already happened.
     \item \textbf{Gate fault re-engagement on amplitude}, not a fixed 5\,s,
-          which is 35 of v12's 35.2 fault-seconds.
+          which is 35 of \texttt{delta}'s 35.2 fault-seconds.
     \item \textbf{Kalman velocity estimator}, unblocked: $f$ to 0.0001\,Hz,
           $\tau > 138$\,s so $Q$ stops mattering, measurement noise measured.
     \item \textbf{Read all 11 \texttt{make check} failures.} Only 2 were seen.
     \item \textbf{a4, a6, a7.} Connected, near mid-scale, $\sim$1/100 the
-          in-band gain of a0--a3. \alert{Cause not established.}
+          in-band gain of a0--a3. Cause not established.
   \end{enumerate}
 
   \vspace{1.5mm}
@@ -3987,7 +3168,7 @@ it and read all of it before trusting any of them.}
   \emph{Learn the model, the estimator and the anomaly detector; keep the
   control law and the interlocks classical and certifiable.}
 \end{frame}
-\note{Nine things, in the order I would do them.
+\note{Eight things, in the order I would do them.
 
 One, and it is first because it is the stated deliverable: the rig has not
 announced LOCKED since 2026-08-04, and the cause is a quorum bug worth one line.
@@ -3996,26 +3177,21 @@ Two, the bias sweep. It is the highest-value experiment available because it may
 solve the clipping problem with no hardware work at all, and it needs no code:
 two commands and a log.
 
-Three, confirm v12's gain cut on the bench. That is the arithmetic that takes
+Three, confirm delta's gain cut on the bench. That is the arithmetic that takes
 peak demand back inside the actuator window.
 
-Four, diagonal reallocation. The measured residues want channel two dominant, and
-that is worth about 1.6 to 1.8 times more damping for four numbers, but it has to
-be checked against the actuator budget first, because the shipped gains were
-already twenty percent over.
+Four and five are the lock-time budget: five seconds confirming a lock that
+already happened, and five seconds of mandatory hold after every fault, which is
+now the entire fault cost.
 
-Five and six are the lock-time budget: five seconds confirming a lock that already
-happened, and five seconds of mandatory hold after every fault, which is now the
-entire fault cost.
+Six, the Kalman estimator, which is newly unblocked because the frequencies are
+known to a tenth of a millihertz and the intrinsic decay is long enough that Q
+stops mattering on control timescales.
 
-Seven, the Kalman estimator, which is newly unblocked because the frequencies are
-known to half a millihertz and the intrinsic decay is long enough that Q stops
-mattering on control timescales.
-
-Eight is bookkeeping with teeth: eleven suite failures exist and only two of them
+Seven is bookkeeping with teeth: eleven suite failures exist and only two of them
 have ever been read.
 
-Nine is the honest one. a4, a6 and a7 are connected, sit near mid-scale, and carry
+Eight is the honest one. a4, a6 and a7 are connected, sit near mid-scale, and carry
 about a hundredth of the in-band gain of the working four. We do not know why, and
 the deck used to claim we did.
 
@@ -4031,62 +3207,60 @@ keep the control law and the interlocks classical and certifiable.}
     \toprule
      & channels & I/D & what it added & ch0 ratio & lock & bench \\
     \midrule
-    v0    & ch0 only  & zeroed & \emph{the baseline} & 0.188 & 12.1\,s & 2026-07-15 (scope) \\
-    v1    & all four  & zeroed & all four channels on & 0.025 & 10.7\,s & 2026-08-03 \\
-    v2    & all four  & live   & real $K_i$, $K_d$ & 0.028 & 10.5\,s & 2026-08-03 \\
-    v3    & all four  & live   & \textbf{all 3 defects fixed} & 0.029 & 10.6\,s & \textbf{validated} \\
+    \texttt{zero}    & ch0 only  & zeroed & \emph{the baseline} & 0.188 & 12.1\,s & 2026-07-15 (scope) \\
+    the early four-channel build    & all four  & zeroed & all four channels on & 0.025 & 10.7\,s & 2026-08-03 \\
+    the early four-channel build    & all four  & live   & real $K_i$, $K_d$ & 0.028 & 10.5\,s & 2026-08-03 \\
+    \texttt{alpha}    & all four  & live   & \textbf{all 3 defects fixed} & 0.029 & 10.6\,s & \textbf{validated} \\
     \addlinespace
-    \emph{v4 (modal)} & \multicolumn{5}{l}{\emph{MIMO on a learned basis, written and deleted 2026-08-03}} \\
-    \addlinespace
-    v4    & all four  & live & \texttt{auto-disable} & 0.029 & 10.6\,s & 2026-08-04 \\
-    v5    & all four  & live & \texttt{fast-refault} & 0.029 & 10.6\,s & 2026-08-04 \\
-    v5.5  & \emph{all eight} & live & eight-OSEM build & n/a &
+    \texttt{alpha}    & all four  & live & \texttt{auto-disable} & 0.029 & 10.6\,s & 2026-08-04 \\
+    the build before \texttt{beta}    & all four  & live & \texttt{fast-refault} & 0.029 & 10.6\,s & 2026-08-04 \\
+    the eight-OSEM step  & \emph{all eight} & live & eight-OSEM build & n/a &
       \emph{10 faults} & 08-04, no lock \\
-    v6    & \multicolumn{5}{l}{\emph{bench tool}: stepped-sine actuation matrix, closes no loop} & 08-04 \\
-    v7    & all four  & live & \texttt{bias-trim} & 0.029 & 10.6\,s & \textbf{validated} \\
-    v8    & all four  & live & \texttt{fast-calib}, \texttt{warm-restart} & 0.029 & 10.5\,s & 2026-08-04 \\
-    \textbf{v9} & all four & live & \textbf{\texttt{runaway-trend}} & 0.029 & 10.5\,s & \textbf{83.1\% 08-04} \\
-    v10   & 5 of 8 & live & \texttt{soft-saturation}, \texttt{baseline-floor}
+    \texttt{sysid}    & \multicolumn{5}{l}{\emph{bench tool}: stepped-sine actuation matrix, closes no loop} & 08-04 \\
+    the bias-trim branch    & all four  & live & \texttt{bias-trim} & 0.029 & 10.6\,s & \textbf{validated} \\
+    the build before \texttt{beta}    & all four  & live & \texttt{fast-calib}, \texttt{warm-restart} & 0.029 & 10.5\,s & 2026-08-04 \\
+    \textbf{\texttt{beta}} & all four & live & \textbf{\texttt{runaway-trend}} & 0.029 & 10.5\,s & \textbf{83.1\% 08-04} \\
+    the eight-channel step   & 5 of 8 & live & \texttt{soft-saturation}, \texttt{baseline-floor}
       & n/a & n/a & 74.1\% 08-06 \\
-    v11   & \emph{all eight} & live & \texttt{sat-window}, \texttt{fast-transport}
-      & n/a & n/a & \alert{42.3\% 08-06} \\
-    \textbf{v12} & \emph{all eight} & \textbf{cut} &
+    the 500000-baud step   & \emph{all eight} & live & \texttt{sat-window}, \texttt{fast-transport}
+      & n/a & n/a & 42.3\% 08-06 \\
+    \textbf{\texttt{delta}} & \emph{all eight} & \textbf{cut} &
       \textbf{\texttt{sample-guard}, \texttt{decimate}, LAG} & n/a & n/a &
       \textbf{77.5\% 08-06} \\
-    v13   & \multicolumn{5}{l}{\emph{skeleton}: refuses to run; modal law unreachable, MIMO closed} & n/a \\
+    the unwritten build   & \multicolumn{5}{l}{\emph{skeleton}: refuses to run} & n/a \\
     \bottomrule
   \end{tabular}}
 
   \vspace{1mm}
   {\scriptsize\sloppy
   Ratios and lock times are \textbf{simulator} numbers; the percentages are
-  \textbf{time-weighted \texttt{DAMPING}} on the bench. \alert{v9's 83.1\% and
-  v12's 77.5\% ran different kick schedules and are not comparable.}
-  \textbf{The control law did not change from v2 to v11}: everything between is
+  \textbf{time-weighted \texttt{DAMPING}} on the bench. \texttt{beta}'s 83.1\% and
+  \texttt{delta}'s 77.5\% ran different kick schedules and are not comparable.
+  \textbf{The control law did not change from the early four-channel build to the 500000-baud step}: everything between is
   the supervisor around it. \texttt{make check}: \textbf{220 passed, 11
   failed}.}
 \end{frame}
 \note{The whole ladder on one slide.
 
 The single most important thing to read off it is the ch0 ratio column: 0.029
-from v3 all the way to v9. The control law did not change between v2 and v11.
+from alpha all the way to beta. The control law did not change between the early four-channel build and the 500000-baud step.
 Every version in between is the supervisor around it: when the loop is allowed to
 be closed, what counts as a fault, how a fault is recovered from, and how the
-baseline everything scales off is measured. v12 is the first version since v3 to
+baseline everything scales off is measured. delta is the first version since alpha to
 move a gain, and it moved them because of an arithmetic budget rather than a
 retune.
 
-Read the last four rows carefully and read the caveat under the table. v9's 83.1
-percent and v12's 77.5 are not comparable: v9's three kicks were scripted and
-v12's five were by hand. The comparison that is controlled is v11 at 42.3 against
-v12 at 77.5, same session, same schedule, and v12 against itself across the lag
+Read the last four rows carefully and read the caveat under the table. beta's 83.1
+percent and delta's 77.5 are not comparable: beta's three kicks were scripted and
+delta's five were by hand. The comparison that is controlled is the 500000-baud step at 42.3 against
+delta at 77.5, same session, same schedule, and delta against itself across the lag
 change.
 
-Four rows read validated: v3, v7, v9 and v10. On four channels the one to reach
-for is still v9. On eight channels it is v12, and v12 is the one to develop
+Four rows read validated: alpha, the bias-trim branch, beta and the eight-channel step. On four channels the one to reach
+for is still beta. On eight channels it is delta, and delta is the one to develop
 against.
 
-And the row at the bottom is v13, which is not a version. It is a skeleton that
+And the row at the bottom is the unwritten build, which is not a version. It is a skeleton that
 refuses to run, and until yesterday it did not refuse.}
 
 \end{document}
