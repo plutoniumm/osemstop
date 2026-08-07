@@ -58,6 +58,20 @@ def main():
     bp = np.asarray(bp)
     st = np.asarray(st)
 
+    # PLOT_TRANGE="a,b" crops to one stretch of a long run. A 325 s record with
+    # eight hand-kicks draws as a wall of ink in which no single ringdown can be
+    # read; cropping to three shows the decay that is the point of the figure.
+    # The full record is always still on disk, and the caption below reports what
+    # was cropped away so the figure cannot imply the run was shorter.
+    tr = os.environ.get("PLOT_TRANGE")
+    full_span, full_n = (t[0], t[-1]), len(t)
+    if tr:
+        lo, hi = (float(x) for x in tr.split(","))
+        keep = (t >= lo) & (t <= hi)
+        t, bp, st = t[keep], bp[keep], st[keep]
+        if kicks:
+            kicks = [k for k in kicks if lo <= k <= hi]
+
     if kicks is None:
         # No kick list in the log -- bench.py runs are kicked by hand, so the
         # times are not recorded anywhere. Detect them: a kick is a sample where
@@ -70,6 +84,10 @@ def main():
         for j in np.flatnonzero(hot):
             if not kicks or t[j] - kicks[-1] > 20.0:
                 kicks.append(float(t[j]))
+        # A "kick" detected while the loop was not damping is the optic already
+        # ringing, not a new impulse, and labelling it as one would be wrong.
+        kicks = [k for k in kicks
+                 if st[np.searchsorted(t, k)] == "DAMPING"]
 
     fig, ax = plt.subplots(figsize=(13, 6.5))
 
@@ -124,6 +142,9 @@ def main():
     fig.savefig(path, dpi=150)
     print(f"wrote {path}")
     print(f"  {len(t)} rows, {t[0]:.1f}-{t[-1]:.1f}s, kicks at {kicks}")
+    if os.environ.get("PLOT_TRANGE"):
+        print(f"  CROPPED from the full record: {full_n} rows, "
+              f"{full_span[0]:.1f}-{full_span[1]:.1f}s")
     for k in kicks:
         w = (t >= k) & (t <= k + 25)
         if w.sum():

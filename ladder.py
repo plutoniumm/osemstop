@@ -24,8 +24,11 @@ have -- v7 was a branch off v5, not a successor to it. Names force the question
     delta    eight channels, 500000 baud, a 100 Hz control clock decoupled from
              the wire, and the fixes that made that safe: `sample-guard`,
              `decimate`, `persist-baseline`, `baseline-sanity`. The one to run.
-    epsilon  NOT YET WRITTEN. The Kalman velocity estimator, plus everything
-             learned through delta.
+    epsilon  the Kalman velocity estimator replacing bandpass-and-differentiate,
+             `mains-null` decimation, and Ki dropped to zero because the filter
+             carries drift as a state rather than integrating it. Written
+             2026-08-07, `BENCH_STATUS = untested`: it has never run on the
+             bench, so delta is still the one to run.
 
 Alphabetical order is NOT ladder order -- "zero" sorts last and is first. That is
 the whole reason this is an explicit tuple rather than a sort key.

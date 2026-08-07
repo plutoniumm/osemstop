@@ -44,6 +44,13 @@ matter.
    it — 38 % of a 0.2998 V peak against a 0.250 V half-window
    (`analysis/mimo_closed.md` §5.2). Kd can go too. Section 8.
 
+**And one negative result, stated because it is the thing most likely to be
+over-claimed:** the narrowbanding *by itself* returns roughly **no** actuator
+headroom. Replayed on the bench run, demand rms goes 0.59× and 0.74× on ch0 and
+ch2 but **1.17× and 1.08× on ch1 and ch3** — the restored in-band magnitude
+cancels most of what is saved above 3 Hz (`kalman_headroom.csv`). The headroom
+is Ki's, and Ki's alone.
+
 **And one finding that is not about the Kalman filter at all and should ship
 first, on its own:** delta's decimation aliases the mains line into the control
 band. Section 4.
@@ -356,7 +363,8 @@ and 0.185 come from.
 `data/20260806_200822_fast_lock.csv`. The control step is reconstructed
 **exactly**: delta logs `ctl` and `n_avg`, and the `n_avg` rows ending at a
 flagged row are the set that step averaged. The reconstruction is **checked**
-by re-running delta's own filter chain against the logged `ch{i}_vel`:
+by re-running delta's own filter chain against the logged `ch{i}_vel`
+(`kalman_replay_check.csv`):
 
 > median 1.1e-3, p99 1.5e-2, max 8.0e-2 V/s against a 35.87 V/s peak —
 > which is exactly the CSV's own rounding, since `bp` is logged at five decimals
@@ -369,7 +377,7 @@ reimplementation that primes `lp` to the raw signal is wrong for the first 27
 control steps and right afterwards.
 
 Over **clean DAMPING** (no kick window, nothing railed — 13 485 of 18 940
-control steps), residual vs `v_modal`: delta 0.744 / 0.755 / 0.779 / 0.781,
+control steps), residual vs `v_modal` (`kalman_replay_run.csv`): delta 0.744 / 0.755 / 0.779 / 0.781,
 kalman **0.632 / 0.588 / 0.675 / 0.614**, on ch0–ch3.
 *Weaker evidence than 6a: the reference is built from a record containing
 clipped kicks, so its band-limited form rings into the quiet stretches. Read the
@@ -523,6 +531,33 @@ delta's `|H|` peaks at 3.75 Hz (10.38) against 5.26 at mode B, because a
 difference quotient rises with frequency faster than a one-pole low-pass falls.
 Under 3 % is at the three lines the loop exists to damp.
 
+### What the narrowbanding itself returns in headroom — roughly nothing
+
+Replay the **same recorded motion** through both estimators and form the demand
+each would command: delta's `p+i+d` as logged, kalman's `gain × (−v̂)` with
+Ki = Kd = 0. *Open-loop replay — the closed loop would have taken a different
+trajectory, so this compares two estimators on one recorded signal and is not a
+prediction of closed-loop demand.* `kalman_headroom.csv`, DAMPING:
+
+| ch | delta rms | kalman rms | ratio | delta peak | kalman peak |
+|---|---|---|---|---|---|
+| ch0 | 0.1610 V | **0.0947** | 0.59 | 1.3808 V | **0.7646** |
+| ch1 | 0.1154 V | 0.1352 | 1.17 | 1.1292 V | 1.2454 |
+| ch2 | 0.1619 V | **0.1204** | 0.74 | 1.4204 V | **1.0472** |
+| ch3 | 0.1249 V | 0.1345 | 1.08 | 1.1283 V | 1.0827 |
+
+Two effects pull opposite ways and **they roughly cancel**. Against: the
+estimator restores the in-band magnitude the bandpass attenuated, so at the same
+Kp it asks for 1.21× / 1.19× / 1.30× more at modes A / B / C. For: it commands
+almost nothing above 3 Hz, where 50–67 % of delta's demand power sits, and Ki
+and Kd are gone.
+
+**So the headroom claim must be made carefully.** Demand falls on ch0 and ch2 —
+the two channels carrying the mains alias and the strong intermodulation — and
+rises 8–17 % on ch1 and ch3. **Narrowband gain by itself is roughly neutral on
+actuator demand on this rig.** The headroom this work returns is Ki's, below,
+and that one is measured.
+
 ### Ki, and what dropping it returns
 
 `gains.json`'s design-point split (`analysis/mimo_closed.md` §5.2, derived from
@@ -573,14 +608,33 @@ nothing to act on and can go with them.
    the modes goes *up* by 1.218× / 1.205× / 1.586×, at the same Kp. Nothing is
    taken away in band.
 
-**Recommendation, not a menu: build the Kalman estimator, and take the resonant
-gain as what it already is — a property of that estimator — rather than as a
-separate stage.** Narrowband gain *without* the Kalman filter would need a
-resonant filter bank anyway, which is the same computation with a worse phase
-response and no DC state; and the Kalman filter without the narrowband property
-is not a thing that can be built, since `Cv` reading only the modal velocities
-is what makes it exact. `mains-null` (§4) is the one item that is genuinely
-separable and it should go first, on its own.
+### Recommendation, not a menu
+
+**Build the Kalman estimator, delete Ki and Kd, and take the resonant gain as
+what it already is — a property of that estimator — rather than as a separate
+stage.**
+
+The two ideas cannot usefully be separated. Narrowband gain *without* the Kalman
+filter needs a resonant filter bank, which is the same computation with a worse
+phase response and no DC state. The Kalman filter *without* the narrowband
+property is not a thing that can be built, because `Cv` reading only the modal
+velocities is exactly what makes it exact at the modes.
+
+**What is separable, and should go first, on its own:** `mains-null` (§4). One
+line, independently justified, and it improves `osem.delta.py` as it stands.
+
+**Ranked by evidence, weakest last:**
+
+1. `mains-null` — R falls 0.354× / 0.057× / 0.190× on a0 / a1 / a5, for 5 ms of
+   flat group delay. Measured.
+2. Ki → 0 — 0.1135 V, 38 % of the design-point peak, on a term that by
+   construction rejects no drift. Measured, and the estimator removes the
+   pretext for keeping it.
+3. The estimator itself — 29.3 % → 0.6 % velocity error against known truth, and
+   1.218× / 1.205× / 1.586× the dissipation per unit Kp. Measured against
+   synthesis and confirmed in replay on two records.
+4. `rail-blank` — plausible, unvalidated, needs a bound. Do not ship enabled.
+5. Per-mode gains via `modal_velocity()` — possible, no evidence it is wanted.
 
 ---
 

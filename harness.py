@@ -767,6 +767,19 @@ def suite(path):
         check("P still dominates -- neither I nor D takes over the loop",
               a["max_p"] > a["max_i"] and a["max_p"] > a["max_d"],
               f"P={a['max_p']:.4f} I={a['max_i']:.4f} D={a['max_d']:.4f} V")
+    elif any(info["kd"]):
+        # Ki zeroed but Kd live. This branch exists because the two-way test
+        # above had no case for it: a version here fell into the pure-P `else`,
+        # which asserts max_d < 1e-12, and no version with a live D term can
+        # ever satisfy that. It read as a controller defect and is a gap in this
+        # check. epsilon is the first version in this corner -- it drops Ki
+        # structurally, because the Kalman filter carries drift as a state, and
+        # keeps Kd at delta's noise-limited value.
+        check("with KI_GAIN zeroed the I term is identically zero",
+              a["max_i"] < 1e-12, f"max |I| = {a['max_i']:.2e} V")
+        check("P still dominates -- D does not take over the loop",
+              a["max_p"] > a["max_d"],
+              f"P={a['max_p']:.4f} D={a['max_d']:.4f} V")
     else:
         check("with KI_GAIN and KD_GAIN zeroed the law is pure P",
               a["max_i"] < 1e-12 and a["max_d"] < 1e-12,
