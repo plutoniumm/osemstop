@@ -59,6 +59,25 @@ otherwise unreachable from here:
     CONSECUTIVE pinned samples, so this is the only way to reach it;
   * an occlusion: one channel held at a rail indefinitely, a blocked OSEM flag.
 
+TWO BODIES, NOT ONE. The plant used to be a single rigid body carrying exactly
+four OSEMs, and any controller with a different channel count was skipped. It
+now carries FOUR or EIGHT depending on the controller loaded, and the two are
+separate measured objects rather than one parameterised guess:
+
+  * the FOUR-OSEM body is unchanged, bit for bit. Its geometry, mode
+    frequencies, coil gains and resting counts are the same numbers from the
+    same 2026-08-03 logs, evaluated in the same order, so every result quoted
+    in versions.md still reproduces exactly.
+  * the EIGHT-OSEM body is built from the 2026-08-04 and 2026-08-06 bench
+    sessions and is described in full at BODY 8 below. It reproduces the
+    measured facts that make eight channels hard: two modes 58% apart rather
+    than three near-degenerate ones, a5 sensing at ~1/12 of a0, a4/a6/a7
+    reading plenty of signal but none of it in the loop band, and the full
+    8x8 DC actuation matrix so a bias trim moves what it measurably moves.
+
+`load()` picks the body from len(ENABLE_CHANNEL). Nothing else in this file
+knows which one is running.
+
 Not run directly -- `harness.py` in the repo root is the entry point. It chooses
 which `osem.vN.py` to load and calls `load()` below before anything else.
 """
@@ -160,6 +179,12 @@ NOISE_SCALE = math.sqrt(DT_REF / DT)
 # 6.0 V/s impulse; it is now a SUSTAINED transient of the same order, which is
 # what the bench event actually was -- v2 pinned for 31 samples while being
 # driven, not while ringing down. See Sim.earthquake.
+# AUTO_KICK_DV is BODY-DEPENDENT, and has to be: the scenario is "the actuator
+# is clipped and is STILL bringing the optic back", which is a statement about
+# the kick against the actuator's authority, not about the kick alone. A clipped
+# output delivers +-0.25 V whatever Kp is, so on a body whose coils move the
+# mass 0.30 as hard the same 9.0 V/s is not a disturbance the loop can win
+# against at any gain. See AUTO_KICK_DV_8 and harness.py's `gscale`.
 KICK_DV = 6.0
 AUTO_KICK_DV = 9.0
 AUTO_KICK_S = 2.0
@@ -200,6 +225,13 @@ VERSION = None
 COUNTS_PER_VOLT = None
 VOLTS_PER_COUNT = None
 DC_REST_V = None            # DC_REST_COUNTS in volts, once A_VCC is known
+# The per-channel sensor pathologies, in volts, once A_VCC is known. Split out
+# from the counts they are measured in so nothing here is recomputed per sample,
+# and flagged so a body that has none skips the code entirely -- which is what
+# keeps the four-OSEM body's random stream identical.
+LINE_V = LINE2_V = OWN_RMS_V = OWN_SIGMA = None
+LINE_ANY = OWN_ANY = False
+SQRT_DT = math.sqrt(DT)
 
 # --- rigid-body geometry ----------------------------------------------------
 # Four OSEMs are not four oscillators. They are four sensors watching ONE mass,
@@ -274,6 +306,302 @@ COIL_GAIN = [1.00, 0.76, -4.15, 0.86]
 # phase across the channels and differs only in how much each one picks up.
 HUM_SCALE = [1.00, 0.86, 1.12, 0.94]
 
+# --- the four-OSEM body, restated in the general form ------------------------
+# Everything above is the ORIGINAL four-channel plant and is not touched. What
+# follows only rewrites it in the shape the eight-OSEM body also fits, so one
+# step() serves both. The arithmetic is deliberately identical:
+#
+#   SHAPE[i][m]  what sensor i reads per unit of mode m. For this body
+#                z_i = LONG + PITCH*y_i + YAW*x_i, so the row is (1, y_i, x_i).
+#   ACT[m][i]    how coil i's force lands on mode m: a corner force is a
+#                longitudinal force plus two torques, so (1, y_i, x_i) again --
+#                the coil and the OSEM are the same unit, bolted at the same
+#                corner, which is why sensing and actuation share a geometry.
+#
+# `f_i * ACT[0][i]` is `f_i * 1.0`, which is `f_i`, so the loop below produces
+# the same floats in the same order as the three explicit lines it replaces.
+SHAPE = [[1.0, GEOM[i][1], GEOM[i][0]] for i in range(4)]
+ACT = [[1.0, 1.0, 1.0, 1.0],
+       [GEOM[i][1] for i in range(4)],
+       [GEOM[i][0] for i in range(4)]]
+MODE_LABELS = MODE_NAMES + ["BUTTERFLY"]
+# Per-mode scalars that used to be written inline in step(). Same values.
+MODE_INERTIA = [1.0, 2.0, 2.0]      # was `/(1.0 if m == 0 else 2.0)`
+MODE_SEISMIC = [1.0, 0.6, 0.6]      # was `*(1.0 if m == 0 else 0.6)`
+# Each mode is driven by the coherent lab tone at f_drive * this. All three
+# modes of this body sit within 7% of each other, so one tone drove all three
+# and the ratio is 1. The eight-OSEM body's two modes are 58% apart and one
+# tone cannot; see MODE_DRIVE_RATIO_8.
+MODE_DRIVE_RATIO = [1.0, 1.0, 1.0]
+DRIVE_HZ = 1.0                      # default f_drive: on this body's resonance
+
+# Sensor pathologies this body does not have. Kept so step() can be written
+# once; all-zero means the code paths are skipped entirely, so no extra random
+# draws happen and the four-channel RNG stream is untouched.
+LINE_HZ, LINE_COUNTS = 0.0, [0.0] * 4          # out-of-band interference
+LINE2_HZ, LINE2_COUNTS = 0.0, [0.0] * 4        # its harmonic
+OWN_HZ, OWN_Q, OWN_COUNTS = 1.0, 30.0, [0.0] * 4   # own in-band content
+DC_STATIC_V = None                  # static coil->sensor coupling outside the modes
+K_ACT_REF = 20.0                    # the k_act the DC matrix is referred to
+# Which channels the plant gives real motion coupling to. All of them here.
+SENSING = [0, 1, 2, 3]
+
+# The two sustained-disturbance amplitudes the suite uses: one the loop is meant
+# to fight and win, one it cannot damp at all. What defines them is HOW HARD THE
+# ADC CLIPS, not the number itself, and the two bodies convert modal amplitude
+# into sensor swing very differently -- the eight-OSEM mode shapes put 1.21-1.29
+# on a2 where every four-OSEM corner sees 1.0, so the same drive clips a2 seven
+# times as often. Both bodies' values are therefore MEASURED to give the same
+# peak-channel clip fraction (5% and 28% of samples over 60 s), rather than
+# shared. See DRIVE_HARD_8.
+DRIVE_HARD, DRIVE_UNDAMPABLE = 2.5, 3.5
+
+N = 4                               # channels this body carries
+NMODE = 3                           # dynamic modes it has
+
+
+# =============================================================================
+# BODY 8 -- the eight-OSEM body, measured 2026-08-04 and 2026-08-06
+# =============================================================================
+# The mirror carries eight OSEMs. All eight are electrically connected --
+# confirmed on an oscilloscope 2026-08-06, which overturned the 2026-08-04 call
+# that a4-a7 were unwired. What separates them is not wiring but ALIGNMENT: an
+# OSEM is a shadow sensor and is only linear while its flag sits in the partial
+# shadow, so where the flag sits decides counts per metre.
+#
+# Every number below is measured. Where something is NOT measured it is marked
+# ASSUMPTION and says what would settle it. Sources:
+#   versions.md "On the bench, 2026-08-04" and "Sensor centering"
+#   bench/20260804/dcmatrix.log        the 8x8 DC actuation matrix
+#   analysis/where_is_power.py         where each channel's power lives
+#   analysis/a5_check.py               a5's peak frequency and amplitude
+#   osem.v10.py's docstring            v10's own 8-channel calibration, 08-06
+#   data/2026080{4,6}_*_fast_lock.csv  four logs with all eight columns
+#
+# --- the two modes -----------------------------------------------------------
+# Passive spectra of the four 8-channel logs give exactly two resonances in the
+# 0.4-3.0 Hz band the loop acts on: 1.046 Hz dominant on a0/a2 and 1.657 Hz
+# dominant on a1/a3 (analysis/out/modes.csv). osem.v6.py's independent rank
+# check on the stepped-sine actuation matrix agrees -- singular values
+# 1.000/0.154/0.058/0.043, two directions above 10%.
+MODE_F0_8 = [1.046, 1.657]
+
+# --- what each OSEM reads per unit of each mode ------------------------------
+# Amplitude AND SIGN, from the cross-spectrum at each mode frequency, phase
+# referred to a0, over all four 8-channel logs. Both are stable across runs:
+#
+#   1.046 Hz   a1/a2/a3 all within 21 deg of a0  -> all one sign; the COMMON mode
+#              relative amplitude   0.34-0.39 | 0.80-1.61 | 0.11-0.33
+#   1.657 Hz   a1 and a3 at 173-179 deg from a0  -> opposite sign; DIFFERENTIAL
+#              relative amplitude   0.62-0.70 | 1.07-1.51 | 0.57-0.82
+#
+# a0/a2 against a1/a3 with a sign flip is bottom-against-top on the quadrant
+# layout in provenance.md p1, i.e. the 1.657 Hz mode is pitch. Medians used.
+#
+# a5 is a REAL sensor at ~1/12 of a0's counts per metre. Two independent
+# measurements agree: its own diagonal in the DC matrix is <=8 counts/V against
+# a0's 105 (~13x), and its passive mode amplitude is 13 counts against a0's 138
+# (~10.5x). ASSUMPTION: the same 1/12 is used for BOTH modes. Its 1.657 Hz
+# amplitude measures 0.01-0.06 of a0's, i.e. nearer 1/20, and its 1.046 Hz
+# amplitude is unusable for this because a5's own in-band content dominates it
+# (see OWN_COUNTS_8). Resolving the split needs a driven measurement, not a
+# passive one -- CLAUDE.md item 2b.
+#
+# a4/a6/a7 are ZERO. Measured: 0.1-9% of their power in the 0.4-3 Hz band
+# against 77-99% for a0-a3, lock-in SNR 1.1-1.5 (their own noise floor), and
+# their bandpassed RMS is flat to three decimals through 40 s of damping that
+# took a factor of 3-12 out of every real channel (osem.v10.py, bench 08-06).
+# They are powered and reading light; the optic is simply not in it.
+SHAPE_8 = [[1.000,  1.000],      # a0   reference
+           [0.360, -0.650],      # a1   anti-phase on the differential mode
+           [1.210,  1.290],      # a2
+           [0.300, -0.600],      # a3   anti-phase on the differential mode
+           [0.000,  0.000],      # a4   reads, does not sense
+           [1 / 12.0, 1 / 12.0],  # a5   real, ~1/12 of a0
+           [0.000,  0.000],      # a6   reads, does not sense
+           [0.000,  0.000]]      # a7   reads, does not sense
+SENSING_8 = [0, 1, 2, 3, 5]
+
+# Modal readout for the browser: least-squares inverse of SHAPE_8 (so it is the
+# best fit to the two modes rather than any one channel's opinion), plus a third
+# row that no in-band motion can produce. That row is not decorative: it is the
+# direction the DC matrix moves in that neither measured mode contains, it is
+# orthogonal to both to 5e-4, and any reading in it is sensors disagreeing.
+SENSE_8 = [[+0.27931, +0.56805, +0.30094, +0.50038, 0.0, +0.02328, 0.0, 0.0],
+           [+0.11536, -0.54249, +0.18585, -0.48580, 0.0, +0.00961, 0.0, 0.0],
+           [-0.70692, -0.24697, +0.57594, +0.32796, 0.0, +0.00000, 0.0, 0.0]]
+MODE_LABELS_8 = ["COMMON 1.05", "DIFF 1.66", "YAW (static)"]
+
+# --- resting counts ----------------------------------------------------------
+# The baseline printed by bench/20260804/dcmatrix.log immediately before the
+# sweep, with BIAS = 0.25 V on all eight coils, against a mid-scale of 511.5.
+# Every channel sits high, so every channel clips its TOP rail first -- and the
+# four new ones are no better centred than the old four. This is what
+# `bias-trim` has to work against.
+DC_REST_COUNTS_8 = [600.0, 630.9, 708.1, 677.2, 569.2, 535.8, 760.5, 732.2]
+
+# --- the 8x8 DC actuation matrix ---------------------------------------------
+# counts per volt, ONE COIL STEPPED AT A TIME, rows a0..a7, columns coil 0..7
+# (coil j is the coil of OSEM j, i.e. DAC_CHANNELS[j]). This is the only direct
+# actuation measurement that covers all eight coils, and it is reproduced here
+# EXACTLY -- see _build_body8, which splits it into the part the loop can see
+# and the part it cannot rather than approximating either away.
+DC_MATRIX_8 = [[-105, -107, -48, +19, -29, -21, -28, -26],
+               [-49, -68, -33, +18, +5, +7, +4, +8],
+               [+35, +66, +213, -141, -25, -22, -13, -26],
+               [+36, +14, +58, -51, -1, -2, +2, -1],
+               [+0, +2, +2, +1, +8, +8, +2, +1],
+               [+4, +0, +0, -6, +0, -7, -1, +8],
+               [+1, +4, +2, +3, +3, +3, +4, +6],
+               [+0, +3, +1, +0, +1, -1, +6, +7]]
+
+# --- the 6.19 Hz interference line -------------------------------------------
+# a4/a6/a7 do not read silence, and that matters: a channel reading zero is easy
+# to guard against, a channel reading plenty of signal in the wrong band is what
+# actually broke v5.5. 91-99% of their power sits at 3-20 Hz and a single narrow
+# line at 6.19 Hz carries 60-87% of it, with a 12.38 Hz harmonic on a7 -- most
+# likely ~350.9 Hz folded by the 357.1 Hz sample rate, the 7th harmonic of
+# ~50.1 Hz mains.
+#
+# It is on the SENSOR LINE, not a force: interference, like the mains term. The
+# controller's 3.0 Hz lowpass is ONE POLE, so 6.19 Hz survives it at 0.44 --
+# attenuated, not removed, which is exactly why the amplitude matters.
+#
+# HOW BIG IT IS DEPENDS ON THE SESSION, by a factor of twenty, and that is a
+# measurement rather than a nuisance. Peak height in counts:
+#     2026-08-06 (161715)   a4 1.14   a5 0.20   a6  4.54   a7 0.78
+#     2026-08-04 (3 logs)   a4 1.9-12 a5 1-4    a6 12-83   a7 1.9-11
+# The 08-06 figures are used as the default because they come from the run whose
+# calibration this body is checked against -- v10's own eight-channel run, where
+# a4/a6/a7 calibrated 3% / 5% / 1% of the median and were demoted. `line_scale`
+# in the plant dict turns them up: at the 08-04 session's amplitudes a6's
+# leakage through that single pole rises far enough to carry it back OVER the
+# BASELINE_FLOOR_FRAC line, i.e. the guard is amplitude-dependent and this body
+# can show it rather than argue it.
+LINE_HZ_8 = 6.19
+LINE_COUNTS_8 = [0.20, 0.16, 0.47, 0.27, 1.14, 0.20, 4.54, 0.78]
+LINE2_HZ_8 = 12.38
+LINE2_COUNTS_8 = [0.33, 0.23, 0.28, 0.16, 0.27, 0.12, 0.28, 0.09]
+
+# --- a5's own in-band content ------------------------------------------------
+# The measurement that makes a5 survivable, and the one the simulator used to
+# lack. a5's in-band (0.4-3.0 Hz) RMS over the four 8-channel logs is
+# 15.8 / 17.2 / 22.4 / 25.0 counts while a0's over the same four is
+# 183 / 10 / 66 / 94 -- i.e. it does NOT scale with how hard the optic is
+# moving. Regressing a5 on a0 across those runs gives a slope of -0.01 and an
+# intercept of 21 counts. So a5 carries roughly 20 counts of in-band content
+# that is not the optic, on top of the 1/12 that is.
+#
+# That is not a detail. With pure 1/12 scaled motion a5 calibrates ~0.09 of the
+# median baseline and `baseline-floor` throws it away; with this term it
+# calibrates ~0.4-0.5, which is what v10 measured on hardware (0.0896 V against
+# a 0.1745 V median, 51%). The two measured inputs -- 1/12 and 20 counts --
+# reproduce that third measured number without being fitted to it.
+#
+# WHAT IT IS is not known. It sits at the 1.046 Hz mode frequency to within one
+# FFT bin in every log, which is why it was read as a5 sensing the optic; but it
+# does not track the optic's amplitude, which says it is not, or not only. It is
+# modelled as a narrowband noise source at that frequency.
+# ASSUMPTION: the linewidth. OWN_Q_8 = 30 gives a 0.035 Hz line, consistent with
+# the peak-to-neighbourhood ratios blind_check.py measured (21x / 387x / 66x)
+# but not pinned by them. Only the centre frequency and the RMS are measured.
+OWN_HZ_8, OWN_Q_8 = 1.046, 30.0
+OWN_COUNTS_8 = [0.0, 0.0, 0.0, 0.0, 0.0, 19.8, 0.0, 0.0]
+
+# ASSUMPTION. Mains pickup on the four new preamps is not measured; the first
+# four are the four-channel body's inferred spread and the new four are set to
+# unity. `hum_mv` defaults to 0, so this only matters if a session turns it on.
+HUM_SCALE_8 = [1.00, 0.86, 1.12, 0.94, 1.00, 1.00, 1.00, 1.00]
+
+# ASSUMPTION, and the honest weak point of this body. How hard the ambient
+# drives each mode is a property of the lab, not of the suspension, and the four
+# logs disagree: the 1.657 Hz amplitude on a0 runs 0.27x to 1.54x the 1.046 Hz
+# one, median 0.55. 0.55 is used, which is also the four-OSEM body's value.
+# The seismic term gets the same ratio, because both are ground motion.
+MODE_DRIVE_8 = [1.00, 0.55]
+MODE_SEISMIC_8 = [1.00, 0.55]
+MODE_AUTHORITY_8 = [1.0, 1.0]   # authority is carried by ACT_8, not scaled again
+MODE_INERTIA_8 = [1.0, 1.0]     # ditto -- the DC matrix already contains it
+# The two modes are 58% apart, so ONE coherent tone cannot excite both. The lab
+# tone is applied to each mode at f_drive * this, i.e. the slider moves a comb
+# that sits on both resonances at its default. Without it the 1.657 Hz mode is
+# driven 100x below the 1.046 Hz one and the differential mode shape -- the
+# whole reason a1/a3 read anti-phase -- never shows up.
+MODE_DRIVE_RATIO_8 = [1.0, MODE_F0_8[1] / MODE_F0_8[0]]
+DRIVE_HZ_8 = MODE_F0_8[0]
+
+# Sign and magnitude live in ACT_8, derived from the DC matrix, so there is no
+# separate lumped per-coil gain to guess.
+COIL_GAIN_8 = [1.0] * 8
+
+# Measured in-sim to match the four-OSEM body's peak-channel clip fraction: a2
+# clips 7.9% of samples at 1.4 and 28.2% at 2.2, against a0-a3's 5.1% at 2.5 and
+# 28.0% at 3.5 on the other body. See DRIVE_HARD.
+DRIVE_HARD_8, DRIVE_UNDAMPABLE_8 = 1.25, 2.2
+
+
+def _fit_two_modes(col, rows, shape):
+    """Least-squares split of one DC-matrix column across the two mode shapes.
+
+    Two unknowns, four equations (the rows that actually sense), solved by 2x2
+    normal equations so this file keeps its no-numpy import list.
+    """
+    saa = sum(shape[i][0] * shape[i][0] for i in rows)
+    sab = sum(shape[i][0] * shape[i][1] for i in rows)
+    sbb = sum(shape[i][1] * shape[i][1] for i in rows)
+    ya = sum(shape[i][0] * col[i] for i in rows)
+    yb = sum(shape[i][1] * col[i] for i in rows)
+    det = saa * sbb - sab * sab
+    return [(sbb * ya - sab * yb) / det, (saa * yb - sab * ya) / det]
+
+
+def _build_body8(counts_per_volt):
+    """Turn the measured DC matrix into a coil->mode authority plus a remainder.
+
+    THE PROBLEM THIS SOLVES, stated plainly because it is the one place the
+    eight-channel plant is not a straight transcription of a measurement.
+
+    The DC matrix and the passive spectra measure two different things. Fit each
+    DC column onto the two measured in-band mode shapes and the residual is
+    0.20-0.44 for coils 4-7 -- those columns ARE the two modes -- but 0.76-0.94
+    for coils 0-3, and what is left over is a single extra direction,
+    (-0.71, -0.25, +0.58, +0.33) on a0..a3. That is left-against-right on the
+    quadrant layout, i.e. YAW, and it is orthogonal to both measured modes to
+    5e-4. The full matrix's own singular values say the same thing: three above
+    10%, five above 3%, against the two the passive spectra resolve.
+    So a static push moves the body in a direction that does not resonate
+    anywhere in 0.4-3.0 Hz and that the loop therefore cannot see.
+
+    Pretending that direction does not exist would break the DC matrix -- the
+    one thing `bias-trim` acts through. Pretending it is a third mode would mean
+    inventing a resonant frequency for it, which nothing measures. So it is
+    carried as a STATIC coupling: instantaneous, undamped, invisible to the
+    bandpass. ASSUMPTION: that its dynamics are fast compared to the loop band.
+    The alternative -- that it sits BELOW 0.4 Hz and responds slowly -- is
+    equally consistent with the spectra and would make a bias step drift in
+    rather than land. Only a stepped-sine sweep below the band separates them.
+
+    What comes out is exact by construction: modal part plus static part
+    reproduces DC_MATRIX_8 to the last count, so a bias step in here moves every
+    sensor by what the bench measured it moving.
+    """
+    cols = [_fit_two_modes([DC_MATRIX_8[i][j] for i in range(8)], SENSING_8[:4],
+                           SHAPE_8) for j in range(8)]
+    # q_m settles at f_m / w_m^2 under a static force, and f_m is
+    # -K_ACT_REF * ACT[m][i] * dV, so ACT falls straight out of the fitted
+    # DC displacement. K_ACT_REF is the k_act the matrix is referred to; the
+    # plant slider scales both parts of the response together.
+    act = [[0.0] * 8 for _ in range(2)]
+    for m in range(2):
+        w2 = (2.0 * math.pi * MODE_F0_8[m]) ** 2
+        for j in range(8):
+            act[m][j] = -cols[j][m] * w2 / (counts_per_volt * K_ACT_REF)
+    static = [[(DC_MATRIX_8[i][j]
+                - sum(SHAPE_8[i][m] * cols[j][m] for m in range(2)))
+               / counts_per_volt for j in range(8)] for i in range(8)]
+    return act, static
+
+
 STATE_CODE = {"CALIBRATING": 0, "DAMPING": 1, "FAULT": 2, "IDLE": 3}
 
 # Every reset() re-seeds from here, so a scenario is repeatable and two versions
@@ -283,6 +611,54 @@ STATE_CODE = {"CALIBRATING": 0, "DAMPING": 1, "FAULT": 2, "IDLE": 3}
 # changes how many draws happen per second (the sample rate, for one) re-rolls
 # them. Sweep this to find out whether a quoted number is a result or a seed.
 SEED = 0x2F6E2B1
+
+# --- which body is on the bench today ---------------------------------------
+# The names above are the ACTIVE plant. `_BODY4` is a snapshot of them taken at
+# import, before anything can have changed them, so selecting the four-OSEM body
+# restores exactly the objects this module was written around -- same floats,
+# same list identities, nothing recomputed. That is what makes the four-channel
+# results bit-identical rather than merely close.
+_BODY_KEYS = ("N", "NMODE", "MODE_F0", "MODE_DRIVE", "MODE_AUTHORITY",
+              "MODE_INERTIA", "MODE_SEISMIC", "MODE_DRIVE_RATIO", "DRIVE_HZ",
+              "SHAPE", "ACT", "SENSE", "MODE_LABELS", "COIL_GAIN", "HUM_SCALE",
+              "DC_REST_COUNTS", "SENSING", "LINE_HZ", "LINE_COUNTS",
+              "LINE2_HZ", "LINE2_COUNTS", "OWN_HZ", "OWN_Q", "OWN_COUNTS",
+              "DC_STATIC_V", "AUTO_KICK_DV", "DRIVE_HARD", "DRIVE_UNDAMPABLE")
+_BODY4 = {k: globals()[k] for k in _BODY_KEYS}
+
+
+def _select_body(n, counts_per_volt):
+    """Install the four- or eight-OSEM body as the active plant.
+
+    Called from load() once the controller's ADC scaling is known, because the
+    eight-OSEM body's coil authority is derived from a matrix measured in COUNTS
+    and has to be turned into the volts the plant integrates.
+    """
+    g = globals()
+    if n == 4:
+        g.update(_BODY4)
+        return
+    if n != 8:
+        raise ValueError(
+            f"sim/server.py models a 4-OSEM or an 8-OSEM body, not {n}. "
+            "Add the geometry from a bench measurement before running this.")
+    act, static = _build_body8(counts_per_volt)
+    g.update(N=8, NMODE=2, MODE_F0=MODE_F0_8, MODE_DRIVE=MODE_DRIVE_8,
+             MODE_AUTHORITY=MODE_AUTHORITY_8, MODE_INERTIA=MODE_INERTIA_8,
+             MODE_SEISMIC=MODE_SEISMIC_8, MODE_DRIVE_RATIO=MODE_DRIVE_RATIO_8,
+             DRIVE_HZ=DRIVE_HZ_8, SHAPE=SHAPE_8, ACT=act, SENSE=SENSE_8,
+             MODE_LABELS=MODE_LABELS_8, COIL_GAIN=COIL_GAIN_8,
+             HUM_SCALE=HUM_SCALE_8, DC_REST_COUNTS=DC_REST_COUNTS_8,
+             SENSING=SENSING_8, LINE_HZ=LINE_HZ_8, LINE_COUNTS=LINE_COUNTS_8,
+             LINE2_HZ=LINE2_HZ_8, LINE2_COUNTS=LINE2_COUNTS_8,
+             OWN_HZ=OWN_HZ_8, OWN_Q=OWN_Q_8, OWN_COUNTS=OWN_COUNTS_8,
+             DC_STATIC_V=static,
+             # ch0's in-band coil authority here is act[0][0] * SHAPE[0][0] of
+             # the four-OSEM body's 1.0, and a clipped actuator's force does not
+             # scale with Kp, so the auto kick scales with it or the saturation
+             # scenario stops being about saturation. See AUTO_KICK_DV.
+             AUTO_KICK_DV=_BODY4["AUTO_KICK_DV"] * abs(act[0][0] * SHAPE_8[0][0]),
+             DRIVE_HARD=DRIVE_HARD_8, DRIVE_UNDAMPABLE=DRIVE_UNDAMPABLE_8)
 
 
 class FakeDAC:
@@ -347,13 +723,18 @@ class Sim:
         self.loop_hz = SAMPLE_HZ
         osem.time = _SimTimeModule(self)     # see the class docstring
         self.plant = dict(ack_drain=ACK_DRAIN,
-                          f_drive=1.0, drive_amp=0.8, seismic=0.8, Q=50.0,
-                          k_act=20.0, meas_noise=20.0,
+                          f_drive=DRIVE_HZ, drive_amp=0.8, seismic=0.8, Q=50.0,
+                          k_act=K_ACT_REF, meas_noise=20.0,
                           hum_hz=60.0, hum_mv=0.0,        # electrical, on the sensor
                           hvac_hz=2.5, hvac_amp=0.0,      # mechanical, on the mass
-                          shock_rate=0.0, shock_amp=3.0)  # per minute, V/s
-        self.occlude = [False] * 4
-        self.occlude_high = [False] * 4   # which rail a blinded channel sits on
+                          shock_rate=0.0, shock_amp=3.0,  # per minute, V/s
+                          # multiplier on the measured out-of-band interference
+                          # line. 1.0 is the 2026-08-06 session; the 2026-08-04
+                          # one was 4-20x louder. Does nothing on a body that
+                          # has no line, i.e. the four-OSEM one.
+                          line_scale=1.0)
+        self.occlude = [False] * N
+        self.occlude_high = [False] * N   # which rail a blinded channel sits on
         # Per-channel counts-per-metre, relative to nominal. NOT a fudge factor:
         # an OSEM is a shadow sensor and is only linear while its flag sits in
         # the partial shadow, so alignment sets how many counts one metre of
@@ -368,7 +749,12 @@ class Sim:
         # sensing the optic, so what reaches the ADC is that channel's own noise
         # about its resting count. This is the failure `auto-disable` cannot see,
         # because such a channel never RAILS: it sits mid-scale and flat.
-        self.sens_gain = [1.0] * 4
+        #
+        # On the EIGHT-OSEM body this is a multiplier ON TOP of what SHAPE
+        # already says: a4/a6/a7 are already 0.0 there and a5 is already 1/12,
+        # because those are measured properties of the rig rather than injected
+        # faults. Leaving it at 1.0 gives the bench's own channel set.
+        self.sens_gain = [1.0] * N
         self.quake = None                 # sustained injected shake, or None
         self.enable = [bool(v) for v in osem.ENABLE_CHANNEL]
         self.steady = [float(v) for v in osem.STEADY_GAIN]
@@ -403,8 +789,8 @@ class Sim:
             self.ctl = osem.Controller(self.dac, enable=self.enable,
                                        steady=self.steady, capture=self.capture,
                                        ki=self.ki, kd=self.kd)
-            self.diag = [osem.SlidingRMS(osem.ENVELOPE_WINDOW_S) for _ in range(4)]
-            self.diag_ratio = [0.0] * 4
+            self.diag = [osem.SlidingRMS(osem.ENVELOPE_WINDOW_S) for _ in range(N)]
+            self.diag_ratio = [0.0] * N
             self.t = 0.0
             self._drain = 0      # stream samples still being eaten by an ack
             self._dt_lost = 0.0  # their duration, handed to the controller
@@ -414,8 +800,8 @@ class Sim:
             self.trace = []
             self.cursor = 0
             self.decim = 0
-            self.blk_min = [float("inf")] * 4
-            self.blk_max = [float("-inf")] * 4
+            self.blk_min = [float("inf")] * N
+            self.blk_max = [float("-inf")] * N
             self.blk_shock = 0.0
             self.shocks = 0
             self.last_shock = None
@@ -424,7 +810,7 @@ class Sim:
             self.quake = None
             # ADC rail bookkeeping, so "what fraction of this run clipped?" is
             # answerable the same way it is off a bench CSV (v1 2.19%, v2 10.40%).
-            self.clip_n = [0] * 4
+            self.clip_n = [0] * N
             self.samp_n = 0
 
             # Start each MODE on the steady-state orbit of its own forced
@@ -432,28 +818,52 @@ class Sim:
             # than a startup transient. Holds off resonance too, which matters
             # because the drive frequency is adjustable.
             zeta = 1.0 / (2.0 * self.plant["Q"])
-            w = 2.0 * math.pi * self.plant["f_drive"]
             self.q, self.qd = [], []          # modal displacement and velocity
-            for m in range(3):
+            for m in range(NMODE):
+                w = 2.0 * math.pi * (self.plant["f_drive"] * MODE_DRIVE_RATIO[m])
                 w0 = 2.0 * math.pi * MODE_F0[m]
                 a0 = self.plant["drive_amp"] * MODE_DRIVE[m]
                 A = a0 / math.sqrt((w0 * w0 - w * w) ** 2 + (2 * zeta * w0 * w) ** 2)
                 phi = math.atan2(2 * zeta * w0 * w, w0 * w0 - w * w)
                 self.q.append(-A * math.sin(phi))
                 self.qd.append(A * w * math.cos(phi))
-            self.x = self.project()           # the four sensor readings
-            self.modes = self.modal(self.x)   # LONG, PITCH, YAW, BUTTERFLY
+            # Whatever a5's own in-band content is, it is stationary and its
+            # correlation time is Q/(pi*f0) ~ 9 s -- long enough that starting it
+            # from rest would leave calibration measuring a channel still
+            # filling up. Start it on its stationary distribution instead.
+            self.own_q, self.own_qd = [0.0] * N, [0.0] * N
+            if OWN_ANY:
+                w = 2.0 * math.pi * OWN_HZ
+                for i in range(N):
+                    if OWN_RMS_V[i]:
+                        self.own_q[i] = OWN_RMS_V[i] * gauss()
+                        self.own_qd[i] = OWN_RMS_V[i] * w * gauss()
+            self.x = self.project()           # what each OSEM sees
+            self.modes = self.modal(self.x)   # the modal decomposition
 
     def project(self):
         """Rigid-body modes -> what each OSEM sees. This is the whole reason the
-        four channels are correlated: they are four views of three numbers."""
-        return [X_REST + self.q[0] + self.q[1] * GEOM[i][1] + self.q[2] * GEOM[i][0]
-                for i in range(4)]
+        channels are correlated: they are N views of NMODE numbers.
+
+        Written as an accumulation rather than a sum() so the four-OSEM body
+        adds X_REST + q0 + q1*y + q2*x in exactly the order it always did.
+        SHAPE[i][0] is 1.0 on that body, and q * 1.0 is q.
+        """
+        out = []
+        for i in range(N):
+            z = X_REST
+            for m in range(NMODE):
+                z += self.q[m] * SHAPE[i][m]
+            out.append(z)
+        return out
 
     def modal(self, z):
-        """The inverse: four sensor readings -> LONG, PITCH, YAW, BUTTERFLY."""
+        """The inverse: sensor readings -> the modal decomposition. The last row
+        is the one no rigid-body motion in band can produce, so any reading in
+        it is sensors disagreeing -- a consistency check that needs no
+        threshold in counts."""
         d = [zi - X_REST for zi in z]
-        return [sum(SENSE[m][i] * d[i] for i in range(4)) for m in range(4)]
+        return [sum(SENSE[m][i] * d[i] for i in range(N)) for m in range(len(SENSE))]
 
     def apply_gains(self):
         """Push live edits onto the controller's own Channel objects."""
@@ -476,8 +886,8 @@ class Sim:
             # stream, so where it points does not depend on how many noise
             # samples happen to have been drawn before it -- see reset().
             self.qd[0] += dv
-            self.qd[1] += dv * 0.35 * (2.0 * self.rng_shock.random() - 1.0)
-            self.qd[2] += dv * 0.35 * (2.0 * self.rng_shock.random() - 1.0)
+            for m in range(1, NMODE):
+                self.qd[m] += dv * 0.35 * (2.0 * self.rng_shock.random() - 1.0)
             self.shocks += 1
             self.last_shock = (round(self.t, 2), round(dv, 2))
             self.blk_shock = max(self.blk_shock, abs(dv))
@@ -502,22 +912,27 @@ class Sim:
     def aim(self, channels=None):
         """Modal direction that shows up hardest on the named sensors.
 
-        z_i = LONG + PITCH*y_i + YAW*x_i, so pushing along (1, y_i, x_i) is the
+        Sensor i reads sum_m q_m * SHAPE[i][m], so pushing along SHAPE[i] is the
         off-centre shove that lands on sensor i -- which is what a real one is;
         nothing hits a suspended mass exactly on its centre of percussion. The
         vector is normalised so one unit of it moves the worst-hit NAMED sensor
-        by one unit. Naming all four, or none, collapses to pure LONG.
+        by one unit. Naming every channel, or none, collapses to the first mode.
+
+        A channel with no motion coupling at all (a4/a6/a7 on the eight-OSEM
+        body) contributes nothing to aim at, so naming only those falls back to
+        the first mode rather than dividing by zero. That is the honest answer:
+        no shove lands on a sensor that is not watching the optic.
         """
+        base = [1.0] + [0.0] * (NMODE - 1)
         if not channels:
-            return [1.0, 0.0, 0.0]
-        v = [0.0, 0.0, 0.0]
+            return base
+        v = [0.0] * NMODE
         for i in channels:
-            v[0] += 1.0
-            v[1] += GEOM[i][1]
-            v[2] += GEOM[i][0]
-        gain = max(abs(v[0] + v[1] * GEOM[i][1] + v[2] * GEOM[i][0])
+            for m in range(NMODE):
+                v[m] += SHAPE[i][m]
+        gain = max(abs(sum(v[m] * SHAPE[i][m] for m in range(NMODE)))
                    for i in channels)
-        return [c / gain for c in v] if gain > 1e-9 else [1.0, 0.0, 0.0]
+        return [c / gain for c in v] if gain > 1e-9 else base
 
     def earthquake(self, channels=None, dv=25.0, duration=0.0):
         """A large transient, optionally aimed and optionally sustained.
@@ -540,7 +955,7 @@ class Sim:
         """
         with self.lock:
             u = self.aim(channels)
-            for m in range(3):
+            for m in range(NMODE):
                 self.qd[m] += dv * u[m]
             if duration > 0:
                 # On resonance the steady-state amplitude is F*Q/w0^2, so the
@@ -592,9 +1007,9 @@ class Sim:
             return f"sens_gain {kw.get('channels')} -> {float(kw.get('gain', 1.0)):.3f}"
         if kind == "clear":
             with self.lock:
-                self.occlude = [False] * 4
-                self.occlude_high = [False] * 4
-                self.sens_gain = [1.0] * 4
+                self.occlude = [False] * N
+                self.occlude_high = [False] * N
+                self.sens_gain = [1.0] * N
                 self.quake = None
             return "cleared"
         raise ValueError(f"unknown injection: {kind}")
@@ -633,7 +1048,6 @@ class Sim:
             self.kick(mag)
 
         zeta = 1.0 / (2.0 * p["Q"])
-        drive = p["drive_amp"] * math.sin(2.0 * math.pi * p["f_drive"] * t)
         # HVAC: a steady tone from plant machinery, coupled in through the floor.
         # It is a force like any other, so the suspension's own transfer function
         # decides what survives -- near 1 Hz it is amplified by Q, well above it
@@ -642,7 +1056,7 @@ class Sim:
         # An injected earthquake, if one is still running: a force on the mass
         # like the drive, but aimed along the modal direction that lands on the
         # named channels. It expires on its own.
-        quake = [0.0, 0.0, 0.0]
+        quake = [0.0] * NMODE
         if self.quake is not None:
             if t >= self.quake["until"]:
                 self.quake = None
@@ -661,35 +1075,70 @@ class Sim:
         # in the model, it is the geometry, and it is what four independent
         # per-channel loops cannot see: each one is fighting a plant the other
         # three are also driving.
-        f_mode = [0.0, 0.0, 0.0]
-        for i in range(4):
+        f_mode = [0.0] * NMODE
+        for i in range(N):
             # Coil authority is negative: raising the DAC pushes in -x, which is
             # what makes a NEGATIVE Kp damping. COIL_GAIN flips that for ch2, so
-            # its +0.010 damps there and would pump anywhere else.
+            # its +0.010 damps there and would pump anywhere else. On the
+            # eight-OSEM body the flip lives in ACT instead, because it was
+            # measured per mode rather than inferred as one lumped number.
             held = self.dac.held[osem.DAC_CHANNELS[i]]
             f_i = -COIL_GAIN[i] * p["k_act"] * (held - float(osem.BIAS[i]))
-            f_mode[0] += f_i                      # net longitudinal force
-            f_mode[1] += f_i * GEOM[i][1]         # torque about the horizontal
-            f_mode[2] += f_i * GEOM[i][0]         # torque about the vertical
+            for m in range(NMODE):
+                f_mode[m] += f_i * ACT[m][i]
 
-        # ---- advance the three rigid-body modes ----
+        # ---- advance the rigid-body modes ----
         seismic_common = p["seismic"] * gauss()
-        for m in range(3):
+        for m in range(NMODE):
             w0 = 2.0 * math.pi * MODE_F0[m]
+            drive = p["drive_amp"] * math.sin(
+                2.0 * math.pi * (p["f_drive"] * MODE_DRIVE_RATIO[m]) * t)
             a = (-w0 * w0 * self.q[m] - 2.0 * zeta * w0 * self.qd[m]
                  + (drive + hvac) * MODE_DRIVE[m] + quake[m]
-                 + p["seismic"] * gauss() * NOISE_SCALE * (1.0 if m == 0 else 0.6)
-                 + MODE_AUTHORITY[m] * f_mode[m] / (1.0 if m == 0 else 2.0))
+                 + p["seismic"] * gauss() * NOISE_SCALE * MODE_SEISMIC[m]
+                 + MODE_AUTHORITY[m] * f_mode[m] / MODE_INERTIA[m])
             self.qd[m] += a * DT
             self.q[m] += self.qd[m] * DT
         self.x = self.project()
         self.modes = self.modal(self.x)
 
-        counts = [0] * 4
-        volts = [0.0] * 4
+        # ---- each channel's OWN in-band content, which is not the optic ----
+        # a5 carries ~20 counts of 1 Hz content that does not track how hard the
+        # optic is moving (see OWN_COUNTS_8). It is what stands between a real
+        # but weak sensor and being demoted by `baseline-floor`, so it cannot be
+        # left out; it is also the reason a5's ratio floors above the lock line
+        # instead of following the other channels down. Narrowband, driven by
+        # its own noise, and NOT scaled by sens_gain -- it is not motion.
+        if OWN_ANY:
+            w_own = 2.0 * math.pi * OWN_HZ
+            z_own = 1.0 / (2.0 * OWN_Q)
+            for i in range(N):
+                if not OWN_SIGMA[i]:
+                    continue
+                acc = (-w_own * w_own * self.own_q[i]
+                       - 2.0 * z_own * w_own * self.own_qd[i])
+                self.own_qd[i] += acc * DT + OWN_SIGMA[i] * SQRT_DT * gauss()
+                self.own_q[i] += self.own_qd[i] * DT
+
+        # ---- a static push that no in-band mode contains --------------------
+        # Only the eight-OSEM body has one, and only because its measured DC
+        # matrix demands it: fit those columns onto the two modes the passive
+        # spectra resolve and a third direction is left over. See _build_body8.
+        # This is what makes `bias-trim` act on measured physics rather than on
+        # whatever the modal model happens to imply.
+        stat = None
+        if DC_STATIC_V is not None:
+            scale = p["k_act"] / K_ACT_REF
+            dvs = [self.dac.held[osem.DAC_CHANNELS[j]] - float(osem.BIAS[j])
+                   for j in range(N)]
+            stat = [scale * sum(DC_STATIC_V[i][j] * dvs[j] for j in range(N))
+                    for i in range(N)]
+
+        counts = [0] * N
+        volts = [0.0] * N
         self.samp_n += 1
         full_scale = int(osem.ADC_MAX_COUNTS)
-        for i in range(4):
+        for i in range(N):
             # An occluded OSEM is not reporting the optic at all: a flag across
             # the beam pins the photodiode at the bottom of its range, a flag
             # clear of it at the top, wherever the mass actually is. That is the
@@ -709,9 +1158,23 @@ class Sim:
                 # healthy-looking DC level and a perfectly healthy-looking noise
                 # floor; only the optic is missing from it.
                 measured = DC_REST_V[i] + self.sens_gain[i] * (self.x[i] - X_REST)
+                if stat is not None:
+                    measured += stat[i]
+                if OWN_ANY:
+                    measured += self.own_q[i]
             sig = measured + noise_v * gauss()
             if hum_v:
                 sig += hum_v * HUM_SCALE[i] * math.sin(hum_phase)
+            # Out-of-band interference, on the sensor line like the mains term.
+            # This is what a4/a6/a7 are FULL of, and why "it reads nothing" is
+            # the wrong picture of them: raw std 13-105 counts, 91-99% of it
+            # above the loop band, and none of it the optic.
+            if LINE_ANY:
+                ls = p["line_scale"]
+                if LINE_V[i]:
+                    sig += ls * LINE_V[i] * math.sin(2.0 * math.pi * LINE_HZ * t)
+                if LINE2_V[i]:
+                    sig += ls * LINE2_V[i] * math.sin(2.0 * math.pi * LINE2_HZ * t)
 
             # The converter, modelled the way the hardware behaves: integer
             # counts, hard-clipped to 0..1023. The controller then scales those
@@ -770,7 +1233,7 @@ class Sim:
             self.decim = 0
             chans = self.ctl.channels
             row = [round(t, 4), STATE_CODE[state]]
-            for i in range(4):
+            for i in range(N):
                 # signal is plotted about each channel's OWN resting point, so
                 # the traces stay centred now that they no longer share one.
                 row += [round(chans[i].bp_out, 5), round(volts[i] - DC_REST_V[i], 5),
@@ -814,8 +1277,9 @@ class Sim:
                 "loopHz": round(self.loop_hz, 1),
                 "ackDrain": round(float(self.plant["ack_drain"]), 1),
                 "shocks": self.shocks,
+                "nch": N,
                 "modes": [round(v, 4) for v in self.modes],
-                "modeNames": MODE_NAMES + ["BUTTERFLY"],
+                "modeNames": list(MODE_LABELS),
                 "lastShock": self.last_shock,
                 "quake": (round(self.quake["until"] - self.t, 1)
                           if self.quake else None),
@@ -848,6 +1312,7 @@ def load(controller_file):
     """
     global osem, SIM, CONTROLLER_FILE, VERSION
     global COUNTS_PER_VOLT, VOLTS_PER_COUNT, DC_REST_V
+    global LINE_V, LINE2_V, OWN_RMS_V, OWN_SIGMA, LINE_ANY, OWN_ANY
     CONTROLLER_FILE = os.path.abspath(controller_file)
     VERSION = os.path.basename(CONTROLLER_FILE)[:-3]        # "osem.v0"
     modname = VERSION.replace(".", "_")                     # dots are not legal
@@ -858,9 +1323,24 @@ def load(controller_file):
     osem = mod
     COUNTS_PER_VOLT = osem.ADC_MAX_COUNTS / osem.A_VCC
     VOLTS_PER_COUNT = osem.A_VCC / osem.ADC_MAX_COUNTS
+    # How many OSEMs this controller believes are on the mass decides which body
+    # it is driven against. Both are measured; neither is a scaled copy of the
+    # other. See _select_body.
+    _select_body(len(osem.ENABLE_CHANNEL), COUNTS_PER_VOLT)
     # Every version declares its own A_VCC and ADC_MAX_COUNTS, so the resting
     # points can only be turned into volts once one of them is loaded.
     DC_REST_V = [c / COUNTS_PER_VOLT for c in DC_REST_COUNTS]
+    LINE_V = [c / COUNTS_PER_VOLT for c in LINE_COUNTS]
+    LINE2_V = [c / COUNTS_PER_VOLT for c in LINE2_COUNTS]
+    LINE_ANY = any(LINE_V) or any(LINE2_V)
+    OWN_RMS_V = [c / COUNTS_PER_VOLT for c in OWN_COUNTS]
+    # A resonator driven by white noise settles at var(x) = sigma^2/(4*zeta*w^3),
+    # so this is the drive that gives the measured in-band RMS. Solved rather
+    # than tuned, because the RMS is the measurement and the drive is not.
+    _wo = 2.0 * math.pi * OWN_HZ
+    _zo = 1.0 / (2.0 * OWN_Q)
+    OWN_SIGMA = [r * math.sqrt(4.0 * _zo * _wo ** 3) for r in OWN_RMS_V]
+    OWN_ANY = any(OWN_SIGMA)
     SIM = Sim()
     return osem
 
@@ -909,6 +1389,12 @@ class Handler(BaseHTTPRequestHandler):
                     page = f.read()
             except OSError:
                 return self._send(404, "sim/ui.html not found", "text/plain")
+            # The page builds every per-channel control from NCH, so telling it
+            # how many OSEMs this body has is the whole of serving an
+            # eight-channel controller. Everything downstream -- the row stride
+            # in the trace, the legend, the lamps -- derives from it.
+            page = page.replace("<script", f"<script>window.__NCH__ = {N};</script>"
+                                            "<script", 1)
             return self._send(200, page, "text/html; charset=utf-8")
 
         if path == "/api/state":
@@ -926,7 +1412,7 @@ class Handler(BaseHTTPRequestHandler):
             with SIM.lock:
                 header = "time_s,state," + ",".join(
                     f"ch{i}_signal,ch{i}_bp,ch{i}_vel,ch{i}_out,ch{i}_gain,ch{i}_ratio,"
-                    f"ch{i}_p,ch{i}_i,ch{i}_d,ch{i}_rail,ch{i}_locked" for i in range(4))
+                    f"ch{i}_p,ch{i}_i,ch{i}_d,ch{i}_rail,ch{i}_locked" for i in range(N))
                 body = header + "\n" + "\n".join(SIM.log) + "\n"
             return self._send(200, body, "text/csv")
 

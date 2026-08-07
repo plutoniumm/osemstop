@@ -548,7 +548,7 @@ figcaption .sub { font-size: 12px; color: var(--ink-3); margin-top: 2px; }
      [ t, stateCode, then per channel: bp, raw, rmin, rmax, ratio, out,
        then one trailing field: shock magnitude in this block, 0 if none ]
    ============================================================ */
-const NCH = 4, STRIDE = 6, HEAD = 2;
+const NCH = window.__NCH__ || 4, STRIDE = 6, HEAD = 2;
 const F = { BP: 0, RAW: 1, RMIN: 2, RMAX: 3, RATIO: 4, OUT: 5 };
 const SHOCK_IX = HEAD + NCH * STRIDE;
 const val = (row, s, f) => row[HEAD + s * STRIDE + f];
@@ -563,7 +563,9 @@ const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
 /* a field an older server does not send is absent, not zero */
 const num = v => (typeof v === "number" && Number.isFinite(v)) ? v : null;
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
-const SERIES = ["--s1", "--s2", "--s3", "--s4"];
+/* Four named series colours; an eight-OSEM body reuses them in order. The
+   channel label carries the identity, the swatch only groups. */
+const SERIES = Array.from({length: 16}, (_, i) => ["--s1","--s2","--s3","--s4"][i % 4]);
 
 /* ---------------- transport ---------------- */
 async function post(path, body) {
@@ -800,8 +802,11 @@ function attachHover(cv, tip, field, only) {
 
 /* ---------------- UI construction ---------------- */
 const DEFAULTS = {
-  enable: [true, false, false, false], occlude: [false, false, false, false],
-  steady: [-0.030, -0.030, +0.010, -0.030], ki: [0, 0, 0, 0], kd: [0, 0, 0, 0], autoKick: false,
+  enable: Array.from({length: NCH}, (_, i) => i === 0),
+  occlude: Array.from({length: NCH}, () => false),
+  steady: Array.from({length: NCH}, (_, i) => [-0.030, -0.030, +0.010, -0.030][i] ?? 0),
+  ki: Array.from({length: NCH}, () => 0), kd: Array.from({length: NCH}, () => 0),
+  autoKick: false,
 };
 const cfg = JSON.parse(JSON.stringify(DEFAULTS));
 const pushCfg = () => post("/api/config", {
@@ -842,12 +847,12 @@ for (let i = 0; i < NCH; i++) {
   }
 }
 
-const CH_SUB = [
+const CH_SUB = Array.from({length: NCH}, (_, i) => [
   "Validated on hardware: −0.030, 6× reduction, no clipping",
   "Wired identically to ch0, but never enabled",
   "Gain sign is inverted (+0.010) — anti-damping",
   "Wired identically to ch0, but never enabled",
-];
+][i] ?? "Part of the eight-OSEM body — see versions.md");
 const smalls = document.getElementById("smalls");
 for (let i = 0; i < NCH; i++) {
   const f = document.createElement("figure");
@@ -871,7 +876,7 @@ document.getElementById("modeBp").addEventListener("click", () => setStripMode("
 document.getElementById("modeRaw").addEventListener("click", () => setStripMode("raw"));
 
 function buildLegend(el, extra) {
-  el.innerHTML = [0, 1, 2, 3].map(i =>
+  el.innerHTML = Array.from({length: NCH}, (_, i) => i).map(i =>
     `<span class="item"><span class="swatch" style="background:var(${SERIES[i]})"></span>ch${i}</span>`).join("") +
     `<span class="item"><span class="swatch dash"></span>${extra}</span>`;
 }

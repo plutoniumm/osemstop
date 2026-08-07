@@ -1,18 +1,19 @@
 # OSEM suspension damping
 
 A three-layer control stack that damps a suspended optic using OSEM (Optical Sensor
-and Electro-Magnetic actuator) shadow sensors. Four OSEMs sense position, four coils
-push back, and the whole thing is one closed loop split across a language boundary:
+and Electro-Magnetic actuator) shadow sensors. Eight OSEMs are connected; four of
+them (a0–a3) carry usable in-band signal and their four coils push back. The whole
+thing is one closed loop split across a language boundary:
 
 ```
 arduino.ino (Arduino firmware)     <-- SPI --> AD5628 octal DAC --> coils
    ^  |                                                              |
-   |  | serial @115200                                               v
+   |  | serial @500000                                               v
    |  v                                                      suspended optic
 pyDAC.py (DACController: transport)                                   |
    ^  |                                                               |
    |  v                                                    OSEMs --> A0..A3
-osem.vN.py  (control law, safety, logging)  <-- analogRead ------------'
+osem.<name>.py (control law, safety, logging) <-- analogRead ----------'
 ```
 
 ---
@@ -23,46 +24,45 @@ osem.vN.py  (control law, safety, logging)  <-- analogRead ------------'
 
 ## 0. Which version to run
 
-Four controllers — `osem.v3.py`, `osem.v7.py`, `osem.v9.py`, `osem.v10.py` —
-plus `osem.v6.py`, a **bench tool that is not a controller at all**. They are
-**not** patches: each is a complete standalone program, and a higher number does
-**not** automatically mean better. `make list` prints the table; `versions.md`
-§ *The ladder* has the numbers.
+The ladder is **named, not numbered**: `zero`, `alpha`, `beta`, `delta`, and
+`epsilon` when it is written. Numbers stopped carrying information once v10 and
+v11 were both "newer than v9" and one of them damped worse than v9 did; numbers
+also imply a total order the history does not have, since v7 was a branch off v5
+rather than a successor. The order lives in `ladder.py` and nothing is derived
+from a filename. `make list` prints the table; old numbered names still work on
+the command line and are redirected with a note.
 
-All four run the **same control law** — four independent SISO velocity-feedback
-PID loops, identical `STEADY_GAIN` / `KI_GAIN` / `KD_GAIN` including ch2's
-deliberate `+0.010`. They differ only in the supervisor wrapped around it.
+They all run the **same control law**: independent SISO velocity-feedback PID
+loops, one per channel, with ch2's deliberate opposite sign. They differ in the
+supervisor wrapped around it and in the transport underneath it.
 
-- **`osem.v10.py` — develop against this one.** v9 plus v7's `bias-trim` plus
-  **`soft-saturation`**: a pinned actuator is no longer a fault on its own. It
-  only faults if the envelope also stops falling — because clipping removes
-  authority in one direction only, so a clipped loop is a weakened loop, not a
-  broken one. On the suite's over-gain scenario, v9 faults and the optic peaks at
-  1.527; v10 does not fault and peaks at **0.853**. 37/37 in the simulator,
-  **never run on hardware**.
-- **`osem.v9.py` — run this one on hardware.** The newest rung with a bench
-  result behind it. All three defects fixed, plus `auto-disable`,
-  `fast-refault`, `fast-calib`, `warm-restart` and `runaway-trend`. That last one
-  matters most: the runaway breaker was a *level* test, so it tripped over and
-  over on a decaying post-kick ringdown — a defect present in every version back
-  to v0. On the bench 2026-08-04 the fix took three kicks from 10 faults to 4, and
-  it re-locked after every one.
-- **`osem.v7.py`** — a parallel branch off v5 carrying **`bias-trim`**. It trims
-  per-channel coil bias toward mid-scale and took total sensor offset 565 → 455
-  counts on hardware, at no cost in lock time. Now folded into v10, but kept
-  because it is the only *hardware-validated* version carrying the trim.
-- **`osem.v3.py`** — the **minimal PID baseline**. Same law, none of the
-  supervisory machinery, so it is the reference to A/B against when you want to
-  know whether a supervisor change helped or merely moved the problem.
-- **`osem.v6.py`** — stepped-sine actuation-matrix measurement, four coils. It
-  damps nothing and closes no loop.
+- **`osem.delta.py` — run this one, and develop against it.** Eight channels,
+  500000 baud, and a **100 Hz control clock decoupled from the wire**, plus the
+  four fixes that made that safe: `sample-guard`, `decimate`, `persist-baseline`,
+  `baseline-sanity`. Time-weighted on the bench 2026-08-06 it damped **77.5 %**
+  of a 244 s five-kick run. The single change that did it was the runaway
+  breaker's lag: 2 s sits inside all three measured mode-beat periods (3.578 /
+  1.551 / 1.082 s), so the breaker was reading the beat as growth. At 10 s it is
+  not. **It has never announced `LOCKED`** — see § 4; that is a quorum bug, not a
+  damping one.
+- **`osem.beta.py`** — the last four-channel rung, and still the best raw DAMPING
+  fraction on record (**83.1 %**, 2026-08-04). Where `runaway-trend` was
+  introduced: the breaker tests for *growth* rather than level, which is what
+  stopped the post-kick fault thrash.
+- **`osem.alpha.py`** — where **`auto-disable`** was introduced: one blind OSEM is
+  demoted and parked rather than faulting the whole rig.
+- **`osem.zero.py`** — the original, and the baseline the ladder is measured
+  against. **One channel**, and a saturation trip **latches**: FAULT is an
+  absorbing state needing a manual restart. Do not run it unattended.
+- **`osem.sysid.py`** — stepped-sine actuation-matrix measurement. It damps
+  nothing and closes no loop.
 
-**Deleted 2026-08-04 and 2026-08-06**, in git history only (`git show
-HEAD~1:osem.v5.py`): v0, v1, v2 (pre-fix rungs), v4 and v5 (superseded by v7/v9,
-which contain them), v8 (v9 without `runaway-trend` — it thrashes), v5.5 (the
-eight-OSEM build; it never locked, see below), and v6.1 / v6.5 / v6.6 (sysid
-variants — the multisine one failed on hardware, and the 8-coil ones expect
-4 DOF, which cannot be seen until a4–a7 are wired).
+**In git history only** (`git log --diff-filter=D --name-only`): the numbered
+rungs that the named ladder replaced or superseded — v1, v2, v3, v5, v5.5, v7,
+v8, v10, v11, v13, and the v6.1 / v6.5 / v6.6 sysid variants. `versions.md` says
+what each one was and why it went. **`osem.v13.py` was deleted 2026-08-07**: it
+existed only to carry a modal law, and modal control is closed by measurement
+(§ 8).
 
 **All eight OSEMs are connected** — confirmed on an oscilloscope. Earlier notes
 in this repo said a4–a7 were unwired; that was wrong. The real split is
@@ -75,9 +75,16 @@ in this repo said a4–a7 were unwired; that was wrong. The real split is
 | a4, a6, a7 | **no**, 0.1–9% in band | a 6.19 Hz interference line |
 
 a4, a6 and a7 carry real signal (raw std 13–105 counts) but 91–99% of it is at
-3–20 Hz, with a narrow 6.19 Hz line carrying most of that. **The flags are
-outside the linear partial-shadow region** — an alignment job, not a wiring job.
-Details and the scripts in `versions.md` § *Sensor centering* and `analysis/`.
+3–20 Hz, with a narrow 6.19 Hz line carrying most of that. They **do** move on a
+hard kick — seen on an oscilloscope 2026-08-06 — so they are in the loop, just at
+roughly 1/100 of a0–a3's in-band gain.
+
+**Why is not established.** This file previously said "the flags are outside the
+linear partial-shadow region", i.e. an alignment job. The 2026-08-06 resting
+counts do not support that: **a4 sits at 567.5 against a mid-scale of 511.5 with
+a 30-count swing** — inside its linear range, not pinned at an end. a7 is at
+734.7 and a6 at 860.6, higher but still off the rail. Treat the low gain as
+measured and the cause as open (`versions.md` § *v12*).
 
 Methodological note worth keeping: the original call came from a DC-response
 threshold and raw time-domain correlation, and **both are blind to a small
@@ -87,9 +94,9 @@ Each controller declares a `BENCH_STATUS` and `make list` prints it, but
 **`bench.py` does not gate on it** — the statuses went stale faster than they were
 updated, and a gate whose data is wrong only teaches you to click through it. The
 preflight and the printed gain vectors are the load-bearing checks, because both
-come from the file that is about to run. All three surviving controllers now read
-`validated`: v3 ran 2026-08-03, v7 and v9 ran 2026-08-04 (`versions.md` § *On the
-bench*, console logs in `bench/20260804/`).
+come from the file that is about to run. `zero` ran 2026-08-03, `alpha` and
+`beta` 2026-08-04, `delta` 2026-08-06 and 08-07 (`versions.md` § *On the bench*
+and § *delta*, console logs in `bench/20260804/` and `bench/20260806/`).
 
 ## 1. Flash the Arduino
 
@@ -128,8 +135,13 @@ shows what it can see; `make run PORT=...` overrides it.
 
 ```bash
 cd /path/to/this/repo          # CSV goes to ./data/ RELATIVE TO CWD
-make run V=v9                  # or bare `make run` for a picker
+make run V=delta               # or bare `make run` for a picker
 ```
+
+**`delta` does not prompt.** Every earlier version blocks on `input()` after
+the biases are applied. `delta` keeps the prompt only when `sys.stdin.isatty()`, so it
+runs unattended — which also means **the coils are energised the moment it
+starts**, with no Enter key between you and that.
 
 `make run` **preflights** the port — opening it through the real `DACController`,
 which raises unless the sketch answers `READY`, so "wrong port" and "board not
@@ -153,9 +165,20 @@ the designed failure mode. See `versions.md`. (The deleted v0–v2 calibrated 8 
 The **lock time is the deliverable**. A run that never prints `LOCKED` did not
 work, whatever the traces look like.
 
+**With one caveat you will hit immediately: v10, v11 and v12 never print it.**
+Not once in the whole 2026-08-06 session. This is a quorum bug, not a damping
+failure. The announcement needs every `enabled & healthy` channel quiet, and
+`ENABLE_CHANNEL` is `True` on all eight; a4/a6/a7 demote themselves to `NOSIG`
+and drop out, but **a5 stays healthy while `STEADY_GAIN[5] = 0`**, so nothing
+drives it and it sits at ratio 1.26–2.53 against a threshold of 0.35. One
+undriven channel vetoes the whole rig, permanently. a0–a3 do reach lock together
+— 6 simultaneous episodes in `20260806_200822` — so until this is fixed, read
+the four `ch{i}_locked` columns in the CSV rather than the console.
+
 `data/<YYYYMMDD_HHMMSS>_fast_lock.csv` gets 13 columns per channel plus `time_s`
 and `state` — the 13th is `healthy`, added by v4 and kept by v7 and v9; v3 wrote
-12, since it has no per-channel health. It is line-buffered and flushed
+12, since it has no per-channel health. v11 and v12 add two run-level columns,
+`ctl` and `n_avg` (the decimation's samples-per-step). It is line-buffered and flushed
 every 200 rows, so it **survives an unclean kill** and is enough to reconstruct the
 run offline. `data/` is gitignored.
 
@@ -239,6 +262,38 @@ manual restart while a runaway trip recovered fine (deliberate, fixed in v3,
 reproduced on hardware 2026-08-03). See `versions.md` § *Hazards*; it is behaviour
 you would get back by restoring one of those files from git.
 
+## 8. MIMO / modal control — blocked on better sensors and coils
+
+Everything above is **four independent SISO loops**. The obvious next step is to
+diagonalise the plant and damp the modes directly instead of the channels. It was
+designed, measured and **ruled out on 2026-08-06**. Not on preference — on
+numbers. It needs hardware this rig does not have:
+
+- **Better sensors.** Modal control needs the sensor→mode matrix Φ, and Φ has to
+  be *taller* than it is wide or a single sensor loss makes the modes
+  unobservable. There are three modes (0.7155 / 0.9949 / 1.6396 Hz) and only
+  **three** sensors with a determined row — a0, a2, a3. **a1 never gets there:
+  its noise floor is 0.024 V against a0's 0.0047 V**, so it resolves 2–5 of the
+  6 tones it needs. Φ comes out **square**, which deletes graceful degradation
+  *and* the sensor-disagreement check (a square Φ reproduces any reading exactly
+  — measured residual `1.8e-16`). And it would fail exactly when wanted: a hard
+  kick railed all three good sensors at once.
+- **Better coils.** Coils 0–3 are actually fine for this — the allocator is 3×4,
+  **cond 1.41**. The problem is the other four. Coils 4–7 have pairwise column
+  cosine **+0.966**: they push in one shared direction, at **¼–⅐** the strength
+  of coils 0–3. Four coils on a rigid body cannot physically do that, so
+  something is wrong upstream of the control law. An anti-phase test meant to
+  separate "they share one winding" from "four real coils on one DOF" came back
+  **inconclusive** (ratio 0.579, shape cosine −0.488, coils 4/6 returning
+  0.2–0.9 counts/V against the control coil's 44).
+
+So: **eight OSEMs, but four usable sensor rows and four usable coils, and the
+four of each do not overlap enough to build an over-determined modal loop.**
+Details and the scripts in `versions.md` § *v12*, `analysis/mimo_design.md`,
+`analysis/coil_qual.py`, `analysis/antiphase.py`. What *is* worth doing without
+new hardware is in `versions.md` § *Still open after v12* — diagonal
+reallocation, then a Kalman velocity estimator.
+
 ---
 
 # Off the bench
@@ -255,10 +310,14 @@ make check            # the behavioural suite, headless, every version
 make list             # what versions exist
 ```
 
-`make check` runs every controller; `osem.v6.py` is skipped because it is a
-measurement tool with no `Controller` in it, and the skip prints its reason. An
-eight-channel controller would be skipped too — `sim/server.py` models a
-four-OSEM body, so there is no honest way to score one against it. What is stubbed and what is modelled is in `versions.md`
+`make check` runs every controller. `osem.v6.py` and `osem.v13.py` are skipped —
+the first is a measurement tool with no `Controller` in it, the second a
+skeleton — and both skips print their reason. **Eight-channel controllers are
+no longer skipped**: `sim/server.py` now carries a measured eight-OSEM body as
+well as the four (`SIM_CHANNELS = (4, 8)`), built from the 2026-08-04 and
+2026-08-06 logs, so v10, v11 and v12 are scored against it. It models **two**
+modes, though, and the ringdown has since measured **three**.
+What is stubbed and what is modelled is in `versions.md`
 § *What the simulator can and cannot tell you*. What it **cannot** tell you, and
 neither can the interlocks:
 
@@ -275,7 +334,10 @@ neither can the interlocks:
 
 | | |
 |---|---|
-| `osem.v3.py`, `osem.v7.py`, `osem.v9.py`, `osem.v10.py` | the controllers — complete and standalone, see `versions.md`. v0–v2, v4, v5, v5.5 and v8 are in git history |
+| `osem.v3.py` … `osem.v12.py` | the controllers — complete and standalone, see `versions.md`. **v12 is the one to run.** v0–v2, v4, v5, v5.5 and v8 are in git history |
+| `osem.v13.py` | skeleton only — `main()` raises `SystemExit`. Not a controller yet |
+| `tune.py` | on-hardware gain identification: dither, lock-in, sign de-rotation |
+| `analysis/` | offline analysis and one-off bench experiments, each with its own `.md` |
 | `osem.v6.py` | stepped-sine actuation-matrix measurement tool — `KIND = "sysid"`, no control loop |
 | `sysid.py` | the lock-in, rank check and recording behind it |
 | `pyDAC.py` | serial transport (`DACController`) — waits for its `OK` ack |
@@ -301,19 +363,32 @@ Changing any line here means editing `arduino.ino` and `pyDAC.py` together.
 | host → MCU | `STREAM` / `STOP` | toggles sampling; replies `STREAMING` / `STOPPED` |
 | MCU → host | `a0,...,a7` | free-running ADC counts 0–1023, one line per loop, only while streaming |
 
-The stream is **eight columns**; only A0–A3 carry OSEMs, so `read_sample` requires
-`len(parts) >= 4` and takes the leading four. Measured rate: **~348 Hz** (2.88
-ms/sample) — serial print dominates, so four columns would roughly double it.
+The stream is **eight columns**. Measured rate: **~348 Hz** at 115200 baud
+(2.88 ms/sample) and **1024–1113 Hz** at 500000 (v11 and v12, measured over four
+runs on 2026-08-06) — serial print dominates.
+
+**A row that parses is not a row that is valid.** `read_sample` accepted anything
+starting with a digit that split into ≥ N fields, and at 500000 baud with the ack
+no longer being drained, an `OK ch=..` reply landing on a buffer boundary splices
+two fields' digits together into a row that parses fine. v11's 240 s log has
+**ten** rows with a count outside 0..1023 — 5659, 65690, 522676 — against zero in
+every slower log from the same session. One of them is +45.6 V into the bandpass
+and a velocity estimate peaking at **1401 V/s** into a 0.5 V rail. v12's
+`sample-guard` range-checks every count and drops the row. **Any new tool reading
+this stream at 500000 needs that check**; `pyDAC2.FastDAC` does not do it for you.
 
 `SET` and the stream share one wire, so an `OK` arrives buried in sample lines.
 `set_voltage` reads up to 50 lines looking for it, and `RateLimitedActuator.send`
 swallows the `RuntimeError` when it never arrives, on purpose: the next sample
 resends.
 
-**Exactly one** threshold is counted in *samples* rather than seconds:
-`MAX_CONSECUTIVE_SATURATED = 30`, which is 86 ms at 348 Hz and would be 60 ms at
-500 Hz — so its wall-clock meaning moves with the stream rate. The rail window is
-**not** one of them: `RAIL_SUSTAIN_S` is in seconds in every version. (v0's
+**Up to v10, exactly one** threshold was counted in *samples* rather than
+seconds: `MAX_CONSECUTIVE_SATURATED = 30`, which is 86 ms at 348 Hz and 27 ms at
+1111 Hz — so its wall-clock meaning moved with the stream rate, and at 500000
+baud it became unreachable. v11's `sat-window` made it a time window, and v12
+depends on that: **no threshold in v11 or v12 is counted in samples**, which is
+what makes decimating the control step to a fixed 100 Hz safe. The rail window
+was never one of them: `RAIL_SUSTAIN_S` is in seconds in every version. (v0's
 docstring describes it as "250 consecutive samples", which is 0.5 s expressed at the
 *simulator's* old rate; on the bench the same 0.5 s is 174 samples.)
 

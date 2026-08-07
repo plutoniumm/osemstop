@@ -27,23 +27,34 @@ make sim V=v4                      # one of them in a browser
 
 ## The ladder
 
-In the tree, as of 2026-08-06. `make check` is **131 passed, 0 failed**.
+In the tree, as of 2026-08-06.
 
 | | channels | I / D | fixes | on bench | suite |
 |---|---|---|---|---|---|
-| **v3** | all four | live | all 3 defects fixed | validated 08-03 | 23/23 |
-| **v7** | all four | live | + auto-disable, fast-refault, **bias-trim** | validated 08-04 | 35/35 |
-| **v9** | all four | live | + fast-calib, warm-restart, **runaway-trend** | validated 08-04 | 36/36 |
-| **v10** | all four | live | v9 + v7's trim + **soft-saturation** | **untested** | 37/37 |
+| **v3** | 4/4 | live | all 3 defects fixed | validated 08-03 | 24/24 |
+| **v7** | 4/4 | live | + auto-disable, fast-refault, **bias-trim** | validated 08-04 | 36/36 |
+| **v9** | 4/4 | live | + fast-calib, warm-restart, **runaway-trend** | validated 08-04 | 37/37 |
+| **v10** | **5/8** | live | v9 + trim + **soft-saturation**, **baseline-floor** | **validated 08-06** | *skipped* |
+| **v11** | **8/8** | live | + **sat-window**, **fast-transport** | **untested** | *skipped* |
 
-All four ship the **same control law** — identical `STEADY_GAIN`, `KI_GAIN` and
-`KD_GAIN`, ch2's `+0.010` included. Everything that separates them is supervisor.
-v3 is kept as the minimal baseline precisely because of that: it is the only one
-with essentially no supervisor, so a supervisor change can be A/B'd against it.
+All five ship the **same control law** — identical `STEADY_GAIN`, `KI_GAIN` and
+`KD_GAIN` on a0–a3, ch2's `+0.010` included. Everything that separates them is
+supervisor, and from v10 also the channel set. v3 is kept as the minimal baseline
+precisely because of that: it is the only one with essentially no supervisor, so a
+supervisor change can be A/B'd against it.
 
-**v9 is the one to run on hardware; v10 is the one to develop against.** v9 is
-the newest rung with a bench result behind it. v10 merges v7's bias trim into it
-and adds `soft-saturation`, but has only ever run in the simulator.
+**v10 is the one to run on hardware; v11 needs a reflash first.** v10 went on the
+bench 2026-08-06 on all eight OSEMs and locked into 40 s of unbroken damping with
+zero faults. v11 raises the baud rate to 230400 and switches to `pyDAC2.FastDAC`,
+so the board must be reflashed (`make arduino`) before it will run at all.
+
+**v10 and v11 are eight-channel, so `harness.py` skips both** — `sim/server.py`
+models a 4-OSEM rigid body. The suite still runs in full on v3/v7/v9 (which is
+what the v9 column above is), but the FIXED-side assertions for
+`soft-saturation` and `baseline-floor` are now declared only by versions the
+simulator cannot drive, so those two fixes have **no simulator coverage** even
+though their checks are still in `harness.py` and still assert the un-fixed
+behaviour on v3/v7/v9. `bias-trim` is unaffected — v7 still declares it.
 
 `osem.v6.py` is a **bench tool**, not a rung: it drives coils and records, closes
 no loop, and exposes no `Controller`. The suite skips it loudly, with a reason
@@ -547,8 +558,10 @@ and `Controller` must offer `.step(counts, volts, t, dt) -> state`,
 
 It runs the **real** controller — every four-channel controller above is imported
 and stepped, not reimplemented. Only `serial` and `DACController` are stubbed.
-`osem.v5.5.py` and the `osem.v6*.py` tools are outside its reach and are skipped
-rather than approximated.
+`osem.v10.py`, `osem.v11.py` and the `osem.v6*.py` tools are outside its reach
+and are skipped rather than approximated -- the first two because they carry eight
+OSEMs and this models four, which is also why `soft-saturation` and
+`baseline-floor` currently have no coverage here at all.
 
 **The control loop is not stepped at the wire rate.** `SAMPLE_HZ = 347.2` is what
 the serial link delivers, but `pyDAC.set_voltage()` discards up to 50 stream
@@ -799,15 +812,29 @@ v9's `runaway-trend` keeps the level test and adds a growth test: the envelope
 must also exceed itself `RUNAWAY_TREND_LAG_S` ago by `RUNAWAY_GROWTH_FRAC`.
 Both, sustained. Same three-kick schedule:
 
+Same three-kick schedule. **These are percentages of TIME, not of CSV rows** —
+see the warning below, which corrects an earlier version of this table:
+
 | | DAMPING | FAULT | CALIB | faults | locks |
 |---|---|---|---|---|---|
-| v5 (control) | 23.9% | 8.3% | **67.7%** | 1 | 2 |
-| v8 | 15.1% | **60.5%** | 24.4% | **10** | 3 |
-| **v9** | **26.6%** | 36.4% | 37.0% | **4** | **4** |
+| v5 (control) | 81.0% | **2.1%** | 16.8% | 1 | 2 |
+| v8 | 70.3% | **21.2%** | 8.4% | **10** | 3 |
+| **v9** | **83.1%** | 8.5% | 8.4% | **4** | **4** |
+| v10 (08-06) | 74.1% | 15.0% | 10.9% | 8 | 3 |
 
 v9 re-locked after *every* kick (t = 31.3 / 83.8 / 151.3 / 205.3 s). The suite
 confirms it still trips on a genuinely pumped resonance, so the growth gate
-rejects ringdowns without letting a real runaway through.
+rejects ringdowns without letting a real runaway through. **v9 is still the best
+controller measured on hardware** — v10 gives back some of it, see § *v10*.
+
+> **Do not duty-cycle by counting CSV rows.** This table originally read
+> 23.9 / 15.1 / 26.6% DAMPING because it counted rows, and that is wrong by more
+> than an order of magnitude. **The sample rate depends on the state**: the loop
+> runs at ~24 samples/s while actuating, because `set_voltage` blocks reading its
+> ack for every coil, but ~345 samples/s in FAULT and CALIBRATING where no coil is
+> written. So a second of DAMPING contributes ~24 rows and a second of FAULT ~345.
+> Row-counting inflates FAULT and CALIB about **14x** and makes every version look
+> as though it spends its life calibrating. Always weight by `time_s`.
 
 ### v8 on hardware: one of two mechanisms transferred
 
@@ -968,11 +995,89 @@ most of what that needs.
   `v65_stepped8` raw files recorded before this fix are misaligned; the in-run
   reports are not, since the lock-in runs off in-memory arrays.
 
-## v10 — the merge, and clipping stops being a fault
+## v10 — the merge, all eight OSEMs, and clipping stops being a fault
 
-Written 2026-08-06, simulator only, **37/37**. `BENCH_STATUS = untested`.
+Written 2026-08-06. **`BENCH_STATUS = validated`** — ran on the bench the same
+day on all eight channels. v9 plus v7's `bias-trim` (unchanged in behaviour),
+plus `soft-saturation`, plus `baseline-floor`, plus the channel set.
 
-v9 plus v7's `bias-trim` (unchanged in behaviour) plus one new fix.
+It reached **40/40** in the simulator as a four-channel build, before the channel
+set grew; it is skipped now (see § *The ladder*).
+
+### `baseline-floor` — the guard for a sensor that never rails
+
+Every test downstream of calibration is a **ratio against the baseline**: the
+gain schedule (`env / baseline`), the lock detector (`< 0.35 × baseline`) and the
+runaway breaker (`> 1.8 × baseline`). A channel that senses no motion calibrates
+a near-zero baseline and all three then divide by it — so noise reads as a
+runaway and the breaker faults the **whole rig**. `auto-disable` cannot catch it:
+that keys on a channel *railing*, and a signal-less OSEM does not rail. It sits
+mid-scale and flat, which an RMS interlock reads as perfect stability.
+
+Measured, v5.5, `bench/20260804/v55_all8.log`: a4/a6/a7 calibrated
+0.0014 / 0.0050 / 0.0020 V against ch0's 0.3109 V; the rig faulted **ten times in
+145 s**, nine of them naming a4, a6 or a7, while ch0–ch3 damped at ratio
+0.31–0.39. At the first fault a4 reported ratio **2.73 on a bandpassed signal of
++0.000 V**.
+
+**The rule.** At the end of every calibration, a channel whose baseline is under
+`BASELINE_FLOOR_FRAC = 0.10` of the **median baseline across the enabled
+channels** is demoted exactly as `auto-disable` demotes a railed one — held at
+bias, out of the interlocks, the rest keep damping. Relative, not a level in
+volts, because the floor scales with the lab *and* with alignment (counts-per-
+metre is where the flag sits in its shadow — a5 is at ~1/12 of a0's). The median
+buys a safety property outright: the largest enabled baseline is ≥ the median >
+the threshold, so **at least one enabled channel always survives**, with no
+quorum arithmetic. And if *most* of the rig is signal-less the median is itself a
+dead channel, the threshold collapses, and the guard does nothing — deliberate,
+because a reference that has been captured cannot tell which half is broken.
+
+Bench numbers, 2026-08-06, `data/20260806_161715_fast_lock.csv`, as % of the
+median over the five enabled channels:
+
+| | a0 | a1 | a2 | a3 | a5 | a4 | a6 | a7 |
+|---|---|---|---|---|---|---|---|---|
+| baseline, V | 0.3104 | 0.1745 | 0.4436 | 0.1559 | 0.0896 | 0.0052 | 0.0090 | 0.0022 |
+| % of median | 178 | 100 | 254 | 89 | **51** | **3** | **5** | **1** |
+| verdict | keep | keep | keep | keep | keep | DEMOTE | DEMOTE | DEMOTE |
+
+The 10% line sits in a **10× empty gap** — 5.1% (worst dead) to 51.4% (a5) — with
+2.0× and 5.1× of margin, and it is biased toward *keeping*: demoting a good
+sensor costs one loop, keeping a dead one costs the whole rig.
+
+### v10 on the bench, 2026-08-06 — eight channels, 60 s, no kicks
+
+**Zero faults.** 20 s of calibration then 40 s of unbroken `DAMPING`, against
+v5.5's ten faults on the same eight channels.
+
+| bandpassed RMS, V | a0 | a1 | a2 | a3 | a5 | a4 | a6 | a7 |
+|---|---|---|---|---|---|---|---|---|
+| first 5 s of DAMPING | 0.1714 | 0.0986 | 0.2171 | 0.0672 | 0.0860 | 0.0149 | 0.0140 | 0.0046 |
+| last 5 s | 0.0651 | 0.0235 | 0.0179 | 0.0113 | **0.0420** | 0.0152 | 0.0144 | 0.0040 |
+
+a4/a6/a7 are **flat to three decimals** through 40 s that took a factor of 3–12
+out of every real channel. They are not watching this optic.
+
+**a5's sign prediction was right.** `STEADY_GAIN[5] = -0.015` came from a5's own
+diagonal in the per-coil DC matrix, −7 counts/V — under 2× the noise of the block
+it sits in, and a wrong sign *pumps*. It damped, 0.0860 → 0.0420 V. The magnitude
+can be raised toward −0.030 next.
+
+**What it cost: the rig did not announce LOCKED.** a5 sat at ratio 0.45 against
+the 0.35 lock line, so its `locked` flag never set. Not a fault and not something
+to "fix" in the file: `ratio` is normalised by each channel's *own* baseline, and
+a5's is ~1/12 of a0's, so the same absolute motion reads larger there. a5's
+absolute envelope is comparable to ch0's and falling. Realigning a5's flag fixes
+it at the source; lowering `LOCK_RMS_FACTOR` would weaken the claim for all eight.
+
+### A rejected design worth recording — an absolute floor in volts
+
+The first shape of this guard was `baseline < SOME_MV`. It cannot work, and the
+reason is the same one that makes the whole problem interesting: the number it
+would have to be depends on the seismic background *and* on each OSEM's
+alignment. a5 calibrates 0.0896 V and is real; a6 calibrates 0.0090 V and is not;
+on a quieter night both fall together. Any constant is wrong the first time
+either changes, and the failure is silent in the dangerous direction.
 
 ### `soft-saturation`
 
@@ -1031,18 +1136,379 @@ Refusing reuse on every trim step just disabled `warm-restart` outright.
 
 ---
 
+## v11 — all eight, and the transport stops throttling the loop
+
+Written 2026-08-06, **`BENCH_STATUS = untested`**, skipped by the simulator.
+v10 plus three changes that are all about one thing: an eight-channel rig runs a
+loop a four-channel rig does not. No gain and no threshold is retuned.
+
+**REQUIRES A REFLASH — `make arduino`.** The board must be at 230400 baud before
+v11 runs, and a host at the wrong baud fails preflight with "never sent READY".
+That is the intended failure; there is no version negotiation on this link.
+
+### 1. `sat-window` — the saturation interlock was unreachable
+
+`MAX_CONSECUTIVE_SATURATED = 30` counted **consecutive iterations**, and both
+halves of that are wrong:
+
+- *Samples, not seconds.* The controller only iterates on stream samples it
+  actually sees, and every DAC write eats some, so one "sample" is not a fixed
+  amount of time. Measured (`analysis/out/loop_rate.csv`, and confirmed on v10's
+  own 08-06 run): **73.0 Hz** driving 1 coil, **23.5 Hz** on 4, **18.2 Hz** on 5,
+  **12.5 Hz** on 8. So 30 samples meant 0.41 s, 1.28 s, 1.65 s and 2.40 s — the
+  interlock got *less* sensitive exactly as the rig got harder to control.
+- *An unbroken run.* One clean sample — one count of ADC noise, one slew step
+  landing a microvolt inside the rail — erased all accumulated evidence.
+
+Together, that is why **`soft-saturation` never fired once** in v10's 240 s
+three-kick bench run of 2026-08-06: all eight faults were the runaway breaker.
+
+The fix is the shape the *rail* interlock has always had — a fraction of a window
+in seconds, `_sat_check` being `_rail_check` line for line, "so one noise sample
+dilutes the evidence instead of erasing it". `SAT_SUSTAIN_S = 1.30 s` is chosen
+to be **behaviour-preserving at the four-coil rate** (30 × 42.6 ms = 1.278 s), so
+this is a bug fix rather than a retune; `SAT_FRACTION = 0.80` is the rail check's
+own number. It goes **first** because the other two changes both move the sample
+rate, and `CLAUDE.md` item 2c says not to move it under a sample-counted
+threshold.
+
+### 2. `fast-transport` — `pyDAC2.FastDAC` instead of `DACController`
+
+`DACController.set_voltage()` writes `SET` then reads up to 50 lines waiting for
+the board's `OK`, and every one is a stream sample the controller never sees.
+Measured on v10's 08-06 run, one number: **357.1 Hz while CALIBRATING** (no coil
+writes) against **18.2 Hz while DAMPING** (5 coils). A factor of 19.6, and it is
+a function of how many coils you drive — a strange thing to be true of a control
+system. At the 8-coil 12.5 Hz the phase margin at 3.75 Hz is **45.5°** against
+**73.5°** at four coils (`analysis/out/phase_budget.csv`), and the −0.040 rail
+onset is still uncharacterised, so there is no measured margin to spend.
+
+**Taken, and the ack was worth giving up.** `ERR` comes back for exactly two
+things — a malformed command and a channel outside 0–7 — and `FastDAC` rejects
+both locally before writing; the firmware clamps voltage itself; and
+`Actuator.send()` has *always* treated the ack as optional, catching the
+RuntimeError and moving on because "the next sample resends". Nothing in any
+controller has ever branched on an `OK`. What it costs is real and handled: the
+board still *sends* those replies and they now arrive interleaved with the data
+rows, so `read_sample()` filters on the first character. The fallback is two
+lines — swap the import and `main()`'s constructor back — and that everything
+else works unmodified against either transport is itself the evidence.
+
+### 3. Baud 230400
+
+Eight columns is ~33 bytes, and 33 bytes at 115200 (10 bits/byte) is **2.86 ms
+against the 2.88 ms actually measured** between samples: the link was *at*
+capacity with nothing left for the `SET` commands sharing it, while 8 coils
+throttled at 10 ms want ~12 kB/s against a total of 11.5 kB/s. At 230400 a row
+costs 1.43 ms and the budget doubles. One line in `arduino.ino`, and the default
+in `pyDAC.py` and `pyDAC2.py` — all three must agree, so **every** controller
+moves with the board.
+
+`pyDAC2.FastDAC` also picked up the bounded 200-line `READY` scan and the `STOP`
+that `DACController` already had, because a controller re-opens the port right
+after a preflight that just left the board streaming — the exact case the
+demand-READY-on-line-1 version fails.
+
+### All eight enabled, and what that means
+
+`ENABLE_CHANNEL` is all eight. a4/a6/a7 ship at **zero gain**: they join as
+*sensors* — rail interlock, runaway breaker, quorum, lock claim, CSV — and
+contribute no force. Their own diagonals in the DC matrix are +8 / +4 / +7
+counts/V and the mean |response| anywhere in that block is **4 counts**, so those
+signs are coin flips dressed as measurements, and a wrong-signed channel pumps.
+`osem.v6.5.py` / `v6.6.py` are the measurement that turns them into numbers.
+
+**Expect three demoted channels on the first run.** a4/a6/a7 carry no in-band
+signal, so `baseline-floor` will demote them at the end of calibration, by name
+and with the numbers printed. That is the designed outcome, not a failure — and
+it is what makes `ENABLE_CHANNEL` stop being a constant somebody maintains and
+start being a measurement the rig makes each time it calibrates. Realign a4's
+flag and it joins on the next calibration with no edit to the file.
+
+One thinner margin to know about: with all eight in the median, three signal-less
+channels pull the reference *down*, so on the 08-06 baselines the worst dead
+channel sits at 7.3% of the median against v10's 5.1% — 1.4× under the 10% line
+where v10 had 2.0×. Adequate on the measured numbers, and the reason the
+reference is the *enabled* set rather than a global one.
+
+---
+
 ### Still open
 
-1. **Connect a4–a7.** Everything eight-channel waits on it, including modal.
-2. **Nothing guards a BLIND channel.** `auto-disable` keys on *rail*, and a
-   disconnected OSEM does not rail — it sits mid-scale and flat, calibrates a
-   near-zero baseline, and then any noise reads as a runaway and faults the whole
-   rig. That is what killed the eight-channel v5.5 run: ch0–ch3 damping at ratio
-   0.07–0.26 while ch4–ch7, calibrated at ~0.002 V, faulted the rig six times in
-   120 s. A minimum-plausible-baseline check is the missing guard.
+1. **Realign a4, a6 and a7.** They are connected and reading; their flags sit
+   outside the partial shadow, so they modulate with nothing (0.1–9% of power in
+   band, lock-in SNR 1.1–1.5). `baseline-floor` keeps them from taking the rig
+   down, but only a screwdriver makes them useful. a5 is the same problem one
+   step less severe — at ~1/12 gain it damps, but it also holds the rig out of
+   `LOCKED` at ratio 0.45.
+2. **`soft-saturation` and `baseline-floor` have no simulator coverage.** Both
+   are declared only by v10 and v11, which are eight-channel and therefore
+   skipped, so the suite now only asserts the *un-fixed* side of them on
+   v3/v7/v9. The checks are still in `harness.py` and both fixes have bench
+   evidence behind them (`baseline-floor` on 08-06, `soft-saturation` none — it
+   has never fired on hardware, see `sat-window`), but nothing off the bench
+   would catch a regression in either.
 3. **v9's remaining 36% in FAULT** is `FAULT_CLEAR_SUSTAIN_S = 5 s` x 4 recoveries
    plus the gain ramp — no longer thrash. Gating re-engagement on amplitude rather
    than a fixed 5 s would cut it further.
 4. **Bench-tune `CALIB_AGREE_TOL`** from the nine logs already recorded.
 5. **v10 has never run on hardware.** Both of its mechanisms are simulator-only,
    and the simulator models clipping but not the coil driver behind it.
+
+---
+
+## v12 — the loop gets its own clock, and the wire stops being trusted
+
+The shipping controller as of 2026-08-06. `BENCH_STATUS = "validated"`. Five
+changes, none of them in the control law: `STEADY_GAIN`, `KI_GAIN` and `KD_GAIN`
+on a0–a3 are v3's to the last digit, ch2's opposite sign included.
+
+1. **`sample-guard`.** `read_sample()` accepted any row starting with a digit that
+   split into ≥ N fields, so a **torn serial line passed as data**. Harmless while
+   the ack was being drained; `fast-transport` stopped draining it, so `OK ch=..`
+   replies now interleave with data rows and a buffer boundary splices two fields'
+   digits together. v11's own 240 s log (`data/20260806_171500_fast_lock.csv`)
+   carries **ten rows with a count outside 0..1023** — 5659, 65690, 522676 — and
+   **zero** such rows appear in any of the four slower logs from the same session.
+   The speed-up created the defect. One of them costs +45.6 V into the bandpass,
+   ringing down over the 0.4 Hz highpass (τ = 0.398 s) with the velocity estimate
+   peaking at **1401 V/s**; P = 0.030 × 1401 = 42 V demanded into a 0.5 V rail.
+   Four of v11's twelve entries to FAULT follow a torn line within 2 s.
+   Fix: a count outside `0..ADC_MAX_COUNTS` is a framing error, dropped like an
+   `OK` line. Replayed offline on the same log, ch0's velocity estimate goes
+   rms **13.109 → 5.413 V/s**, peak **1441 → 41 V/s**.
+2. **`decimate`.** Read the wire at full rate; run the control step at a fixed
+   `CONTROL_HZ = 100` on the mean of whatever arrived since the last one. The
+   arrival rate moved four times in three days (24 → 12.5 → 18 → 1111 Hz) and
+   every gain, filter and interlock here was tuned against one of them. Replayed
+   with the guard: rms **5.413 → 4.732 V/s**, p99 27.0 → 23.7. **Without** the
+   guard it makes things worse (13.1 → 23.4) because a boxcar spreads one bad
+   sample across a whole step — which is why the two ship together.
+   Measured on the bench: `1024–1113 Hz` wire, `avg10–avg12` samples per step.
+3. **`persist-baseline`.** The noise floor is a property of the room, not of the
+   run, so it is written to `data/baseline.json` and reused across restarts,
+   behind a config fingerprint, an age limit and a start-up sanity check.
+   Cold-start calibration 20 s → `BASELINE_WARMUP_S = 2.0` s.
+4. **`baseline-sanity`.** Persistence needs a way to refuse a bad floor, because
+   stationarity is not quietness: a calibration taken while the optic is ringing
+   measures the ringing. Caught on hardware — a fresh floor **11.5×** the trusted
+   one was refused and the trusted one kept. `MAX_BASELINE_REFUSALS = 3` stops it
+   refusing forever if the room genuinely got louder.
+5. **`RUNAWAY_TREND_LAG_S` 2.0 → 10.0** — see below. This is the change that made
+   v12 damp.
+
+### The runaway breaker was reading the beat, not the envelope
+
+`runaway-trend` (v9) tests whether the envelope is *growing*:
+`env > env(t − LAG) × 1.02`. `LAG = 2.0 s` was chosen before the mode
+frequencies were known. They are now measured to ±0.0001 Hz — **0.7155 /
+0.9949 / 1.6396 Hz** (`analysis/ringdown.md`) — and the beat periods between
+them are **3.578 s (A–B), 1.551 s (B–C), 1.082 s (A–C)**. A 2 s lag sits inside
+all three, so the test was sampling the beat and calling it growth.
+
+The other half: a genuine ringdown at the measured τ = 56–130 s falls only
+**1.5–3.6 % in 2 s**, under the 2 % threshold. So the breaker could not tell a
+real decay from a beat.
+
+`LAG = 10.0 s` is 2.8× the longest beat and 5.6–13× shorter than τ. Measured
+back-to-back on the bench the same evening, same gains, hand kicks:
+
+| run | DAMPING | FAULT | CALIB | FAULT entries |
+|---|---|---|---|---|
+| `20260806_200158`, LAG = 2.0  | 54.1 % | 25.2 % | 20.7 % | 10 |
+| `20260806_200822`, LAG = 10.0 | **77.5 %** | 14.4 % | 8.2 % | 7 |
+
+The remaining 14.4 % FAULT is **not** thrash: 7 entries × `FAULT_CLEAR_SUSTAIN_S
+= 5 s` = 35 s = 14.3 % of 244.5 s. It is the mandatory hold, not the breaker
+re-tripping. `analysis/out/plots/v12_fixed_ch03.png` shows each kick decaying
+inside the damping region instead of the near-solid fault bands of the run
+before it.
+
+For context, the same time-weighted measure on the earlier rungs
+(240 s, three kicks):
+
+| | DAMPING | FAULT | CALIB | faults |
+|---|---|---|---|---|
+| v9  (4ch, 23 Hz)   | 83.1 % |  8.5 % |  8.4 % |  4 |
+| v10 (8ch, 18 Hz)   | 74.1 % | 15.0 % | 10.9 % |  8 |
+| v11 (8ch, 1111 Hz) | 42.3 % | 25.3 % | 32.4 % | 11 |
+| v12 (8ch, 100 Hz)  | 77.5 % | 14.4 % |  8.2 % |  7 |
+
+**Do not read v12 < v9 off that table.** v9's three kicks were scripted; v12's
+five were by hand at unrecorded strength, and they were hard enough to clip every
+channel. The comparison that is controlled is v12-vs-v11 and v12-vs-itself across
+the lag change, both above.
+
+**All four channels still clip**, which is the open problem underneath every
+number here. Counts at or beyond the rail (≤1 or ≥1022) over the 251 280 samples
+of `20260806_200822`:
+
+| | ch0 | ch1 | ch2 | ch3 |
+|---|---|---|---|---|
+| railed samples | 7386 | 1958 | **9025** | 2327 |
+| fraction | 2.9 % | 0.8 % | **3.6 %** | 0.9 % |
+
+The `rail` interlock fired on only ch0 (136 samples) and ch2 (51), because
+`RAIL_SUSTAIN_S` demands the pin be *sustained* — so 97 % of this clipping is
+invisible to the interlocks and shows up only as a corrupted velocity estimate at
+exactly the moment the loop is pushing hardest. ch2 is worst, as it has been
+since 08-03. This is the sensor-range problem in README § 5, not a v12 defect.
+
+### v12 has never announced `LOCKED`, and neither did v10 or v11
+
+The one that matters, because README § 4 says the lock time is the deliverable.
+Zero `*** LOCKED ***` lines in **every** run of the 2026-08-06 session.
+
+The cause is the lock quorum, not the damping. `self.locked[live].all()` where
+`live = enabled & healthy`, and `ENABLE_CHANNEL` is `True` on all eight. a4, a6
+and a7 demote themselves to `NOSIG` and drop out of `live`. **a5 does not** — it
+stays healthy, so it is in the quorum — but `STEADY_GAIN[5] = 0`, so nothing
+drives it, and it sits at ratio **1.26–2.53** against `LOCK_RMS_FACTOR = 0.35`.
+One undriven channel vetoes the announcement for the whole rig, permanently.
+
+a0–a3 *do* reach lock together: the CSV's four `ch{i}_locked` flags are
+simultaneously 1 for **6 distinct episodes** in `20260806_200822`, and **3** in
+the pre-fix run. The rig locks; it just cannot say so.
+
+This is a v13 fix, not a v12 one, and it is one line either way — drop
+zero-gain channels from the quorum, or set `ENABLE_CHANNEL[5] = False`. It is
+listed first under *Still open* because it is the deliverable.
+
+### Resting counts, 2026-08-06 (`CALIBRATING`, 22 246 samples, outputs at bias)
+
+| | ch0 | ch1 | ch2 | ch3 | ch4 | ch5 | ch6 | ch7 |
+|---|---|---|---|---|---|---|---|---|
+| mean | 601.2 | 630.3 | 686.5 | 681.8 | 567.5 | 554.8 | 860.6 | 734.7 |
+| min–max | 443–807 | 559–698 | 511–894 | 627–741 | 552–582 | 476–652 | 85–875 | 557–740 |
+
+Two things to take from it. Every channel still rests **above** mid-scale
+(511.5) and clips the top rail first, unchanged since 08-03. And **a4 rests at
+567.5 with a 30-count swing** — near mid-scale, not pinned — which does *not*
+support the "flags outside the partial shadow" story told earlier in this file.
+What is established is that a4/a6/a7 have very low in-band gain and only show
+suspension motion on a hard kick (confirmed on an oscilloscope 08-06); *why*
+is not established, and the resting points argue against gross misalignment.
+
+### MIMO is closed, by measurement
+
+Recorded here so it is not re-attempted. A full fixed-frequency refit of the
+8-coil dither run (`analysis/mimo_design.md`, `analysis/refit_fixed.py`):
+
+- Only **three** sensors have determined residue rows — a0, a2, a3. a1 never
+  reaches the 6 usable tones it needs (noise floor **0.024 V** against a0's
+  **0.0047 V**). With three modes, Φ comes out **square**.
+- A square Φ kills the one argument that survived everything else: drop any
+  single sensor and it can no longer span the modes. It also deletes the
+  sensor-disagreement check, since a square Φ reproduces any reading exactly —
+  measured `resid = 1.8e-16`. And it would fall back exactly when needed: a hard
+  kick railed all three of those sensors.
+- **It is a sensor problem, not a coil problem.** The allocator is fine — A is
+  3×4, cond **1.41**, singular values 1.000 / 0.885 / 0.711. Coils 0–3 drive all
+  three modes with a spare direction.
+- Coils 4–7 are separately useless, for an unrelated reason: pairwise cosine
+  **+0.966**, one shared direction at ¼–⅐ the strength of coils 0–3
+  (`analysis/coil_qual.py`). An anti-phase discriminator was run to separate
+  "one physical winding" from "four coils on one DOF" and was **inconclusive** —
+  ratio 0.579, shape cosine −0.488, with coils 4/6 returning 0.2–0.9 counts/V
+  against the control coil's 44 (`analysis/antiphase.py`).
+
+Unblocking it, if ever revisited, means determining a1's row: 6 usable tones,
+currently 2–5. More dwell or more drive on the tones a1 responds to. A bench
+session, not a hardware change.
+
+### Still open after v12
+
+1. **`LOCKED` is never announced** — a5 vetoes the quorum, above. One line.
+2. **Diagonal reallocation.** v12 runs flat at ±0.035. The measured residues want
+   ch2-dominant, ratios ≈ `[1.00, 0.83, −3.82, 0.90]`, worth **1.6–1.8×** more
+   damping for four numbers. Must be checked against the ±0.25 V budget first —
+   the shipped gains already peaked **0.2998 V**, 20 % over.
+3. **Kalman velocity estimator** — now unblocked. Frequencies known to ±0.0001 Hz;
+   Q no longer matters, because τ > 138 s intrinsic against a 2.9–4.7 s closed
+   loop means the plant is effectively undamped on control timescales.
+   Per-channel measurement noise is measured, which is the R it needs.
+4. **`LOCK_SUSTAIN_S = 5.0`** is five of the ten-second lock budget spent
+   confirming a lock that already happened. Deliberately not cut in v12 so the
+   decimation result stayed readable. Cut it next, on its own.
+5. **`FAULT_CLEAR_SUSTAIN_S = 5 s` is now the whole fault cost** — 35 of v12's
+   35.2 fault-seconds. Gating re-engagement on amplitude rather than a fixed 5 s
+   is the next real gain.
+6. **The suite: 220 passed, 11 failed** (679 s). `sim/server.py` now carries a
+   measured *eight*-OSEM body (`SIM_CHANNELS = (4, 8)`, built from the 08-04 and
+   08-06 logs), so v10, v11 and v12 are simulated rather than skipped; only
+   `osem.v6.py` and `osem.v13.py` are skipped, both by `KIND`. `sample-guard`,
+   `decimate` and all five `persist-baseline` assertions pass.
+   **v3, v7, v9 and v10 are clean.** All 11 failures are on v11 (3) and v12 (8).
+7. **a4, a6, a7.** Connected, near mid-scale, ~1/100 the in-band gain of a0–a3.
+   Cause not established.
+
+---
+
+## v13 — a skeleton, not a version
+
+`osem.v13.py` exists in the tree and is **not a controller**. It declares
+`KIND = "skeleton"`, which is what keeps it out of `make list`, `make check` and
+`make run` — the same mechanism `osem.v6.py` uses. `main()` raises `SystemExit`
+with the reasons.
+
+It was written to carry a three-mode modal law. That law is unreachable: `MODAL`
+is `None` and `mimo_ready()` refuses, because MIMO is closed by measurement
+(above). What is left is v12's control law plus a modal *observer* logging at
+zero force.
+
+**Two things about it that were wrong until 2026-08-06**, both worth recording
+because both were invisible:
+
+1. **It was runnable.** The refusal was defined as `_unused_main` and never
+   called; the live `main()` ran v12's loop. `make run V=v13` would have driven
+   the optic from a file whose own docstring says it must not be. The names are
+   now swapped: `main()` refuses, `_run_as_v12()` is the deliberate path.
+2. **Loading it crashed the harness.** It does not define the module-level
+   constants a controller must, so `S.load()` raised `AttributeError` on
+   `ENVELOPE_WINDOW_S` and took `make list` down with it. Fixed by the `KIND`
+   declaration, and `harness.declared()` now reads the
+   `VERSION_TAG, BENCH_STATUS = "vN", "status"` tuple form so a file that is
+   never loaded can still report its own status.
+
+`_run_as_v12` does `v12.Controller = Controller` — it **mutates the v12 module**.
+That is fine for a skeleton driven deliberately and is not the shipping form:
+this repo's rule is that every controller is standalone, because `bench.py`
+prints the gain vectors out of the file that is about to run, and a controller
+importing its body from another file defeats exactly that check. **Flatten it
+before treating it as a version.**
+
+### What the lag change cost, measured
+
+`RUNAWAY_TREND_LAG_S = 10.0` is not free, and the suite priced it. Running v12
+against the whole suite at each value, everything else identical:
+
+| `RUNAWAY_TREND_LAG_S` | passed | failed |
+|---|---|---|
+| 2.0 (v9's value) | 43 | 7 |
+| **10.0 (shipped)** | 42 | **8** |
+
+**Exactly one assertion changed**, and it is the wrong-sign detector:
+
+> `a wrong-signed channel turns a fault-free run into a repeatedly faulting one`
+> `b["faults"] >= 3 and a["faults"] == 0`
+
+With ch2's gain inverted over a 120 s run, a 2 s lag trips the breaker **3+**
+times and a 10 s lag trips it **2**. The check wants at least 3, so it fails.
+
+**The wrong sign is still caught.** The very next assertion,
+`the global interlock trips on it` (`b["faults"] > 0`), passes at both values.
+What moved is how *many* times it trips, and the threshold of 3 was written when
+2.0 s was the only lag anyone had used.
+
+This is the honest trade of the fix: a breaker that no longer mistakes a 1.55 s
+beat for growth is also a breaker that fires less often on something that
+genuinely is growing. Two trips in 120 s is still a trip. Whether 10.0 s is the
+right point on that curve is not settled by one bench evening, and the threshold
+of 3 should probably be re-derived rather than assumed.
+
+The other seven v12 failures are present at **both** lag values, so they are not
+from this change. They are `soft-saturation` (2), `auto-disable` on the
+eight-OSEM body (2), `warm-restart` (2) and baseline-reuse (1). v11 fails three
+of the same family. **None of them has been attributed to a specific commit**,
+because v12 has never been committed and there is no baseline to diff against.
+Do that before trusting any of them.

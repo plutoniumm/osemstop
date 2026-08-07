@@ -4,17 +4,17 @@ bench.py -- the on-hardware entry point: preflight the board, then run a control
 ====================================================================================
 `harness.py` is the entry point for everything OFF the bench. This is its
 opposite number: it talks to the real Arduino and then hands control to a real
-`osem.vN.py`. Nothing in here simulates anything.
+controller. Nothing in here simulates anything.
 
     python3 bench.py              # pick a version interactively, then run it
-    python3 bench.py v5           # run that one
-    python3 bench.py v5 --port /dev/cu.usbmodem1401
+    python3 bench.py delta        # run that one
+    python3 bench.py delta --port /dev/cu.usbserial-1120
     python3 bench.py --ports      # just list candidate serial ports
     python3 bench.py --flash      # compile and upload arduino.ino, nothing else
 
 or through make, which is the intended form:
 
-    make run              make run V=v5              make run V=v5 PORT=COM7
+    make run              make run V=delta           make run V=delta PORT=COM7
     make arduino          make arduino FQBN=arduino:sam:arduino_due_x
 
 What it does before anything reaches the coils:
@@ -30,7 +30,7 @@ What it does before anything reaches the coils:
   4. sets the module's PORT and calls its `main()`.
 
 Step 4 is why this file exists rather than a shell wrapper around
-`python osem.vN.py`: PORT is a module-level constant in every controller
+`python osem.<name>.py`: PORT is a module-level constant in every controller
 (`COM7`, a Windows name), and rewriting it in each one before every run is how
 you end up flashing a controller whose diff you no longer trust. Loading the
 module and assigning `mod.PORT` leaves every controller byte-for-byte what was
@@ -39,7 +39,7 @@ here; everything else about the run is identical to launching the file directly.
 
 There is no bench-status gate. It used to refuse `BENCH_STATUS = "broken"` and
 prompt for confirmation on anything not `validated`, but those constants went
-stale -- v1 still declares "never run" although it ran on 2026-08-03 -- and a
+stale faster than they were updated -- and a
 gate whose data is wrong only teaches you to click through it. The preflight and
 the printed gain vectors are the checks that are actually load-bearing, because
 both are computed from the file that is about to run.
@@ -50,8 +50,10 @@ both are computed from the file that is about to run.
 # sys.modules`, so importing the genuine one first also immunises this process
 # against it. That is also why nothing below imports harness.py or sim/: pulling
 # in either would replace the transport with one whose Serial() raises on
-# construction. The version discovery here duplicates harness.versions() for
-# that reason, and must stay in step with it.
+# construction. The version discovery used to be DUPLICATED here for that
+# reason, and the copies drifted. It now lives in `ladder.py`, which imports
+# nothing at all -- so it can be shared without dragging sim/ or numpy into the
+# hardware path, which is what the duplication was avoiding.
 try:
     import serial                                # noqa: F401
     from serial.tools import list_ports
@@ -71,6 +73,8 @@ import shutil
 import subprocess
 import sys
 
+import ladder
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
@@ -83,40 +87,58 @@ KNOWN_VIDS = {0x2341, 0x2A03, 0x1A86, 0x0403, 0x10C4}
 DEFAULT_FQBN = "arduino:avr:mega"       # CS on pin 53 is Mega/Due specific
 FIRMWARE = "arduino.ino"                # the sketch that is on the board
 
-# Half-steps (osem.v5.5.py) sort between their neighbours. This pattern MUST
-# match harness.versions() -- when it did not, `make run` silently could not see
-# osem.v5.5.py at all while `make check` could.
-VERSION_RE = re.compile(r"osem\.v(\d+)(?:\.(\d+))?$")
+# The ladder order lives in ladder.py and NOTHING here derives it from a
+# filename. This file used to carry its own copy of harness.py's regex, and the
+# copies drifted: `make run` silently could not see osem.v5.5.py at all while
+# `make check` could. A version the bench cannot select is a version that does
+# not get run, and nothing announces it.
+#
+# ladder.py imports nothing. That is deliberate -- this is the hardware entry
+# point and it must not acquire a numpy dependency by way of a name lookup.
 
 
 # --------------------------------------------------------------------------
 # versions
 # --------------------------------------------------------------------------
 def versions():
-    """Every osem.vN.py next to this file, in ladder order."""
+    """Every controller next to this file, in ladder order, tools last."""
     found = []
-    for path in glob.glob(os.path.join(HERE, "osem.v*.py")):
-        m = VERSION_RE.match(os.path.basename(path)[:-3])
-        if m:
-            found.append(((int(m.group(1)), int(m.group(2) or 0)), path))
+    for path in glob.glob(os.path.join(HERE, ladder.PREFIX + "*" + ladder.SUFFIX)):
+        k = ladder.sort_key(os.path.basename(path))
+        if k is not None:
+            found.append((k, path))
     return [p for _, p in sorted(found)]
 
 
 def resolve(name):
-    """'v2', 'osem.v2', 'osem.v2.py' or a path -> an absolute path."""
+    """'delta', 'osem.delta', 'osem.delta.py' or a path -> an absolute path."""
     all_versions = versions()
     if not all_versions:
-        sys.exit("No osem.v*.py found next to bench.py.")
+        sys.exit("No controllers found next to bench.py.")
     if not name:
         return None
     if os.path.isfile(name):
         return os.path.abspath(name)
-    stem = name if name.startswith("osem.") else "osem." + name
-    cand = os.path.join(HERE, stem if stem.endswith(".py") else stem + ".py")
-    if os.path.isfile(cand):
-        return cand
-    sys.exit("No such version: %s. Have: %s" % (
-        name, ", ".join(os.path.basename(p)[5:-3] for p in all_versions)))
+    stem = ladder.resolve_name(name)
+    if stem:
+        cand = os.path.join(HERE, ladder.filename(stem))
+        if os.path.isfile(cand):
+            return cand
+    # A numbered name gets redirected rather than refused. This is the hardware
+    # entry point: somebody typing `make run V=v12` from a six-hour-old note is
+    # about to energise coils, and the useful answer is which file that is now,
+    # not that the name is gone.
+    new, was_numbered = ladder.redirect(name)
+    if new:
+        cand = os.path.join(HERE, ladder.filename(new))
+        if os.path.isfile(cand):
+            print("note: %s is now `%s` -- running that." % (name, new))
+            return cand
+    have = ", ".join(ladder.stem(os.path.basename(p)) for p in all_versions)
+    if was_numbered:
+        sys.exit("%s was deleted, not renamed -- it is in git history, and "
+                 "versions.md says what it was.\n  Have: %s" % (name, have))
+    sys.exit("No such version: %s. Have: %s" % (name, have))
 
 
 def pick_version():
@@ -130,7 +152,7 @@ def pick_version():
     print()
     while True:
         try:
-            raw = input("  number (or vN), blank to cancel: ").strip()
+            raw = input("  number (or name), blank to cancel: ").strip()
         except (EOFError, KeyboardInterrupt):
             sys.exit("\nCancelled.")
         if not raw:
@@ -232,7 +254,33 @@ def run(path, port):
     # have no gains to print. What matters before one of those runs is which
     # coils it will drive, how hard, and for how long -- it is open loop, so
     # nothing is damping the optic while it does.
-    if getattr(mod, "KIND", "controller") != "controller":
+    kind = getattr(mod, "KIND", "controller")
+    if kind == "skeleton":
+        # A skeleton CLOSES THE LOOP -- it is not open loop and the measurement
+        # banner above would be a lie about the most important thing on screen.
+        # It also has no COILS/AMP/EXPECTED_DOF, so that branch would crash here
+        # rather than after the coils were live, which is the only mercy in it.
+        #
+        # The gain vectors printed below come from the module the skeleton
+        # IMPORTS, not from the file named on the command line. That weakens this
+        # script's central check and is why it is stated rather than papered over.
+        src = getattr(mod, "GAIN_SOURCE", None) or "the module it imports"
+        print("\n  %s   SKELETON (%s) -- CLOSED LOOP: it damps, using %s's law"
+              % (tag, kind, src))
+        print("  the modal law is NOT running; see the file's own refusal text")
+        fixes = ", ".join(getattr(mod, "FIXES", ())) or "none"
+        enabled = [i for i, v in enumerate(mod.ENABLE_CHANNEL) if v]
+        print("  fixes claimed: %s   calibration: %s%.0fs"
+              % (fixes,
+                 "up to " if "fast-calib" in getattr(mod, "FIXES", ()) else "",
+                 mod.CALIBRATION_S))
+        print("  channels driving: %s of %d"
+              % (",".join("ch%d" % i for i in enabled) or "none",
+                 len(mod.ENABLE_CHANNEL)))
+        print(gains(mod))
+        print("  coil map: %s" % (list(mod.DAC_CHANNELS),))
+        print("  GAINS ABOVE ARE %s's -- verify them there, not in %s." % (src, tag))
+    elif kind != "controller":
         print("\n  %s   BENCH MEASUREMENT (%s) -- open loop, nothing is damping"
               % (tag, mod.KIND))
         print("  coils driven: %s   via DAC ch %s"

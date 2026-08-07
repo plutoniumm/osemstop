@@ -1,0 +1,135 @@
+port free
+
+  preflight: opening /dev/cu.usbserial-1120 (the board resets on open, ~2s)...
+Connected on /dev/cu.usbserial-1120 at 500000 baud
+Connection closed.
+  preflight OK -- sketch answered READY.
+
+  osem.v12   fixes claimed: saturation-latch, rail-threshold, runaway-baseline, auto-disable, fast-refault, fast-calib, warm-restart, runaway-trend, bias-trim, soft-saturation, baseline-floor, sat-window, fast-transport, sample-guard, decimate, persist-baseline, baseline-sanity   calibration: up to 20s
+  channels driving: ch0,ch1,ch2,ch3,ch4,ch5,ch6,ch7 of 8
+  steady    -0.0350  -0.0350  +0.0350  -0.0350  +0.0000  +0.0000  +0.0000  +0.0000
+  capture   -0.0350  -0.0350  +0.0350  -0.0350  +0.0000  +0.0000  +0.0000  +0.0000
+  ki        -0.0060  -0.0060  +0.0060  -0.0060  +0.0000  +0.0000  +0.0000  +0.0000
+  kd        -0.0004  -0.0004  +0.0004  -0.0004  +0.0000  +0.0000  +0.0000  +0.0000
+  coil map: [1, 3, 5, 7, 0, 2, 4, 6]
+  logging to ./data/ (cwd is /Users/gojira/Documents/GitHub.nosync/ligo)
+
+
+stored baseline: /Users/gojira/Documents/GitHub.nosync/ligo/data/baseline.json
+  written by v12 at 2026-08-06T13:37:21+00:00, 3275s ago
+  REFUSED -- 3275s old against a 1800s limit. Calibrating from scratch (up to 20s).
+
+Connected on /dev/cu.usbserial-1120 at 500000 baud (fire-and-forget, ascii, ack off)
+DAC biases set. stdin is not a tty -- starting without the prompt.
+Logging to data/20260806_200158_fast_lock.csv, every raw sample, control step at 100 Hz (`ctl`/`n_avg` mark which samples each step averaged).
+
+[CALIBRATING] measuring baseline noise (outputs held at bias, no damping yet). This stops as soon as the floor settles, and after 20s at the latest...
+
+[    0.0s] CALIBRATING --/100Hz ch0:.... g=+0.0000 bp=+0.000V ratio=0.00  ch1:.... g=+0.0000 bp=+0.000V ratio=0.00  ch2:.... g=+0.0000 bp=+0.000V ratio=0.00  ch3:.... g=+0.0000 bp=+0.000V ratio=0.00  ch4:.... g=+0.0000 bp=+0.000V ratio=0.00  ch5:.... g=+0.0000 bp=+0.000V ratio=0.00  ch6:.... g=+0.0000 bp=+0.000V ratio=0.00  ch7:.... g=+0.0000 bp=+0.000V ratio=0.00
+[    5.0s] CALIBRATING 1114/100Hz avg11 ch0:.... g=+0.0000 bp=+0.123V ratio=0.00  ch1:.... g=+0.0000 bp=+0.079V ratio=0.00  ch2:.... g=+0.0000 bp=+0.376V ratio=0.00  ch3:.... g=+0.0000 bp=+0.123V ratio=0.00  ch4:.... g=+0.0000 bp=-0.000V ratio=0.00  ch5:.... g=+0.0000 bp=-0.003V ratio=0.00  ch6:.... g=+0.0000 bp=+0.005V ratio=0.00  ch7:.... g=+0.0000 bp=-0.001V ratio=0.00
+[   10.0s] CALIBRATING 1113/100Hz avg11 ch0:.... g=+0.0000 bp=+0.351V ratio=0.00  ch1:.... g=+0.0000 bp=+0.082V ratio=0.00  ch2:.... g=+0.0000 bp=+0.342V ratio=0.00  ch3:.... g=+0.0000 bp=+0.014V ratio=0.00  ch4:.... g=+0.0000 bp=+0.003V ratio=0.00  ch5:.... g=+0.0000 bp=-0.011V ratio=0.00  ch6:.... g=+0.0000 bp=-0.010V ratio=0.00  ch7:.... g=+0.0000 bp=-0.005V ratio=0.00
+[   15.0s] CALIBRATING 1113/100Hz avg12 ch0:.... g=+0.0000 bp=+0.261V ratio=0.00  ch1:.... g=+0.0000 bp=+0.014V ratio=0.00  ch2:.... g=+0.0000 bp=+0.518V ratio=0.00  ch3:.... g=+0.0000 bp=+0.042V ratio=0.00  ch4:.... g=+0.0000 bp=-0.001V ratio=0.00  ch5:.... g=+0.0000 bp=-0.006V ratio=0.00  ch6:.... g=+0.0000 bp=+0.001V ratio=0.00  ch7:.... g=+0.0000 bp=+0.002V ratio=0.00
+[   20.0s] CALIBRATING 1113/100Hz avg11 ch0:.... g=+0.0000 bp=+0.230V ratio=0.00  ch1:.... g=+0.0000 bp=+0.090V ratio=0.00  ch2:.... g=+0.0000 bp=+0.317V ratio=0.00  ch3:.... g=+0.0000 bp=+0.061V ratio=0.00  ch4:.... g=+0.0000 bp=-0.001V ratio=0.00  ch5:.... g=+0.0000 bp=-0.010V ratio=0.00  ch6:.... g=+0.0000 bp=+0.001V ratio=0.00  ch7:.... g=+0.0000 bp=-0.001V ratio=0.00
+
+[baseline] written to /Users/gojira/Documents/GitHub.nosync/ligo/data/baseline.json -- the next start-up engages in ~2s instead of 20s, if nothing in the fingerprint or the room has moved.
+
+
+[DAMPING] baseline set in 20.0s (ran the full 20s ceiling -- the floor never settled, median of sub-windows used): ch0=0.1709V, ch1=0.0767V, ch2=0.2646V, ch3=0.0656V, ch4=0.0019V, ch5=0.0076V, ch6=0.0034V, ch7=0.0015V. Gain schedules -0.035 -> -0.035...
+
+
+!! ch4, ch6, ch7 demoted -- baseline 0.0019 / 0.0034 / 0.0015V, under 10% of the 0.0366V median across enabled channels. That sensor is not measuring the optic, so a ratio against it is a ratio against nothing -- held at bias and out of the interlocks. 5/8 still damping.
+
+[   25.0s] DAMPING     1091/100Hz avg10 ch0:.... g=-0.0350 bp=-0.033V ratio=0.23  ch1:.... g=-0.0350 bp=-0.018V ratio=0.21  ch2:.... g=+0.0350 bp=-0.009V ratio=0.09  ch3:.... g=-0.0350 bp=+0.002V ratio=0.05  ch4:NOSIG bp=+0.001V base=0.0019V  ch5:.... g=+0.0000 bp=-0.017V ratio=1.52  ch6:NOSIG bp=-0.006V base=0.0034V  ch7:NOSIG bp=+0.001V base=0.0015V
+[   30.0s] DAMPING     1078/100Hz avg10 ch0:.... g=-0.0350 bp=+0.012V ratio=0.04  ch1:.... g=-0.0350 bp=+0.002V ratio=0.03  ch2:.... g=+0.0350 bp=-0.003V ratio=0.02  ch3:.... g=-0.0350 bp=-0.003V ratio=0.03  ch4:NOSIG bp=-0.000V base=0.0019V  ch5:.... g=+0.0000 bp=-0.006V ratio=1.24  ch6:NOSIG bp=-0.003V base=0.0034V  ch7:NOSIG bp=+0.001V base=0.0015V
+[   35.0s] DAMPING     1068/100Hz avg10 ch0:LOCK g=-0.0350 bp=+0.006V ratio=0.05  ch1:LOCK g=-0.0350 bp=+0.005V ratio=0.04  ch2:LOCK g=+0.0350 bp=-0.002V ratio=0.01  ch3:LOCK g=-0.0350 bp=-0.000V ratio=0.02  ch4:NOSIG bp=-0.000V base=0.0019V  ch5:.... g=+0.0000 bp=-0.010V ratio=1.34  ch6:NOSIG bp=+0.002V base=0.0034V  ch7:NOSIG bp=-0.003V base=0.0015V
+
+[trim] ch3 rests at 679 counts (+167 off mid-scale) -- bias -> 0.50V
+
+[   40.0s] DAMPING     1061/100Hz avg10 ch0:LOCK g=-0.0350 bp=+0.002V ratio=0.10  ch1:LOCK g=-0.0350 bp=+0.007V ratio=0.11  ch2:LOCK g=+0.0350 bp=-0.023V ratio=0.09  ch3:LOCK g=-0.0350 bp=-0.007V ratio=0.13  ch4:NOSIG bp=-0.000V base=0.0019V  ch5:.... g=+0.0000 bp=-0.019V ratio=1.51  ch6:NOSIG bp=+0.001V base=0.0034V  ch7:NOSIG bp=-0.001V base=0.0015V
+[   45.0s] DAMPING     1055/100Hz avg10 ch0:LOCK g=-0.0350 bp=-0.000V ratio=0.03  ch1:LOCK g=-0.0350 bp=+0.001V ratio=0.04  ch2:LOCK g=+0.0350 bp=-0.002V ratio=0.02  ch3:LOCK g=-0.0350 bp=-0.003V ratio=0.04  ch4:NOSIG bp=-0.003V base=0.0019V  ch5:.... g=+0.0000 bp=-0.010V ratio=1.27  ch6:NOSIG bp=+0.001V base=0.0034V  ch7:NOSIG bp=-0.001V base=0.0015V
+[   50.0s] DAMPING     1050/100Hz avg10 ch0:LOCK g=-0.0350 bp=+0.012V ratio=0.06  ch1:LOCK g=-0.0350 bp=+0.003V ratio=0.04  ch2:LOCK g=+0.0350 bp=-0.001V ratio=0.01  ch3:LOCK g=-0.0350 bp=+0.004V ratio=0.02  ch4:NOSIG bp=+0.002V base=0.0019V  ch5:.... g=+0.0000 bp=+0.000V ratio=1.47  ch6:NOSIG bp=-0.002V base=0.0034V  ch7:NOSIG bp=+0.000V base=0.0015V
+
+[trim] ch3 kept at 0.50V -- total offset 1181 -> 1156 counts.
+
+
+[trim] ch3 rests at 665 counts (+154 off mid-scale) -- bias -> 0.75V
+
+[   55.0s] DAMPING     1047/100Hz avg10 ch0:LOCK g=-0.0350 bp=+0.011V ratio=0.09  ch1:LOCK g=-0.0350 bp=+0.009V ratio=0.12  ch2:LOCK g=+0.0350 bp=-0.021V ratio=0.08  ch3:.... g=-0.0350 bp=-0.009V ratio=0.13  ch4:NOSIG bp=+0.002V base=0.0019V  ch5:.... g=+0.0000 bp=-0.011V ratio=1.31  ch6:NOSIG bp=+0.000V base=0.0034V  ch7:NOSIG bp=+0.002V base=0.0015V
+[   60.0s] DAMPING     1044/100Hz avg10 ch0:LOCK g=-0.0350 bp=-0.011V ratio=0.07  ch1:LOCK g=-0.0350 bp=-0.000V ratio=0.05  ch2:LOCK g=+0.0350 bp=-0.003V ratio=0.02  ch3:.... g=-0.0350 bp=-0.000V ratio=0.04  ch4:NOSIG bp=+0.002V base=0.0019V  ch5:.... g=+0.0000 bp=-0.009V ratio=1.25  ch6:NOSIG bp=-0.001V base=0.0034V  ch7:NOSIG bp=+0.002V base=0.0015V
+[   65.0s] DAMPING     1041/100Hz avg10 ch0:LOCK g=-0.0350 bp=+0.002V ratio=0.01  ch1:LOCK g=-0.0350 bp=-0.001V ratio=0.04  ch2:LOCK g=+0.0350 bp=+0.001V ratio=0.01  ch3:LOCK g=-0.0350 bp=+0.001V ratio=0.02  ch4:NOSIG bp=+0.003V base=0.0019V  ch5:.... g=+0.0000 bp=+0.001V ratio=1.10  ch6:NOSIG bp=+0.000V base=0.0034V  ch7:NOSIG bp=+0.004V base=0.0015V
+
+[trim] ch3 kept at 0.75V -- total offset 1156 -> 1135 counts.
+
+
+[trim] ch3 rests at 651 counts (+140 off mid-scale) -- bias -> 1.00V
+
+[   70.0s] DAMPING     1039/100Hz avg9 ch0:LOCK g=-0.0350 bp=+0.026V ratio=0.12  ch1:LOCK g=-0.0350 bp=+0.013V ratio=0.11  ch2:LOCK g=+0.0350 bp=-0.022V ratio=0.07  ch3:.... g=-0.0350 bp=-0.009V ratio=0.15  ch4:NOSIG bp=-0.001V base=0.0019V  ch5:.... g=+0.0000 bp=+0.004V ratio=1.29  ch6:NOSIG bp=-0.002V base=0.0034V  ch7:NOSIG bp=-0.002V base=0.0015V
+[   75.0s] DAMPING     1037/100Hz avg10 ch0:LOCK g=-0.0350 bp=+0.006V ratio=0.04  ch1:LOCK g=-0.0350 bp=+0.001V ratio=0.04  ch2:LOCK g=+0.0350 bp=+0.005V ratio=0.01  ch3:.... g=-0.0350 bp=-0.000V ratio=0.03  ch4:NOSIG bp=-0.002V base=0.0019V  ch5:.... g=+0.0000 bp=+0.002V ratio=1.07  ch6:NOSIG bp=+0.002V base=0.0034V  ch7:NOSIG bp=-0.001V base=0.0015V
+[   80.0s] DAMPING     1035/100Hz avg11 ch0:LOCK g=-0.0350 bp=-0.009V ratio=0.06  ch1:LOCK g=-0.0350 bp=-0.000V ratio=0.04  ch2:LOCK g=+0.0350 bp=+0.000V ratio=0.01  ch3:LOCK g=-0.0350 bp=+0.000V ratio=0.01  ch4:NOSIG bp=-0.000V base=0.0019V  ch5:.... g=+0.0000 bp=+0.001V ratio=1.28  ch6:NOSIG bp=+0.002V base=0.0034V  ch7:NOSIG bp=-0.004V base=0.0015V
+
+[trim] ch3 kept at 1.00V -- total offset 1135 -> 1121 counts.
+
+
+[trim] ch1 rests at 639 counts (+128 off mid-scale) -- bias -> 0.50V
+
+[   85.0s] DAMPING     1034/100Hz avg10 ch0:LOCK g=-0.0350 bp=-0.027V ratio=0.15  ch1:.... g=-0.0350 bp=-0.008V ratio=0.15  ch2:LOCK g=+0.0350 bp=+0.019V ratio=0.06  ch3:.... g=-0.0350 bp=+0.013V ratio=0.13  ch4:NOSIG bp=-0.002V base=0.0019V  ch5:.... g=+0.0000 bp=+0.006V ratio=1.20  ch6:NOSIG bp=+0.004V base=0.0034V  ch7:NOSIG bp=-0.007V base=0.0015V
+[   90.0s] DAMPING     1032/100Hz avg10 ch0:.... g=-0.0350 bp=-0.860V ratio=1.42  ch1:.... g=-0.0350 bp=-0.670V ratio=1.96  ch2:.... g=+0.0350 bp=-1.288V ratio=1.14  ch3:.... g=-0.0350 bp=-0.957V ratio=2.79  ch4:NOSIG bp=-0.244V base=0.0019V  ch5:.... g=+0.0000 bp=+1.110V ratio=31.00  ch6:NOSIG bp=-1.441V base=0.0034V  ch7:NOSIG bp=+0.004V base=0.0015V
+
+!! ch2 railed -- held at bias, 4/8 still damping.
+
+
+!! ch5 runaway -- freezing all channels, entering FAULT.
+
+[   95.0s] FAULT       1034/100Hz avg11 ch0:.... g=+0.0000 bp=+0.829V ratio=4.73  ch1:.... g=+0.0000 bp=+0.796V ratio=9.00  ch2:DOWN bp=-1.190V  ch3:.... g=+0.0000 bp=+0.434V ratio=10.38  ch4:NOSIG bp=+0.023V base=0.0019V  ch5:.... g=+0.0000 bp=-0.041V ratio=96.83  ch6:NOSIG bp=-0.031V base=0.0034V  ch7:NOSIG bp=-0.067V base=0.0015V
+
+[recovered] re-engaging on the baseline already in hand -- the previous engagement was healthy, so this baseline is known good and the fault was a transient -- measuring a new floor now would measure the ringdown (1/4 before a forced re-calibration). Gain ramps from zero. ch4, ch6, ch7 stays demoted -- same baseline, same verdict.
+
+
+[trim] ch1 reverted to 0.25V and frozen -- total offset 1121 -> 1166 counts.
+
+[  100.0s] DAMPING     1034/100Hz avg10 ch0:.... g=-0.0350 bp=-0.544V ratio=5.07  ch1:.... g=-0.0350 bp=+0.244V ratio=4.91  ch2:.... g=+0.0350 bp=-0.230V ratio=3.57  ch3:.... g=-0.0350 bp=+0.326V ratio=7.89  ch4:NOSIG bp=+0.005V base=0.0019V  ch5:.... g=+0.0000 bp=-0.065V ratio=30.13  ch6:NOSIG bp=+0.110V base=0.0034V  ch7:NOSIG bp=+0.029V base=0.0015V
+
+!! ch0, ch1, ch3, ch5 runaway -- freezing all channels, entering FAULT.
+
+[  105.0s] FAULT       1036/100Hz avg11 ch0:.... g=+0.0000 bp=+0.640V ratio=2.92  ch1:.... g=+0.0000 bp=+0.021V ratio=5.49  ch2:.... g=+0.0000 bp=+0.182V ratio=3.00  ch3:.... g=+0.0000 bp=-0.214V ratio=6.28  ch4:NOSIG bp=-0.019V base=0.0019V  ch5:.... g=+0.0000 bp=-0.054V ratio=31.66  ch6:NOSIG bp=-0.036V base=0.0034V  ch7:NOSIG bp=-0.007V base=0.0015V
+
+[recovered] re-engaging on the baseline already in hand -- re-faulted after only 4.0s, so the disturbance is still there and a fresh window would measure it rather than the floor (2/4 before a forced re-calibration). Gain ramps from zero. ch4, ch6, ch7 stays demoted -- same baseline, same verdict.
+
+
+!! ch3 runaway -- freezing all channels, entering FAULT.
+
+[  110.0s] FAULT       1035/100Hz avg11 ch0:.... g=+0.0000 bp=+1.065V ratio=4.39  ch1:.... g=+0.0000 bp=-0.667V ratio=6.19  ch2:.... g=+0.0000 bp=+1.436V ratio=3.79  ch3:.... g=+0.0000 bp=-0.405V ratio=7.31  ch4:NOSIG bp=+0.005V base=0.0019V  ch5:.... g=+0.0000 bp=+0.050V ratio=30.46  ch6:NOSIG bp=+0.029V base=0.0034V  ch7:NOSIG bp=+0.007V base=0.0015V
+
+[recovered] re-engaging on the baseline already in hand -- re-faulted after only 4.0s, so the disturbance is still there and a fresh window would measure it rather than the floor (3/4 before a forced re-calibration). Gain ramps from zero. ch4, ch6, ch7 stays demoted -- same baseline, same verdict.
+
+
+[trim] ch3 rests at 688 counts (+176 off mid-scale) -- bias -> 1.25V
+
+[  115.0s] DAMPING     1038/100Hz avg10 ch0:.... g=-0.0048 bp=+0.720V ratio=6.28  ch1:.... g=-0.0048 bp=-0.076V ratio=4.92  ch2:.... g=+0.0048 bp=+0.451V ratio=3.77  ch3:.... g=-0.0048 bp=-0.215V ratio=7.98  ch4:NOSIG bp=+0.001V base=0.0019V  ch5:.... g=+0.0000 bp=+0.098V ratio=39.38  ch6:NOSIG bp=-0.037V base=0.0034V  ch7:NOSIG bp=-0.009V base=0.0015V
+
+!! ch0, ch1, ch2, ch3 runaway -- freezing all channels, entering FAULT.
+
+[  120.0s] FAULT       1037/100Hz avg11 ch0:.... g=+0.0000 bp=-0.551V ratio=3.58  ch1:.... g=+0.0000 bp=+0.521V ratio=5.32  ch2:.... g=+0.0000 bp=-0.826V ratio=3.44  ch3:.... g=+0.0000 bp=+0.501V ratio=5.79  ch4:NOSIG bp=+0.008V base=0.0019V  ch5:.... g=+0.0000 bp=+0.163V ratio=30.26  ch6:NOSIG bp=-0.016V base=0.0034V  ch7:NOSIG bp=-0.010V base=0.0015V
+
+[recovered] re-engaging on the baseline already in hand -- re-faulted after only 4.0s, so the disturbance is still there and a fresh window would measure it rather than the floor (4/4 before a forced re-calibration). Gain ramps from zero. ch4, ch6, ch7 stays demoted -- same baseline, same verdict.
+
+[  125.0s] DAMPING     1039/100Hz avg9 ch0:.... g=-0.0240 bp=-0.215V ratio=3.48  ch1:.... g=-0.0240 bp=+0.581V ratio=5.67  ch2:.... g=+0.0240 bp=-0.519V ratio=2.94  ch3:.... g=-0.0240 bp=+0.374V ratio=6.07  ch4:NOSIG bp=+0.007V base=0.0019V  ch5:.... g=+0.0000 bp=+0.224V ratio=30.37  ch6:NOSIG bp=+0.013V base=0.0034V  ch7:NOSIG bp=-0.005V base=0.0015V
+
+!! ch0, ch3 runaway -- freezing all channels, entering FAULT.
+
+[  130.0s] FAULT       1039/100Hz avg12 ch0:.... g=+0.0000 bp=-0.123V ratio=3.05  ch1:.... g=+0.0000 bp=-0.188V ratio=4.91  ch2:.... g=+0.0000 bp=+0.111V ratio=3.02  ch3:.... g=+0.0000 bp=+0.049V ratio=5.21  ch4:NOSIG bp=-0.003V base=0.0019V  ch5:.... g=+0.0000 bp=+0.254V ratio=30.49  ch6:NOSIG bp=-0.005V base=0.0034V  ch7:NOSIG bp=-0.004V base=0.0015V
+
+[recovered] all channels clear for 5s -- re-calibrating (already reused 4 times without a 15s engagement in between) for up to 20s.
+
+[  135.0s] CALIBRATING 1042/100Hz avg12 ch0:.... g=+0.0000 bp=+0.590V ratio=0.00  ch1:.... g=+0.0000 bp=-0.533V ratio=0.00  ch2:.... g=+0.0000 bp=+0.832V ratio=0.00  ch3:.... g=+0.0000 bp=-0.577V ratio=0.00  ch4:.... g=+0.0000 bp=-0.001V ratio=0.00  ch5:.... g=+0.0000 bp=+0.283V ratio=0.00  ch6:.... g=+0.0000 bp=+0.013V ratio=0.00  ch7:.... g=+0.0000 bp=-0.007V ratio=0.00
+[  140.0s] CALIBRATING 1044/100Hz avg11 ch0:.... g=+0.0000 bp=+0.107V ratio=0.00  ch1:.... g=+0.0000 bp=-0.326V ratio=0.00  ch2:.... g=+0.0000 bp=+0.384V ratio=0.00  ch3:.... g=+0.0000 bp=-0.272V ratio=0.00  ch4:.... g=+0.0000 bp=-0.007V ratio=0.00  ch5:.... g=+0.0000 bp=+0.320V ratio=0.00  ch6:.... g=+0.0000 bp=-0.009V ratio=0.00  ch7:.... g=+0.0000 bp=-0.002V ratio=0.00
+[  145.0s] CALIBRATING 1046/100Hz avg11 ch0:.... g=+0.0000 bp=-0.701V ratio=0.00  ch1:.... g=+0.0000 bp=+0.261V ratio=0.00  ch2:.... g=+0.0000 bp=-1.006V ratio=0.00  ch3:.... g=+0.0000 bp=+0.288V ratio=0.00  ch4:.... g=+0.0000 bp=+0.005V ratio=0.00  ch5:.... g=+0.0000 bp=+0.366V ratio=0.00  ch6:.... g=+0.0000 bp=+0.003V ratio=0.00  ch7:.... g=+0.0000 bp=-0.007V ratio=0.00
+[  150.0s] CALIBRATING 1048/100Hz avg11 ch0:.... g=+0.0000 bp=-0.324V ratio=0.00  ch1:.... g=+0.0000 bp=+0.426V ratio=0.00  ch2:.... g=+0.0000 bp=-1.182V ratio=0.00  ch3:.... g=+0.0000 bp=+0.264V ratio=0.00  ch4:.... g=+0.0000 bp=+0.006V ratio=0.00  ch5:.... g=+0.0000 bp=+0.359V ratio=0.00  ch6:.... g=+0.0000 bp=-0.001V ratio=0.00  ch7:.... g=+0.0000 bp=+0.000V ratio=0.00
+
+[baseline] written to /Users/gojira/Documents/GitHub.nosync/ligo/data/baseline.json -- the next start-up engages in ~2s instead of 20s, if nothing in the fingerprint or the room has moved.
+
+
+!! fresh baseline REFUSED -- ch1 measured 0.3689V against a trusted 0.0767V (4.8x) / ch2 measured 0.8109V against a trusted 0.2646V (3.1x) / ch3 measured 0.3054V against a trusted 0.0656V (4.7x) / ch5 measured 0.2261V against a trusted 0.0076V (29.6x), over 3.0x. That is a ringdown, not a floor -- a calibration window can be perfectly STATIONARY and still sit far above the floor. Keeping the baseline already in hand.
+
+
+[DAMPING] baseline KEPT after a refused 20.0s calibration -- these are the numbers already in hand, not freshly measured: ch0=0.1709V, ch1=0.0767V, ch2=0.2646V, ch3=0.0656V, ch4=0.0019V, ch5=0.0076V, ch6=0.0034V, ch7=0.0015V. Gain schedules -0.035 -> -0.035...

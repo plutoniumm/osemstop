@@ -1,0 +1,5 @@
+run,modelled_as,span_s,lambda_per_h,measured_damping_pct,model_damping_pct,delta_pct
+v4,v4,197.8,54.6,64.6,66.4,+1.8
+v9,v9,237.7,45.4,83.1,84.4,+1.4
+v10,v9,237.7,45.4,74.1,79.3,+5.2
+v12,v12,244.5,73.6,77.5,79.0,+1.5

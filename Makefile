@@ -18,7 +18,7 @@ help:                ## show this
 	@echo
 	@$(PY) harness.py --list
 
-run:                 ## ON HARDWARE: preflight the board, then run a controller (make run V=v5)
+run:                 ## ON HARDWARE: preflight the board, then run a controller (make run V=delta)
 	@$(PY) bench.py $(V) $(if $(PORT),--port $(PORT))
 
 arduino:             ## ON HARDWARE: compile arduino.ino and upload it (make arduino FQBN=...)
@@ -33,7 +33,7 @@ test:                ## interactive runner: pick a version, watch it damp, press
 check:               ## the same suite headless across every version (CI form)
 	@$(PY) harness.py --test all
 
-sim:                 ## browser simulator on the newest version -- make sim V=v0 to pick
+sim:                 ## browser simulator on the newest version -- make sim V=beta to pick
 	@$(PY) harness.py $(V)
 
 list:                ## what versions exist and what each one changes

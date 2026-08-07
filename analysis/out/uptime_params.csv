@@ -1,0 +1,6 @@
+version,channels,cold_calib_s,calib_s,fault_hold_s,warm_restart,sat_latch,m_faults_per_burst,burst_gap_s,m_source,g_source
+v0,1,8.0,8.0,5.048,0,1,1.00,0.00,v4 (nearest measured version without warm-restart),v4
+v4,4,20.0,20.0,5.048,0,0,1.00,0.00,measured,measured
+v9,4,20.0,20.0,5.049,1,0,1.33,4.04,measured,measured
+v12,8,20.0,20.0,5.010,1,0,1.75,12.03,measured,measured
+v13,8,20.0,20.0,5.010,1,0,1.75,12.03,"v12 (imported, not copied)",v12

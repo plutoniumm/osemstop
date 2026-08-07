@@ -1,9 +1,21 @@
 # Research queue
 
 Dependency order — each item gated by the ones above. Simulator numbers (`harness.py`) unless
-marked bench. In the tree: `osem.v3.py`, `osem.v6.py` (sysid), `osem.v7.py`, `osem.v9.py`; v7 and
-v9 confirmed on hardware 2026-08-04. `v0`–`v2`, both files called `v4`, `v5`, `v5.5`, `v6.1`,
-`v6.5`, `v6.6`, `v8` are git history only; their numbers stand.
+marked bench. In the tree: `osem.v3.py`, `osem.v6.py` (sysid), `osem.v7.py`, `osem.v9.py`,
+`osem.v10.py`, `osem.v11.py`; v7, v9 and v10 confirmed on hardware. `v0`–`v2`, both files called
+`v4`, `v5`, `v5.5`, `v6.1`, `v6.5`, `v6.6`, `v8` are git history only; their numbers stand.
+
+**Active as of 2026-08-06** — everything else here is background:
+
+| | item | why now |
+|---|---|---|
+| **settle faster** | 6a — retune `CALIB_AGREE_TOL` | built, fails on one constant, fixable offline |
+| **settle faster** | 6b(c) — out-of-band baseline | kills the calibration window entirely, not just shortens it |
+| **closer to zero** | 4 — resonant / internal-model control | **unblocked**: f₀ measured 2026-08-06 at 1.046 and 1.657 Hz |
+| **closer to zero** | 3 — is −0.04 real? | the floor is gain-limited, and the cap has never been reached — `analysis/kp040.md` |
+| both | 5 — Kalman velocity estimator | v11 measured the finite-difference noise directly: 3.5 → 12.8 vel RMS at 49× loop rate |
+
+Item 2 is blocked on a clean actuation matrix; leave it until the above move.
 
 ## The floor
 
@@ -19,11 +31,6 @@ gain-off, predicted 2.76 / 15.92 s. The floor tracks `intrinsic / (intrinsic + a
 **The floor falls with gain; gain is capped by the −0.04 instability — item 3.** The 0.0089 V
 residual is the actuator's 0.5 mV deadband and 10 ms throttle, not sensing: 0.0089 / 0.0087 /
 0.0094 V at 20 / 5 / 0 mV injected sensor noise.
-
-## 1. Suite fixed for the rigid-body plant — DONE
-
-Seven assertions encoded the old four-independent-oscillator plant; three rewritten in `harness.py`,
-no controller touched. Status: `make check`.
 
 ## 2. Modal (MIMO) damping — blocked on a clean actuation matrix
 
@@ -139,18 +146,7 @@ baselines and blew up `env/baseline` in the v5.5 run. Method note: the original 
 threshold and raw correlation, both blind to a small coherent signal. Test for a peak at the known
 resonance. See `analysis/where_is_power.py`.
 
-## Ruled out
-
-| candidate | why not |
-|---|---|
-| actuator deadband / rate-limit fix | sets the 0.009 V floor; you are at 0.23. |
-| safe Bayesian optimisation (SafeOpt) for gains | right tool, wrong order — needs item 3 to say where the safety constraint is. |
-| CUSUM / change-point interlocks | right *kind* of thing for defects #2 ("3 counts, 250 consecutive samples") and #3 ("2 s RMS > 1.8 × an 8 s baseline"), which test a level instead of accumulating evidence. Bench, on #3: a level test cannot tell a runaway (envelope growing) from a ringdown (large but falling) and re-tripped all the way down — 10 faults in 240 s. v9's `runaway-trend` growth gate takes that to 4 faults and a re-lock after every kick, which is enough for now. |
-| feedforward / Wiener, LQG / H∞, adaptive notch, ICA | wait on item 2's plant model. Wiener feedforward from a seismometer is the detector standard and strongest of these once a witness sensor exists. |
-| RL for the damping law | sample-hungry on hardware, no stability guarantee, and the simulator's one blind spot is −0.04 — an agent would learn that more gain is always better. |
-
-`auto-disable` was ruled out here and has since been built (v4 on): a rail demotes that channel, a
-global `FAULT` only below a quorum of one. **Never exercised on hardware** — `CLAUDE.md` item 4.
+`auto-disable` is built (v4 on) but **still never exercised on hardware** — `CLAUDE.md` item 4.
 Do not chase "the report's 0.085 Hz error"; `0.085` occurs nowhere in the repo or in
 `provenance.md`'s text layer.
 

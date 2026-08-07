@@ -38,7 +38,7 @@ import sysid
 from pyDAC2 import FastDAC
 
 PORT = "COM7"                       # bench.py overwrites this
-VERSION_TAG = "v6"
+VERSION_TAG = "sysid"
 KIND = "sysid"                      # not a controller; harness/bench skip it
 
 NCOLS = 4                           # the firmware streams 8; only A0..A3 here
