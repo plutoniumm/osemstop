@@ -1,1 +1,1 @@
-"""sim -- the simulated suspension and browser UI. Entry point is ../harness.py."""
+"""sim -- the simulated suspension. Entry point is ../harness.py."""

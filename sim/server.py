@@ -3,8 +3,8 @@ Simulator server -- runs the REAL controller against a simulated plant
 ======================================================================
 This imports whichever `osem.vN.py` harness.py selects and drives its actual `Controller`,
 `Channel`, `OnePoleFilter`, `SlidingRMS`, `slew_limit` and `RateLimitedActuator`.
-There is no second implementation of the control law anywhere: what the browser
-draws is the output of the same code that talks to the hardware. Edit the
+There is no second implementation of the control law anywhere: what the suite
+asserts is the output of the same code that talks to the hardware. Edit the
 controller and the simulation changes with it.
 
 Two things are faked, and only two:
@@ -49,9 +49,8 @@ facility for the things a test has to command on purpose:
   * random shocks: Poisson-timed velocity impulses to the whole rigid body, so
     all four OSEMs see one bump with slightly different projections.
 
-Injected on demand (`kick`, `earthquake`, `set_occlusion` -- and over HTTP at
-/api/inject), because the three faults the bench found on 2026-08-03 are
-otherwise unreachable from here:
+Injected on demand (`kick`, `earthquake`, `set_occlusion`), because the three
+faults the bench found on 2026-08-03 are otherwise unreachable from here:
 
   * a kick: one velocity impulse, what `make test` sends on `x`;
   * an earthquake: a transient aimed at named channels, large enough to rail
@@ -82,7 +81,6 @@ Not run directly -- `harness.py` in the repo root is the entry point. It chooses
 which `osem.vN.py` to load and calls `load()` below before anything else.
 """
 
-import json
 import math
 import os
 import random
@@ -90,7 +88,6 @@ import sys
 import threading
 import time
 import types
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)            # controllers and pyDAC live one level up
@@ -166,8 +163,8 @@ NOISE_SCALE = math.sqrt(DT_REF / DT)
 
 # What a shock delivers, in sensor volts per second.
 #
-# KICK_DV is the manual one -- the browser button, `x` in the TUI -- and is
-# UNCHANGED at 6.0. It exists to watch a loop absorb a bump.
+# KICK_DV is the manual one -- `x` in the TUI -- and is UNCHANGED at 6.0. It
+# exists to watch a loop absorb a bump.
 #
 # The AUTO kick is a different job: it is the stimulus for the saturation
 # scenario, and it has to hold the actuator against its clip for
@@ -422,9 +419,9 @@ SHAPE_8 = [[1.000,  1.000],      # a0   reference
            [0.000,  0.000]]      # a7   reads, does not sense
 SENSING_8 = [0, 1, 2, 3, 5]
 
-# Modal readout for the browser: least-squares inverse of SHAPE_8 (so it is the
-# best fit to the two modes rather than any one channel's opinion), plus a third
-# row that no in-band motion can produce. That row is not decorative: it is the
+# Modal readout (`Sim.modes`, a plant diagnostic): least-squares inverse of SHAPE_8
+# (so it is the best fit to the two modes rather than any one channel's opinion),
+# plus a third row that no in-band motion can produce. Not decorative: it is the
 # direction the DC matrix moves in that neither measured mode contains, it is
 # orthogonal to both to 5e-4, and any reading in it is sensors disagreeing.
 SENSE_8 = [[+0.27931, +0.56805, +0.30094, +0.50038, 0.0, +0.02328, 0.0, 0.0],
@@ -761,8 +758,6 @@ class Sim:
         self.capture = [float(v) for v in osem.CAPTURE_GAIN]
         self.ki = [float(v) for v in osem.KI_GAIN]
         self.kd = [float(v) for v in osem.KD_GAIN]
-        self.speed = 1.0
-        self.running = False
         self.auto_kick = False
         self.reset()
 
@@ -796,7 +791,6 @@ class Sim:
             self._dt_lost = 0.0  # their duration, handed to the controller
             self._loop_win = []  # (t, seen) over the last 1 s -> loop_hz
             self.loop_hz = SAMPLE_HZ
-            self.log = []
             self.trace = []
             self.cursor = 0
             self.decim = 0
@@ -977,42 +971,6 @@ class Sim:
         with self.lock:
             self.occlude[int(channel)] = bool(on)
             self.occlude_high[int(channel)] = str(side).lower() == "high"
-
-    def inject(self, kind, **kw):
-        """One entry point for the browser and for tests. Returns a short
-        description of what it did, or raises ValueError on an unknown kind."""
-        kind = str(kind).lower()
-        if kind == "kick":
-            self.kick(float(kw.get("dv", 6.0)))
-            return f"kick {float(kw.get('dv', 6.0)):+.1f} V/s"
-        if kind in ("quake", "earthquake"):
-            ch = kw.get("channels")
-            ch = None if ch is None else [int(c) for c in ch]
-            dv = float(kw.get("dv", 25.0))
-            dur = float(kw.get("duration", 0.0))
-            self.earthquake(channels=ch, dv=dv, duration=dur)
-            return (f"earthquake {dv:+.1f} V/s on "
-                    f"{'all' if not ch else ','.join(map(str, ch))}"
-                    + (f" for {dur:.1f}s" if dur > 0 else ""))
-        if kind in ("occlude", "occlusion"):
-            for c in (kw.get("channels") or []):
-                self.set_occlusion(int(c), bool(kw.get("on", True)),
-                                   str(kw.get("side", "low")))
-            return f"occlude {kw.get('channels')} {kw.get('side', 'low')}"
-        if kind in ("sensor", "sens_gain"):
-            # Mis-align one OSEM: scale its counts-per-metre. 0.0 is the a4/a6/a7
-            # case measured 2026-08-06 -- reading, not sensing, and never railing.
-            for c in (kw.get("channels") or []):
-                self.sens_gain[int(c)] = float(kw.get("gain", 1.0))
-            return f"sens_gain {kw.get('channels')} -> {float(kw.get('gain', 1.0)):.3f}"
-        if kind == "clear":
-            with self.lock:
-                self.occlude = [False] * N
-                self.occlude_high = [False] * N
-                self.sens_gain = [1.0] * N
-                self.quake = None
-            return "cleared"
-        raise ValueError(f"unknown injection: {kind}")
 
     # ---------------- one control cycle ----------------
     def _trim_loop_win(self, t):
@@ -1248,59 +1206,6 @@ class Sim:
             if len(self.trace) > TRACE_N:
                 del self.trace[:len(self.trace) - TRACE_N]
 
-            if len(self.log) < 200000:
-                lr = ["%.4f" % t, state]
-                for i, ch in enumerate(chans):
-                    lr += ["%.5f" % volts[i], "%.5f" % ch.bp_out, "%.5f" % ch.vel,
-                           "%.4f" % ch.out, "%.5f" % ch.active_gain,
-                           "%.4f" % ch.last_ratio, "%.5f" % ch.p_term,
-                           "%.5f" % ch.i_term, "%.5f" % ch.d_term,
-                           str(int(ch.rail_fault)), str(int(ch.locked))]
-                self.log.append(",".join(lr))
-
-    # ---------------- snapshot for the client ----------------
-    def snapshot(self, since):
-        with self.lock:
-            first = self.cursor - len(self.trace)
-            start = max(0, since - first)
-            rows = self.trace[start:] if since >= first else list(self.trace)
-            chans = self.ctl.channels
-            status = {
-                "version": VERSION,
-                "t": round(self.t, 2),
-                "state": self.ctl.state if self.running or self.t > 0 else "IDLE",
-                "running": self.running,
-                "lockTime": (round(self.ctl.lock_time, 1)
-                             if self.ctl.lock_time is not None else None),
-                "faults": self.ctl.fault_count,
-                "wireHz": round(SAMPLE_HZ, 1),
-                "loopHz": round(self.loop_hz, 1),
-                "ackDrain": round(float(self.plant["ack_drain"]), 1),
-                "shocks": self.shocks,
-                "nch": N,
-                "modes": [round(v, 4) for v in self.modes],
-                "modeNames": list(MODE_LABELS),
-                "lastShock": self.last_shock,
-                "quake": (round(self.quake["until"] - self.t, 1)
-                          if self.quake else None),
-                "events": self.events[-6:],
-                "ch": [{
-                    "enabled": bool(c.enabled), "locked": bool(c.locked),
-                    "rail": bool(c.rail_fault), "occluded": bool(self.occlude[i]),
-                    # percentage of this run's samples that hit an ADC end stop.
-                    # Directly comparable to the bench: v1 2.19%, v2 10.40%.
-                    "clip": round(100.0 * self.clip_n[i] / max(self.samp_n, 1), 2),
-                    "gain": round(float(c.active_gain), 5),
-                    "p": round(float(c.p_term), 5), "i": round(float(c.i_term), 5),
-                    "d": round(float(c.d_term), 5), "out": round(float(c.out), 5),
-                    "signal": round(float(self.x[i]), 4),
-                    "ratio": round(self.diag_ratio[i], 3),
-                    "baseline": (round(float(c.baseline_rms), 5)
-                                 if c.baseline_rms else None),
-                } for i, c in enumerate(chans)],
-            }
-            return {"cursor": self.cursor, "rows": rows, "status": status}
-
 
 def load(controller_file):
     """Load one `osem.vN.py` and build a fresh Sim around it.
@@ -1343,169 +1248,6 @@ def load(controller_file):
     OWN_ANY = any(OWN_SIGMA)
     SIM = Sim()
     return osem
-
-
-def loop():
-    """Real-time pacing. Steps are batched: sleeping per-sample at 500 Hz costs
-    more than the control cycle itself."""
-    last = time.perf_counter()
-    while True:
-        now = time.perf_counter()
-        with SIM.lock:
-            running, speed = SIM.running, SIM.speed
-        if not running:
-            last = now
-            time.sleep(0.01)
-            continue
-        n = int((now - last) * speed / DT)
-        if n <= 0:
-            time.sleep(0.001)
-            continue
-        n = min(n, 6000)
-        last += n * DT / speed
-        with SIM.lock:
-            for _ in range(n):
-                SIM.step()
-
-
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *a):
-        pass
-
-    def _send(self, code, body, ctype):
-        data = body.encode() if isinstance(body, str) else body
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(data)
-
-    def do_GET(self):
-        path = self.path.split("?")[0]
-        if path in ("/", "/index.html", "/ui.html"):
-            try:
-                with open(os.path.join(HERE, "ui.html")) as f:
-                    page = f.read()
-            except OSError:
-                return self._send(404, "sim/ui.html not found", "text/plain")
-            # The page builds every per-channel control from NCH, so telling it
-            # how many OSEMs this body has is the whole of serving an
-            # eight-channel controller. Everything downstream -- the row stride
-            # in the trace, the legend, the lamps -- derives from it.
-            page = page.replace("<script", f"<script>window.__NCH__ = {N};</script>"
-                                            "<script", 1)
-            return self._send(200, page, "text/html; charset=utf-8")
-
-        if path == "/api/state":
-            since = 0
-            if "?" in self.path:
-                for kv in self.path.split("?", 1)[1].split("&"):
-                    if kv.startswith("since="):
-                        try:
-                            since = int(kv[6:])
-                        except ValueError:
-                            since = 0
-            return self._send(200, json.dumps(SIM.snapshot(since)), "application/json")
-
-        if path == "/api/csv":
-            with SIM.lock:
-                header = "time_s,state," + ",".join(
-                    f"ch{i}_signal,ch{i}_bp,ch{i}_vel,ch{i}_out,ch{i}_gain,ch{i}_ratio,"
-                    f"ch{i}_p,ch{i}_i,ch{i}_d,ch{i}_rail,ch{i}_locked" for i in range(N))
-                body = header + "\n" + "\n".join(SIM.log) + "\n"
-            return self._send(200, body, "text/csv")
-
-        self._send(404, "not found", "text/plain")
-
-    def do_POST(self):
-        n = int(self.headers.get("Content-Length", 0))
-        try:
-            msg = json.loads(self.rfile.read(n) or b"{}")
-        except json.JSONDecodeError:
-            return self._send(400, '{"error":"bad json"}', "application/json")
-        path = self.path.split("?")[0]
-
-        if path == "/api/config":
-            with SIM.lock:
-                for key in ("enable", "occlude"):
-                    if key in msg:
-                        setattr(SIM, key, [bool(v) for v in msg[key]])
-                if "occludeSide" in msg:
-                    SIM.occlude_high = [str(v).lower() == "high"
-                                        for v in msg["occludeSide"]]
-                for key in ("steady", "capture", "ki", "kd"):
-                    if key in msg:
-                        setattr(SIM, key, [float(v) for v in msg[key]])
-                if "plant" in msg:
-                    SIM.plant.update({k: float(v) for k, v in msg["plant"].items()})
-                # Promoted out of `plant` because it is the one setting that
-                # changes what the simulator IS rather than what the lab is
-                # doing: 14 models pyDAC's ack round-trip, 0 models pyDAC2.
-                if "ackDrain" in msg:
-                    SIM.plant["ack_drain"] = max(0.0, float(msg["ackDrain"]))
-                if "speed" in msg:
-                    SIM.speed = max(0.25, min(float(msg["speed"]), 12.0))
-                if "autoKick" in msg:
-                    SIM.auto_kick = bool(msg["autoKick"])
-            SIM.apply_gains()
-            return self._send(200, '{"ok":true}', "application/json")
-
-        if path == "/api/run":
-            act = msg.get("action")
-            with SIM.lock:
-                if act == "start":
-                    SIM.running = True
-                elif act == "pause":
-                    SIM.running = False
-                elif act == "reset":
-                    SIM.reset()
-                elif act == "kick":
-                    SIM.kick()
-                elif act in ("quake", "earthquake"):
-                    # same facility as /api/inject, reachable from the run row
-                    SIM.earthquake(channels=msg.get("channels"),
-                                   dv=float(msg.get("dv", 25.0)),
-                                   duration=float(msg.get("duration", 0.0)))
-            return self._send(200, '{"ok":true}', "application/json")
-
-        if path == "/api/inject":
-            # One endpoint for every deliberate disturbance: see Sim.inject.
-            #   {"kind":"kick","dv":6}
-            #   {"kind":"quake","channels":[0],"dv":25,"duration":3}
-            #   {"kind":"occlude","channels":[1],"side":"low","on":true}
-            #   {"kind":"clear"}
-            kind = msg.pop("kind", None)
-            try:
-                what = SIM.inject(kind, **msg)
-            except (ValueError, TypeError, IndexError) as exc:
-                return self._send(400, json.dumps({"error": str(exc)}),
-                                  "application/json")
-            return self._send(200, json.dumps({"ok": True, "did": what}),
-                              "application/json")
-
-        self._send(404, '{"error":"not found"}', "application/json")
-
-
-DEFAULT_PORT = 8770
-
-
-def serve(port):
-    ThreadingHTTPServer.allow_reuse_address = True
-    try:
-        srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    except OSError as exc:
-        print(f"Could not bind port {port}: {exc}")
-        print(f"Something else is already listening. Try: --port {port + 1}")
-        return 1
-    threading.Thread(target=loop, daemon=True).start()
-    print(f"Controller: {os.path.relpath(CONTROLLER_FILE, ROOT)}")
-    print(f"Serving http://localhost:{port}  (Ctrl+C to stop)")
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        print("\nstopped")
-    return 0
 
 
 if __name__ == "__main__":

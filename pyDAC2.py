@@ -53,6 +53,79 @@ import serial
 
 BAUD = 500000                            # see pyDAC.BAUD for why it is not 230400
 
+# What a board might actually be running at, most likely first. THE RATE IS NOT A
+# PROPERTY OF THIS REPO: arduino.ino boots at BAUD_HZ = 500000 but also carries a
+# `BAUD` command so the ladder can be re-measured without a reflash, so the live
+# rate is a property of what was last done to that board. Measured 2026-08-17 on
+# the Mega 2560 R3 at /dev/cu.usbmodem11101: READY at 115200, framing garbage at
+# 500000, i.e. the flashed sketch is not the arduino.ino in this tree.
+#
+# This list and `probe_baud` live HERE, in the transport that owns BAUD, and not
+# in each tool. bench.py and harness.py once carried a version-discovery regex
+# each, the copies drifted, and `make run` silently could not see osem.v5.5.py --
+# `ladder.py` exists because of it. One owner.
+BAUD_CANDIDATES = (500000, 115200, 230400, 57600, 9600)
+
+
+def probe_baud(port, candidates=BAUD_CANDIDATES, seconds=2.0, reset_s=2.2,
+               log=print):
+    """The baud this board is actually talking at, or None.
+
+    WHY THIS IS NOT OPTIONAL. `FastDAC.__init__` and `DACController` both scan up
+    to 200 lines for READY with a 2 s serial timeout, so at the wrong rate they
+    block for up to 400 SECONDS printing nothing, and the symptom is
+    indistinguishable from a hung program. That cost most of a bench session on
+    2026-08-17. Bounded, and it says what it heard.
+    """
+    for baud in candidates:
+        try:
+            ser = serial.Serial(port, baud, timeout=0.3)
+        except Exception as e:
+            log("    %7d  cannot open: %s" % (baud, e))
+            continue
+        try:
+            time.sleep(reset_s)          # opening the port toggles DTR: board resets
+            t0, blob = time.time(), bytearray()
+            while time.time() - t0 < seconds:
+                blob += ser.read(4096)
+        finally:
+            ser.close()
+        if b"READY" in blob:
+            log("    %7d  READY  <-- using this" % baud)
+            return baud
+        log("    %7d  no READY in %d bytes  %s"
+            % (baud, len(blob), repr(bytes(blob[:24])) if blob else "(silence)"))
+    return None
+
+
+def resolve_baud(port, log=print):
+    """Probe, then make BAUD match the board so every later open just works.
+
+    Sets the module global, which is what `FastDAC(port=...)` and every
+    controller in the ladder default to. Returns the rate. Exits with the
+    reflash instruction if the board says nothing at any rate.
+    """
+    global BAUD
+    log("  baud:")
+    found = probe_baud(port, log=log)
+    if found is None:
+        raise SystemExit(
+            "  The board never said READY at any of %s.\n"
+            "  It is powered and enumerating, so this is the sketch: not\n"
+            "  flashed, not arduino.ino, or at a rate not in the list.\n"
+            "  Try `make arduino`."
+            % ", ".join("%d" % b for b in BAUD_CANDIDATES))
+    if found != BAUD:
+        log("  NOTE: the sketch is at %d, not the %d this tree declares."
+            % (found, BAUD))
+        log("  Using %d. `make arduino` would reflash it to %d and restore the"
+            % (found, BAUD))
+        log("  measured 1024-1113 Hz wire rate; %d gives about 420 Hz on 8"
+            % found)
+        log("  ASCII channels, which is still well above the 100 Hz control clock.")
+    BAUD = found
+    return found
+
 SYNC0, SYNC1 = 0xA5, 0xC3                # both have bit 7 set: never in ASCII
 FRAME_LEN = 20                           # sync sync seq + 8*uint16 LE + cksum
 
@@ -91,7 +164,13 @@ class FastDAC:
 
     VMIN_HW, VMAX_HW = 0.0, 2.5          # what the firmware itself clamps to
 
-    def __init__(self, port, baud=BAUD, timeout=2.0, binary=False, ack=False):
+    def __init__(self, port, baud=None, timeout=2.0, binary=False, ack=False):
+        # baud=None, NOT baud=BAUD. A default argument is evaluated when the
+        # function is DEFINED, so `baud=BAUD` freezes whatever BAUD was at
+        # import and `resolve_baud` setting the module global afterwards would
+        # silently have no effect -- the probe would report 115200 and the open
+        # would still go out at 500000. Read it at call time.
+        baud = BAUD if baud is None else baud
         self.ser = serial.Serial(port, baud, timeout=timeout)
         self.binary = False              # set for real below, after the handshake
         time.sleep(2)                    # the board resets when the port opens

@@ -1,68 +1,80 @@
 # Controller versions
 
-Each `osem.vN.py` is a **complete, standalone controller**. None of them import
-from each other and none are patches — you can flash the Arduino, point any one
-of them at `COM7` and run it. That is deliberate: the bench comparison between
-two versions has to be a comparison of two things that both actually ran.
-(`osem.v6*.py` are the exception and are not controllers at all — see *Bench
-tools* below.)
+Every measured number here carries the file it came from. The ladder is
+**epsilon, zeta, eta**; older rungs — including **`delta`, deleted 2026-08-17** —
+are in git history and their sections are kept because the hardware numbers in them
+are real.
 
-**v0, v1, v2 and v3 were deleted from the working tree on 2026-08-04** and exist
-only in git history: `git show HEAD:osem.v0.py`, or `git checkout HEAD -- osem.v0.py`
-to bring one back. Their sections below are kept, because v4 is v3 plus one
-change, because the suite still measures itself against their behaviour, and
-because the hardware numbers in § *On the bench* were measured on them and are
-real. **v5 is the current starting point** — the newest thing that closes a loop
-on four channels, and what `README.md` § 0 tells you to run; v4 is the reference
-it is compared against.
+**Controllers were standalone until 2026-08-17, and are not any more.** Every
+`osem.*.py` used to import nothing from the others, deliberately: `bench.py` reads
+the gain vectors out of the file it is about to run, so what it prints is what gets
+applied, and a bench comparison of two versions was a comparison of two things that
+both actually ran. On **2026-08-17** the machinery that rule duplicated eight times
+was moved into `stdlib.py` and `osem.eta.py` imports it. The check survives because
+`stdlib.py` holds **no constants** — every threshold is a constructor argument, so
+the gain vectors are still declared in each rung's own file and are still what
+`bench.py` prints; where a rung's *law* comes from another module, `bench.py` reads
+`GAIN_SOURCE` and names it. Anything below still asserting the old rule is stale; the
+rule existed, it was load-bearing, and it was dropped on purpose.
 
 ```
 python3 harness.py --list          # what exists, controllers and bench tools
 make test                          # pick one, watch it run, press x to kick it
 make check                         # every version the simulator can drive, asserted
-make sim V=v4                      # one of them in a browser
+make scope                         # watch all 8 channels live
 ```
 
 ---
 
 ## The ladder
 
-In the tree, as of 2026-08-06.
+| | channels | law | on bench | suite |
+|---|---|---|---|---|
+| **epsilon** | 8/8 | diagonal + Kalman velocity | **never run** | not re-run since the rename |
+| **zeta** | 8/8 | **modal**, Phi/A from `data/modal.json` | **ran 2026-08-17** | 41/10 |
+| **eta** | 8/8 | modal + one filter over the modal coordinates | **ran 2026-08-18** | 41/10, same failure set |
 
-| | channels | I / D | fixes | on bench | suite |
-|---|---|---|---|---|---|
-| **v3** | 4/4 | live | all 3 defects fixed | validated 08-03 | 24/24 |
-| **v7** | 4/4 | live | + auto-disable, fast-refault, **bias-trim** | validated 08-04 | 36/36 |
-| **v9** | 4/4 | live | + fast-calib, warm-restart, **runaway-trend** | validated 08-04 | 37/37 |
-| **v10** | **5/8** | live | v9 + trim + **soft-saturation**, **baseline-floor** | **validated 08-06** | *skipped* |
-| **v11** | **8/8** | live | + **sat-window**, **fast-transport** | **untested** | *skipped* |
+`zeta` closed a modal loop on 2026-08-17 and damped **5x faster than diagonal**
+(§ *On the bench, 2026-08-17 evening*). **`eta` ran on 2026-08-18** — one diagonal
+null test and one modal run, and it is the first rung in this repo's history to
+print `LOCKED` (§ *On the bench, 2026-08-18*). **`epsilon` has never been on the
+rig.** `delta`, the only rung that ever carried `BENCH_STATUS = validated`, was
+deleted 2026-08-17 (`git show b90c983:osem.delta.py`); the diagonal control is now
+`zeta` or `eta` run with no `data/modal.json`.
 
-All five ship the **same control law** — identical `STEADY_GAIN`, `KI_GAIN` and
-`KD_GAIN` on a0–a3, ch2's `+0.010` included. Everything that separates them is
-supervisor, and from v10 also the channel set. v3 is kept as the minimal baseline
-precisely because of that: it is the only one with essentially no supervisor, so a
-supervisor change can be A/B'd against it.
+**The suite counts above predate the deletions and the 2026-08-17/18 tool work and
+have not been re-run.**
 
-**v10 is the one to run on hardware; v11 needs a reflash first.** v10 went on the
-bench 2026-08-06 on all eight OSEMs and locked into 40 s of unbroken damping with
-zero faults. v11 raises the baud rate to 230400 and switches to `pyDAC2.FastDAC`,
-so the board must be reflashed (`make arduino`) before it will run at all.
+**Deleted 2026-08-17, git history only:** `zero` (one channel, latching saturation
+fault, the original), `alpha` (`auto-disable`), `beta` (`runaway-trend`, and still
+the best raw DAMPING fraction on record at **83.1 %**, 2026-08-04). Every fix each
+introduced is carried by `delta`. Their sections below stand.
 
-**v10 and v11 are eight-channel, so `harness.py` skips both** — `sim/server.py`
-models a 4-OSEM rigid body. The suite still runs in full on v3/v7/v9 (which is
-what the v9 column above is), but the FIXED-side assertions for
-`soft-saturation` and `baseline-floor` are now declared only by versions the
-simulator cannot drive, so those two fixes have **no simulator coverage** even
-though their checks are still in `harness.py` and still assert the un-fixed
-behaviour on v3/v7/v9. `bias-trim` is unaffected — v7 still declares it.
+### Names to numbers — read this before searching for a section
 
-`osem.v6.py` is a **bench tool**, not a rung: it drives coils and records, closes
-no loop, and exposes no `Controller`. The suite skips it loudly, with a reason
-printed.
+**Every section heading below is still numbered**, because that is what it was
+called when the measurement was made and renaming a heading would orphan the
+numbers under it. So a name has to be translated before it can be searched for:
 
-Deleted, and in git history only. Their numbers were measured through
-`harness.py` while they were still in the tree, against the suite as it stood
-then — so the counts are not comparable with the table above:
+| name | was | where its measurements are | status |
+|---|---|---|---|
+| `zero` | **v0** | § *v0, v1, v2 — the deleted rungs* | deleted 08-17 |
+| `alpha` | **v4** | § *v4 — graceful degradation* | deleted 08-17 |
+| `beta` | **v9** | § *The fault thrash, and the fix (v9)*, § *On the bench, 2026-08-04* | deleted 08-17 |
+| `delta` | **v12** | § *v12 — the loop gets its own clock* | deleted 08-17 |
+| `epsilon` | — | no numbered section; written after the rename | in the tree |
+| `zeta` | — | § *On the bench, 2026-08-17 (evening)* | in the tree |
+| `eta` | — | § *eta*, § *On the bench, 2026-08-18* | in the tree |
+| `sysid` | **v6** | § *Bench tools, not rungs* | in the tree |
+
+`ladder.py`'s `RENAMED` is the authority for what the tools accept, and it is
+narrower than this table on purpose: `LADDER = ("epsilon", "zeta", "eta")` and only
+**v6 → sysid** still resolves to a file from a number. Every other number —
+including v0, v4, v9 and now v12, whose sections are still here — reports "that
+version was deleted; see versions.md", which is what this table is for.
+
+Deleted earlier, and their numbers were measured through `harness.py` against the
+suite as it stood then, so the counts are not comparable with the table above:
 
 | deleted | channels | I / D | known defects | ch0 ratio | lock | suite then |
 |---|---|---|---|---|---|---|
@@ -74,26 +86,32 @@ then — so the counts are not comparable with the table above:
 | **v5.5** | **all eight** | live | same as v5 | — | — | *skipped* |
 | **v8** | all four | live | + fast-calib, warm-restart | 0.029 | 10.5 s | 36/36 |
 
-v0–v2 went on 2026-08-04; v4, v5, v5.5 and v8 on 2026-08-06, each superseded by a
-version that contains it. The `v6.1` / `v6.5` / `v6.6` sysid variants went the
-same day — the multisine pair failed on hardware, and the 8-coil pair expects
-4 DOF, which cannot be seen until a4–a7 are wired. v3 was deleted on 08-04 and
-**restored on 08-06** as the minimal baseline.
+v0-v2 went on 2026-08-04; v4, v5, v5.5 and v8 on 2026-08-06, each superseded by a
+version that contains it. The `v6.1` / `v6.5` / `v6.6` sysid variants went the same
+day - the multisine pair failed on hardware, and the 8-coil pair expects 4 DOF.
+v3 was deleted on 08-04, restored on 08-06 as the minimal baseline, and folded away
+with the rename.
 
 "ratio" is the rolling 2 s RMS of the bandpassed signal over that channel's own
-calibrated baseline — 1.0 is undamped, the lock line is 0.35. Every number in
-both tables was measured through `harness.py`, not estimated. The simulator's
-limits apply to all of them: see the bottom of this file.
+calibrated baseline - 1.0 is undamped, the lock line is 0.35. Every number in both
+tables was measured through `harness.py`, not estimated. The simulator's limits
+apply to all of them: see the bottom of this file.
 
 ### Bench tools, not rungs
 
-`osem.v6.py`, `osem.v6.1.py`, `osem.v6.5.py` and `osem.v6.6.py` declare
-`KIND = "sysid"`, expose no `Controller` and damp nothing. They drive the coils
-with a known excitation and record what the OSEMs do, to recover the actuation
-matrix (`research.md` item 2, `CLAUDE.md` item 2b). `harness.py` and `bench.py`
-both check `KIND` and refuse to simulate them; the shared lock-in and reporting
-live in `sysid.py`. v6/v6.1 are the four-coil pair (stepped sine / interleaved
-multisine), v6.5/v6.6 the eight-coil pair.
+`osem.sysid.py` declares `KIND = "sysid"`, exposes no `Controller` and damps
+nothing: it drives the coils with a known excitation and records what the OSEMs do,
+to recover the actuation matrix. `harness.py` and `bench.py` both check `KIND` and
+refuse to simulate it; the shared lock-in and reporting live in `sysid.py`. The
+deleted `v6.1` / `v6.5` / `v6.6` were the multisine and eight-coil variants.
+
+**Three tools are not rungs at all and did the 2026-08-17 work:** `status.py` (the
+census, and where Φ and A came from), `signtest.py` (which per-mode sign of A damps)
+and `jerk.py` (the kick test — the only tool here that measures a dissipation rate
+rather than an amplitude). `signtest.py` was DELETED later the same night: once Φ
+is taken from geometry it is exact and signed, so A's sign follows from the driven
+measurement and there is no sign pattern left to sweep. Its result table survives
+in `CLAUDE.md` and its five records in `data/signtest_20260817_192808_*`.
 
 v4 and v5 give the **same numbers to three decimals** in a quiet lab, on two
 different plants — the rewrite is behaviour-preserving, and was verified so
@@ -119,10 +137,10 @@ this is hardware.
 **All three deleted 2026-08-04; git history only** (`git show HEAD:osem.v0.py`).
 Their measured numbers are in the ladder table above. What is still load-bearing:
 
-- **v0** — the 2026-07-15 bench configuration and what `provenance.md` describes.
+- **v0** — the 2026-07-15 bench configuration and what `CLAUDE.md` § *Where the constants came from* describes.
   P-only velocity feedback, `u = -K·v`, `ENABLE_CHANNEL = [True, False, False,
   False]`. The only entry in this whole file ever confirmed against a scope.
-- **v1** — one line changed: all four channels on, because `provenance.md` §4
+- **v1** — one line changed: all four channels on, because `CLAUDE.md` § *One channel damps the whole mass*
   documents all four damping simultaneously (≈17 s against ≈70 s one at a time).
   v0's docstring claim that only ch0 was validated was already two days out of
   date when v0 was frozen.
@@ -137,7 +155,7 @@ so deleting the files did not delete the reasoning:
 
 **ch2's `STEADY_GAIN[2] = +0.010` is positive** where the others are negative,
 because that channel's coil or OSEM is mounted the other way round
-(`provenance.md` § *Table 1*). Confirmed on hardware 2026-08-04, where it came
+(`CLAUDE.md` § *Why `STEADY_GAIN[2]` is positive*). Confirmed on hardware 2026-08-04, where it came
 out the best-damping channel of the four. Do not "correct" it.
 
 **What P, I and D actually are here.** The process variable is *velocity*, not
@@ -255,7 +273,7 @@ partial fix and is labelled as one in the code.
 
 A real fix needs a baseline that tracks slowly rather than being sampled once,
 or a transient detector that restarts calibration. Neither is in v3, and neither
-is in v4 or v5 — they inherit this fix unchanged. `research.md` item 6 is the
+is in v4 or v5 — they inherit this fix unchanged. `CLAUDE.md` § *Why the calibration window is 20 s* is the
 work.
 
 ---
@@ -283,7 +301,7 @@ rail on ch_i  →  ch_i held at bias, ch_j≠i keep damping
 global FAULT  →  only when fewer than MIN_HEALTHY_CHANNELS (= 1) remain
 ```
 
-A quorum of one is not a guess. `provenance.md` §3 measured a single OSEM/coil
+A quorum of one is not a guess. The source report measured a single OSEM/coil
 pair damping the whole rigid body (≈70 s, against ≈17 s for four), and every
 version runs four **independent SISO loops** — OSEM *i* drives coil *i* and
 reads nothing else — so ch0 does not need ch2's sensor to compute ch0's output.
@@ -374,8 +392,8 @@ bench* below and README § *Known open problem*.
 
 This is also the `auto-disable` block drawn in the original report's
 safety-checks diagram and never implemented in v0–v3 — v4 is the first version
-to build it (`provenance.md`, *What the report does NOT contain*, and
-`research.md` § *Deliberately cut*, where it was ruled out before it was built).
+to build it (`CLAUDE.md` § *Two things the source report shows that were never
+implemented*; it was ruled out before it was built).
 
 ---
 
@@ -490,7 +508,7 @@ v5 with `N = 8` and the full `DAC_CHANNELS = [1,3,5,7,0,2,4,6]`. **Not a new run
 of the ladder** — same control law, constants, `FIXES` and state machine.
 
 All eight OSEMs are on **one rigid body**, so nothing about the safety semantics
-needed rethinking: `provenance.md` §3 (one pair damps the whole mass) still
+needed rethinking: one pair damping the whole mass still
 justifies a quorum of one, a global `FAULT` is still right because there is one
 optic, and one lock claim still covers the rig. Going from 4 to 8 was a config
 change rather than a rewrite only because v5 keeps channel state in arrays —
@@ -577,7 +595,7 @@ It matters more than it sounds: at 24 Hz the sample-counted
 essentially stops tripping, and the actuator updates 4x less often. Twenty of the
 suite's checks invert under it. `harness.py` therefore pins `ack_drain = 0` in
 `BASE_PLANT` — the suite characterises the control law, not the transport — while
-`make sim` and `make test` run at the honest default so what you watch is the
+`make test` runs at the honest default so what you watch is the
 loop the hardware actually has.
 
 The plant, though, is modelled: a linear second-order oscillator per axis, with
@@ -592,7 +610,7 @@ reached long before the bottom one, ch2 first. So:
   turns −0.040 into instability on the real suspension is not in these
   equations. **The sim cannot tell you a safe gain.**
 - `COIL_GAIN = [1.00, 0.76, -4.15, 0.86]` — per-channel loop sign and magnitude,
-  **inferred** from `provenance.md` Table 1 by subtracting the intrinsic decay
+  **inferred** from the per-channel decay fits by subtracting the intrinsic decay
   `ω₀/2Q` from each fitted rate and dividing by that channel's |K|. The report
   characterises no actuator, and the fits behind it have R² = 0.65–0.92, so one
   significant figure is the honest precision. It is in there because assuming
@@ -782,7 +800,7 @@ time since the rewiring, and settled three open questions at once:
   ever been driven before.
 - **ch2's `+0.010` is confirmed on hardware.** It ran positive while the others
   sat at `-0.030` and came out the *best-damping* channel of the four, ratio
-  0.01–0.03 against ch0's 0.08 — exactly what `provenance.md` Table 1 predicted,
+  0.01–0.03 against ch0's 0.08 — exactly what the per-channel decay fits predicted,
   and the fact the deleted modal v4 failed to rediscover automatically.
 - **Four channels lock faster than one**: 11.4 s against 14.7 s on the same rig
   twenty minutes earlier.
@@ -1235,12 +1253,19 @@ reference is the *enabled* set rather than a global one.
 
 ### Still open
 
-1. **Realign a4, a6 and a7.** They are connected and reading; their flags sit
+1. ~~**Realign a4, a6 and a7.** They are connected and reading; their flags sit
    outside the partial shadow, so they modulate with nothing (0.1–9% of power in
    band, lock-in SNR 1.1–1.5). `baseline-floor` keeps them from taking the rig
    down, but only a screwdriver makes them useful. a5 is the same problem one
    step less severe — at ~1/12 gain it damps, but it also holds the rig out of
-   `LOCKED` at ratio 0.45.
+   `LOCKED` at ratio 0.45.~~
+   **SUPERSEDED twice.** The "flags outside the partial shadow" premise was
+   refuted on 2026-08-06 by the resting counts (§ *Resting counts, 2026-08-06*),
+   and the whole item was superseded on **2026-08-17**: a4 grades GOOD at SNR
+   107.2 and is the **strongest** channel on the rig; a5 reads a hard 0.0 counts
+   with variance exactly zero; a6/a7 are **bottom-railed** and are **vertical**
+   sensors, so an in-band grade was never the right test for them. See
+   § *On the bench, 2026-08-17*, and `CLAUDE.md` § *Hardware requests*.
 2. **`soft-saturation` and `baseline-floor` have no simulator coverage.** Both
    are declared only by v10 and v11, which are eight-channel and therefore
    skipped, so the suite now only asserts the *un-fixed* side of them on
@@ -1354,10 +1379,13 @@ invisible to the interlocks and shows up only as a corrupted velocity estimate a
 exactly the moment the loop is pushing hardest. ch2 is worst, as it has been
 since 08-03. This is the sensor-range problem in README § 5, not a v12 defect.
 
-### v12 has never announced `LOCKED`, and neither did v10 or v11
+### v12 never announced `LOCKED`, and neither did v10 or v11
 
 The one that matters, because README § 4 says the lock time is the deliverable.
 Zero `*** LOCKED ***` lines in **every** run of the 2026-08-06 session.
+
+**Fixed by 2026-08-18**: `eta` printed it, DEGRADED, 4/7 healthy, 20.7 s after gain
+(§ *On the bench, 2026-08-18*). The diagnosis below is what got there.
 
 The cause is the lock quorum, not the damping. `self.locked[live].all()` where
 `live = enabled & healthy`, and `ENABLE_CHANNEL` is `True` on all eight. a4, a6
@@ -1389,7 +1417,23 @@ What is established is that a4/a6/a7 have very low in-band gain and only show
 suspension motion on a hard kick (confirmed on an oscilloscope 08-06); *why*
 is not established, and the resting points argue against gross misalignment.
 
-### MIMO is closed, by measurement
+**Superseded 2026-08-17.** a4 is now the strongest channel on the rig and a5/a6/a7
+have moved from mid-scale to the **bottom** rail (0.0 / 4.3–7.4 / 8.8–13.2
+counts). The eight-channel comparison table is in
+§ *On the bench, 2026-08-17* § 4.
+
+### MIMO is closed, by measurement — SUPERSEDED on the sensor side, 2026-08-17
+
+**Read this first.** Every measurement below stands for the data it was taken on,
+and the reasoning was correct for that data. What changed on **2026-08-17** is
+that **a1 grades GOOD** (SNR 68.2 / 48.3 / 54.0) and **five** sensors carry all
+three modes, so Φ need not come out square and the sensor-side blocker is
+cleared — while **the Φ gate has still never run on a valid record and A is
+unmeasured**. Full numbers in § *On the bench, 2026-08-17*; the priority queue is
+`CLAUDE.md`. Two further corrections: **square was never a property of the
+geometry**, only of having determined three rows (the reported layout predicts a
+non-empty null space), and **the 8-coil matrix below was measured at frequencies
+that have since moved**, so its phases are wrong by up to 84°.
 
 Recorded here so it is not re-attempted. A full fixed-frequency refit of the
 8-coil dither run (`analysis/mimo_design.md`, `analysis/refit_fixed.py`):
@@ -1448,8 +1492,19 @@ session, not a hardware change.
    `osem.v6.py` and `osem.v13.py` are skipped, both by `KIND`. `sample-guard`,
    `decimate` and all five `persist-baseline` assertions pass.
    **v3, v7, v9 and v10 are clean.** All 11 failures are on v11 (3) and v12 (8).
-7. **a4, a6, a7.** Connected, near mid-scale, ~1/100 the in-band gain of a0–a3.
-   Cause not established.
+7. ~~**a4, a6, a7.** Connected, near mid-scale, ~1/100 the in-band gain of
+   a0–a3. Cause not established.~~ **SUPERSEDED 2026-08-17.** a4 is the strongest
+   channel on the rig (SNR 107.2 / 75.1 / 94.0, grade GOOD); a6/a7 are
+   bottom-railed and are *vertical* sensors. Part of the historical deficit may be
+   a frequency-error artefact — re-analysing one 2026-08-17 record at stale vs.
+   corrected frequencies moves a0's mode-C SNR 12.1 → 50.5, a factor 4.2 — but the
+   08-06 record has **not** been re-analysed, so that is a hypothesis.
+   § *On the bench, 2026-08-17* § 4.
+8. **The mode frequencies used everywhere in this file are stale.** They moved
+   between 2026-08-06 and 2026-08-17 by up to 0.0170 Hz, i.e. 9.1 half-widths at
+   Q = 433. `F_MODE_HZ` in `epsilon` and `zeta` needs updating and `zeta` will
+   refuse a Φ measured today until it is. Highest-value open item;
+   § *On the bench, 2026-08-17* § 2.
 
 ---
 
@@ -1479,12 +1534,13 @@ because both were invisible:
    `VERSION_TAG, BENCH_STATUS = "vN", "status"` tuple form so a file that is
    never loaded can still report its own status.
 
-`_run_as_v12` does `v12.Controller = Controller` — it **mutates the v12 module**.
-That is fine for a skeleton driven deliberately and is not the shipping form:
-this repo's rule is that every controller is standalone, because `bench.py`
-prints the gain vectors out of the file that is about to run, and a controller
-importing its body from another file defeats exactly that check. **Flatten it
-before treating it as a version.**
+`_run_as_v12` does `v12.Controller = Controller` — it **mutates the imported
+module**. That was against the standalone rule as it then stood, because `bench.py`
+prints the gain vectors out of the file about to run and a controller importing its
+body from another file defeats that check. **SUPERSEDED 2026-08-17:** the standalone
+rule was dropped for `stdlib.py`, and `bench.py` now handles the case explicitly —
+`KIND = "skeleton"` plus `GAIN_SOURCE`, so it names the module the law came from.
+Mutating an imported module is still the wrong shape; importing from one is not.
 
 ### What the lag change cost, measured
 
@@ -1521,3 +1577,1063 @@ eight-OSEM body (2), `warm-restart` (2) and baseline-reuse (1). v11 fails three
 of the same family. **None of them has been attributed to a specific commit**,
 because v12 has never been committed and there is no baseline to diff against.
 Do that before trusting any of them.
+
+---
+
+## On the bench, 2026-08-17 (afternoon) — `status.py` only, no loop closed
+
+The afternoon session was the census tool. **No controller ran and no gain was
+applied.** The evening session closed a modal loop and is written up separately
+below. Records in `data/`:
+
+| record | samples | length | rate | verdict |
+|---|---|---|---|---|
+| `20260817_172150_status_sensors.csv` | 37 619 | 90 s | 418 Hz | **CLEAN.** The sensor census and the frequency re-measurement |
+| `20260817_174825_status_phi.csv` | 96 883 | 229 s | 424 Hz | **DISTURBED** — the table was being physically worked on. Useless as a quiet record, and the definitive a5/a6/a7 evidence |
+| `20260817_175912_status_sensors.csv` | 26 092 | 60 s | 435 Hz | **CLEAN.** The a5/a6/a7 retest after a physical check |
+| `20260817_171104_status_coils.csv` | — | partial | — | coils 0–1 only, driven at the **stale** frequencies. **Do not build an actuation matrix from it** |
+
+### 1. The board changed, and it runs at 115200 baud
+
+**The attached board is not the board this repo was written against.** It is an
+official **Arduino Mega 2560 R3** — `/dev/cu.usbmodem11101`, USB VID:PID
+**2341:0042**, manufacturer string `Arduino (www.arduino.cc)`, and the only USB
+device on the machine with a vendor ID. The port recorded throughout this repo,
+`/dev/cu.usbserial-1120`, is a CH340/FTDI-bridge name: **a different physical
+board**, a clone.
+
+**It runs at 115200 baud, not the 500000 that `pyDAC.BAUD`, `pyDAC2.BAUD` and
+`arduino.ino`'s `BAUD_HZ` all declare.** Measured: at 500000 the wire returns
+framing garbage (`b'\x80\x80xx\x00x\x00x\x00x\x80xx\x00\x80x'`); at 115200 it
+returns a clean `b'READY\r\n'`. `arduino.ino` carries a `BAUD` command precisely
+so the rate can be changed without a reflash, so **the live rate is a property of
+what was last done to that board and nothing in this tree can tell you what it
+is.**
+
+Achieved rate at 115200 with 8 ASCII channels: **418–435 Hz** across the six
+records. For comparison, 1024–1113 Hz was measured at 500000 on 2026-08-06 (v11
+and v12, four runs) and ~348 Hz at 115200 on 08-03/04 — on the other board. Why
+the same baud gives 418–435 Hz now and 348 Hz then is **not established**.
+
+420 Hz is fine: 4.2x the 100 Hz control clock, and inside the range `delta`'s
+`decimate` was validated at (347 Hz).
+
+**Why this cost hours, and it is the part worth keeping.**
+`pyDAC2.FastDAC.__init__` sleeps 2 s and then scans up to 200 lines for `READY`
+with a 2.0 s serial timeout. At the wrong baud that is up to **400 s of total
+silence with nothing printed**, which is indistinguishable from a hung program.
+The fix is a standing practice, now in `CLAUDE.md`: **probe the baud, never assume
+it.** `status.py` has `probe_baud`.
+
+### 2. The mode frequencies moved
+
+**The highest-value finding of the session.** Re-measured from
+`20260817_172150_status_sensors.csv`, consensus over the five sensors above SNR 8
+(a0–a4), inter-sensor spread **0.0005 Hz**:
+
+| mode | 2026-08-06 | 2026-08-17 | shift | half-widths at Q = 433 | on-peak response left |
+|---|---|---|---|---|---|
+| A | 0.7154396674928515 | **0.72294** | **+0.00750** | 9.1 | 11 % |
+| B | 0.9949288053475371 | **0.99193** | **−0.00300** | 2.6 | 36 % |
+| C | 1.6395739504316790 | **1.65657** | **+0.01700** | 9.0 | 11 % |
+
+Half-width is f/(2Q) at Q's measured 1σ floor of **433** (`analysis/ringdown.md`).
+A drive at the old frequency reaches 1/√(1+n²) of the on-peak response at n
+half-widths — the last column — **and its phase is wrong by arctan(n), up to
+84°**. Phase is half of what an actuation matrix exists to produce. This is a
+milder instance of the exact defect that invalidated `gains.json`, which was
+59–68 half-widths off.
+
+**Consequence.** `F_MODE_HZ = np.array([0.7155, 0.9949, 1.6396])` at
+`osem.epsilon.py:163` and `osem.zeta.py:211` is **stale**. `epsilon`'s Kalman
+filter models three undamped oscillators at those frequencies. `zeta` validates a
+loaded `modal.json`'s frequencies against `F_MODE_HZ` to 0.005 Hz, so it will
+**correctly refuse any Φ measured today** until the array is updated. The
+2026-08-06 8-coil actuation matrix (717 420 samples, 880 Hz) was measured at those
+frequencies too, so its magnitudes are attenuated and its phases are wrong: **A is
+effectively a hole again.**
+
+**The day-to-day stability of these frequencies is NOT established.** One 11-day
+interval is all the evidence there is, and it is not enough to state a drift rate.
+
+**Why nobody saw it earlier.** § *Frequencies* in `analysis/ringdown.md` records
+"same frequencies on all three days, 2026-08-03 / 04 / 06, to within one zero-pad
+bin" — and that bin is **0.0139 Hz**. It cannot resolve a 0.0030 or 0.0075 Hz
+shift at all; only mode C's +0.0170 Hz would have exceeded it. The stability check
+was real and too coarse.
+
+**New standing practice:** re-measure the mode frequencies at the *start* of every
+session, before driving anything. `osem.epsilon.py`'s docstring already asked for
+this; **2026-08-17 was the first time anybody did it.**
+
+### 3. Off-resonance drive makes the anti-phase unwind PUMP
+
+`status.py`'s active pass reverses each drive with an anti-phase segment on a
+shared time origin. Driven at the stale frequencies **that stopped cancelling and
+started adding energy.** From the aborted coil pass
+(`20260817_171104_status_coils.csv`):
+
+- residual grew **0.1883 → 0.2774 → 0.4218 V** against a **0.2590 V** drive peak;
+- a later point reached **0.3321 V** residual against a **0.1067 V** peak —
+  ringing at **3.1x** the drive.
+
+**Mechanism.** 0.010–0.017 Hz of frequency error accumulates 2π·Δf·T of phase over
+a 60 s drive-plus-unwind: **216–367°**. Past anti-phase the "unwind" is
+re-driving. So a stale frequency does not merely attenuate the measurement — it
+leaves the optic **ringing into the next point** and contaminates it. The coil pass
+was aborted after **2 of 8** coils for this reason, which is why there is no
+actuation matrix from this session.
+
+### 4. The sensor census
+
+Measured at the **corrected** frequencies, `20260817_172150_status_sensors.csv`.
+`status.py`'s grades: **GOOD** = all three modes above SNR 8 with headroom and
+mechanical coherence; **OK** = damps but cannot carry a Φ row; **DEAD** = railed,
+flat, blind, or reading another channel.
+
+| ch | grade | resting counts | SNR A / B / C | coupling | note |
+|---|---|---|---|---|---|
+| a0 | GOOD | 699.2 | 66.1 / 72.0 / 50.5 | MECHANICAL | |
+| a1 | GOOD | 585.4 | 68.2 / 48.3 / 54.0 | MECHANICAL | the channel that closed MIMO |
+| a2 | OK | 637.5 | 79.1 / 87.4 / 70.0 | AMBIGUOUS | § 6 |
+| a3 | GOOD | 630.1 | 90.6 / 63.1 / 79.6 | MECHANICAL | |
+| a4 | GOOD | 482.6 | 107.2 / 75.1 / 94.0 | MECHANICAL | **strongest channel on the rig** |
+| a5 | DEAD | 0.0 | 0.0 / 0.0 / 0.0 | BLIND | std **exactly** 0.00 over 96 883 samples |
+| a6 | DEAD | 7.4 | 3.8 / 3.3 / 2.0 | BLIND | bottom-railed 89 % of record |
+| a7 | DEAD | 13.2 | 3.7 / 4.4 / 2.9 | BLIND | bottom-railed 69 % of record |
+
+**This refutes a standing claim in this file.** § *v12* and § *Still open* ask why
+a4, a6 and a7 have ~1/100 the in-band gain of a0–a3. **a4 is now the strongest
+channel on the rig** at SNR 107.2 on mode A, where on 2026-08-06 it read
+**3.0 / 28.9 / 10.1**. Whatever was wrong is not wrong now.
+
+**Part of the historical deficit may be a frequency-error artefact — hypothesis,
+with evidence, not a result.** Re-analysing the *same* 2026-08-17 record at stale
+vs. corrected frequencies moves a0's mode-C SNR from **12.1 to 50.5**, a factor
+**4.2**, and every 2026-08-06 number was computed at the stale frequencies. **The
+08-06 record has not been re-analysed at corrected frequencies**, so this is not
+settled. Doing that re-analysis is offline work and costs no bench time.
+
+Resting counts, 2026-08-06 → 2026-08-17, against mid-scale 511.5,
+`RAIL_LOW = 12`, `RAIL_GUARD_LOW = 60`:
+
+| record | ch0 | ch1 | ch2 | ch3 | ch4 | ch5 | ch6 | ch7 |
+|---|---|---|---|---|---|---|---|---|
+| 08-06 `CALIBRATING` | 601.2 | 630.3 | 686.5 | 681.8 | 567.5 | 554.8 | 860.6 | 734.7 |
+| 08-17 `172150` | 699.2 | 585.4 | 637.5 | 630.1 | 482.6 | **0.0** | **7.4** | **13.2** |
+| 08-17 `175912` | 680.3 | 585.4 | 636.2 | 699.6 | 558.6 | **0.0** | **4.3** | **8.8** |
+
+a0–a4 still all rest above mid-scale and clip the **top** rail first, unchanged
+since 08-03 — but **a5/a6/a7 went from mid-scale or above to the bottom rail.**
+The offset moved for exactly the three channels that stopped working and for none
+of the five that did not; no cause is asserted. Note also that **ch3 moved
++69.5 counts and ch4 +76.0 between two clean records 37 minutes apart**, so the
+resting points drift within a session, not just between them.
+
+### 5. a5/a6/a7 are a signal-path failure, not a motion or alignment failure
+
+Tested directly, and the test is decisive. During `20260817_174825_status_phi.csv`
+the table was being physically worked on — which makes the record worthless for
+what it was taken for and ideal for asking "does this sensor see anything at
+all". Per-channel motion over the record and over its loudest 5 s window:
+
+| ch | whole-record std | whole-record p2p | loudest-5 s p2p | share of a0–a4 p2p |
+|---|---|---|---|---|
+| a0 | 70.68 | 854 | 738 | 85.02 % |
+| a1 | 48.40 | 523 | 388 | 44.70 % |
+| a2 | 75.00 | 765 | 658 | 75.81 % |
+| a3 | 90.18 | 871 | **868** | 100.00 % |
+| a4 | 69.26 | 711 | 661 | 76.15 % |
+| a5 | **0.00** | **0** | **0** | 0.00 % |
+| a6 | 0.78 | 32 | 6 | 0.69 % |
+| a7 | 0.89 | 75 | 6 | 0.69 % |
+
+a0–a4 moved **868 counts peak-to-peak** in the loudest 5 s — **85 % of the full
+1023-count ADC range**. In that same window a5 moved **exactly 0** and a6/a7 moved
+**6**. "There was no motion" cannot explain it: five sensors on the same optic
+registered near-full-scale motion at the same instant.
+
+**a5's std of exactly 0.00 over 96 883 samples is the clincher.** A live ADC input
+always carries at least ±1 count of dither, so that line reads as **hard ground**.
+
+**a6/a7 are railed, and a rail is not a measurement.** Clipping is nonlinear: it
+folds signal into harmonics and biases the lock-in, so even the 6 counts they show
+cannot be trusted.
+
+**The retest, after the rig was physically checked** —
+`20260817_175912_status_sensors.csv`, 26 092 samples, 60 s, 435 Hz, clean.
+
+a5 is **unchanged**: over 26 092 samples it takes exactly **one distinct value,
+0.0**, variance exactly **0.000000e+00 counts²**. Confirmed now on two independent
+records and across a physical check.
+
+a6/a7 are **bottom-railed on 100 % of samples**, past `RAIL_LOW = 12`, resting 4.3
+and 8.8 counts at std 0.56 and 0.48 — sub-LSB. Per-band share of 0.05–60 Hz power,
+with a0 and a4 for contrast:
+
+| ch | resting | std | DC–0.5 | 0.6–1.8 | 1.8–3 | 3–6 | 6.19 line | 6.5–10 | 10–20 | 20–60 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| a0 | 680.3 | 54.41 | 1.8 | **92.1** | 4.3 | 0.6 | 0.0 | 0.1 | 0.2 | 0.7 |
+| a4 | 558.6 | 49.37 | 0.4 | **98.5** | 0.6 | 0.1 | 0.0 | 0.0 | 0.0 | 0.1 |
+| a6 | 4.3 | 0.56 | 12.7 | 7.6 | 1.7 | 5.3 | 1.1 | 6.4 | 13.7 | **51.8** |
+| a7 | 8.8 | 0.48 | 11.4 | 10.9 | 2.4 | 5.6 | 1.0 | 7.9 | 16.5 | **44.0** |
+
+- **a6/a7's high-frequency power is bandwidth, not signal.** 20–60 Hz is 67 % of
+  the analysed band, 10–20 Hz 17 %, 6.5–10 Hz 6 %, and their measured shares track
+  those almost exactly. White noise — the ADC's own dither on a pinned line.
+- **No 6.19 Hz line in them on this record**: 1.0–1.1 % of power in a band that is
+  1 % of the bandwidth. So this record does **not** support the hypothesis that
+  6.19 Hz is the vertical resonance (§ 8) — **and cannot refute it either, because
+  a railed sensor cannot show its resonance.**
+- **One encouraging number:** a6/a7 put **7.6 %** and **10.9 %** of their power in
+  the 0.6–1.8 Hz pendulum band against a **2 %** bandwidth share — a **4–5x
+  excess**, consistent with **wired but biased onto the floor** rather than
+  disconnected. Actionable: fix the DC operating point and re-test. a5 has no
+  excess anywhere, because it has no variance at all.
+- a0–a4 put **92.1–98.5 %** in the pendulum band, which is what a working in-band
+  sensor looks like on this rig.
+
+Per this repo's software-only rule, this is written up as a request rather than
+attempted: `CLAUDE.md` § *Hardware requests*, REQUEST 1.
+
+### 6. a2 is mechanically sound; its problem is a shared 6.19 Hz line
+
+a2 grades **OK** not because it is blind but because its in-band/out-of-band
+coherence contrast is **1.9x**. Breaking that down:
+
+- a2's **mode-band** coherence with a0/a1/a3 is **0.577–0.667** — healthy.
+- At the **6.19 Hz** line, a2–a0 = **0.335** and a2–a1 = **0.326**, against a bias
+  floor of 1/K = **0.125**.
+
+So a2 watches the optic **and** shares an electrical line with a0 and a1. A
+different and milder fault than being blind. The 6.19 Hz line is already on record
+in this repo as a known narrow feature (`analysis/kalman.md`).
+
+### 7. MIMO: the sensor-side blocker is cleared, and nothing else is
+
+Five sensors (a0–a4) carry all three modes at SNR **48–107**. Three modes need
+**≥ 4** determined rows for a tall Φ, so the sensor-side condition
+§ *MIMO is closed, by measurement* named for reopening modal control **is met** —
+counted conservatively, exactly: four grade GOOD and a2 grades OK. It does **not**
+depend on a5/a6/a7; those were never going to carry a row.
+
+**Not established as of the afternoon — BOTH SUPERSEDED the same evening,
+2026-08-17:**
+
+- ~~**The Φ gate has never run on a valid record.**~~ It needs **≥ 192 s
+  undisturbed** — 6 averaging windows of `PHI_WINDOW_S = 32 s` for the jackknife.
+  The 90 s clean record gives **2** windows and `status.py` correctly **refused** to
+  produce an answer; the 229 s record is disturbed. **SUPERSEDED: Φ measured at
+  18:20 on a 300 s passive record, 4×3, rank 3, null space 1.**
+- ~~**A is unmeasured.**~~ The coil pass aborted at 2 of 8 coils, at stale
+  frequencies (§ 3). **SUPERSEDED: A measured at 18:27 over coils 0–3, rank 3 of
+  3** — with its phase contaminated, which is a live caveat and not a supersession.
+
+So *"the sensor-side blocker is cleared"* was true, and ***"MIMO works" was not
+established as of the afternoon.*** **It was measured the same evening: modal damps
+5x faster than diagonal.**
+
+**On the old closure.** Everything in § *MIMO is closed, by measurement* was
+correct for the data it had, including the square-Φ argument and the out-of-mode
+residual — **measured on hardware 2026-08-07 as 7.4e-16 over 137 528 damping
+samples**. What has changed is that a1 now grades GOOD. And **square was never a
+property of the geometry** (§ 8): it was a consequence of only ever determining
+three rows.
+
+**One thing to be careful about.** `CLAUDE.md` opened with "MIMO IS CLOSED. DO NOT
+TOUCH IT." until 2026-08-17. That instruction now contradicts a shipping
+controller — `osem.zeta.py`, written 2026-08-15, which implements the modal law
+and refuses safely when its measured inputs are absent or stale — and a session
+following it literally would **delete** that file. `CLAUDE.md` has been rewritten
+to keep the closure as history and state what changed.
+
+### 8. The sensor geometry — reported, not measured
+
+Stated by the person who built the rig, 2026-08-17, and **recorded as reported
+design intent rather than a measurement**, because this repo has been burned twice
+by unmeasured statements that read as facts:
+
+| | where |
+|---|---|
+| a0–a3 | the four **in-plane (XY)** sensors, at the four **corners** |
+| a4, a5 | the two **side** sensors, one either side |
+| a6, a7 | **VERTICAL** |
+
+**Which sensor sits at which corner is not established** — illustrative
+coordinates were offered and withdrawn as "just a vibe". Also reported: a6/a7 are
+vertical-motion sensors "capable of correcting up to ~10 Hz by design, because the
+element is a steel bar with some spring-damping property". Reported, not measured;
+**no vertical mode frequency has ever been measured on this rig.**
+
+Three consequences.
+
+1. **Four corner sensors span three DOF with one direction left over.** Four
+   sensors at the corners of a square give a sum, two differences and one **warp**
+   combination that no rigid-body motion of the optic can produce. **The
+   permutation does not matter** — permuting corners permutes columns and changes
+   no rank — so the layout *itself* predicts Φ is 4×3 (5×3 with a4), rank 3, with
+   a genuine null space, and that leftover direction **is** the out-of-mode
+   residual. **A prediction the Φ gate can check, not a result.**
+2. **The census tests every sensor against the horizontal modes**, i.e. lock-in
+   SNR at 0.72 / 0.99 / 1.66 Hz plus coherence with a0–a3 in 0.6–1.8 Hz. **A
+   sensor watching an orthogonal DOF grades DEAD by construction**, however
+   healthy. So a6/a7's DEAD grade is evidence about their DC operating point and
+   **not** about their health as vertical sensors. This is a real methodological
+   defect in the tool, in the same family as "a4–a7 are not wired" and "the flags
+   are misaligned". Fixing it needs a vertical band, and the vertical frequencies
+   are not measured.
+3. **The 6.19 Hz line becomes a candidate for the vertical resonance.**
+   Hypothesis, with a test: ring the vertical mode and see whether *unrailed*
+   a6/a7 respond at 6.19 Hz. Counter-evidence in § 5, which is not a refutation.
+
+### 9. Defects found in `status.py`, all fixed except the last
+
+Recorded because each was caught by a specific measurement and would otherwise
+recur.
+
+1. **`mimo_gate`'s σ on Φ was optimistic by √n_coils = 2.83** — it used
+   `sqrt(sum sigma^2)/ncoils`. It declared a sensor row "determined at 4.1σ" that
+   had been **planted at exactly zero** in a synthetic test. A row determined by
+   nothing but its own noise is exactly how MIMO gets reopened on a sensor that
+   cannot see. Fixed by propagating properly:
+   `var(phi_i) = sum_j sigma_ij^2 * |a_j|^2`.
+2. **a6 graded OK on a marginal SNR of 4.6** at mode B while its in-band coherence
+   with every sensor on the optic sat at the bias floor. The coherence test now
+   outranks the lock-in for that case.
+3. **The "where is this mode actually" fine scan was ±0.010 Hz.** On a 90 s record
+   that is under one resolution element (1/T = 0.011 Hz), **and mode C's peak
+   landed exactly on the upper edge** — so the scan railed and under-reported C's
+   drift by nearly 2x: reported **+0.0100**, true **+0.0170**. Widened to
+   ±0.05 Hz, and hitting the edge is now reported. General lesson: **a peak at the
+   edge of its search window is not a peak that has been found.**
+4. **The census lock-in was evaluated at the stale frequency**, understating every
+   SNR — a0's mode C read **12.1** instead of **50.5**. Now evaluated at the
+   measured peak.
+5. **A per-coil "independent fraction"** measured as the residual against the span
+   of all *other* coils is **identically zero whenever there are more coils than
+   modes**, because the response has exactly `MODES_N` degrees of freedom. It
+   looks like a strong statement and is arithmetic. Replaced by pairwise cosine
+   plus leave-one-out conditioning.
+6. **`status.py`'s `PORT` carried the comment "bench.py's autodetect overrides
+   this", which was false** — `bench.py` launches controllers and never sees
+   `status.py`, so the tool was pinned to whatever tty the board enumerated as on
+   one particular day. It now reuses `bench.choose_port`.
+7. **Python block-buffers stdout when it is not a terminal**, so every print was
+   invisible in 8 kB chunks the moment output was piped or captured — which is how
+   a bench log gets kept. Fixed with line buffering.
+8. **The acquisition loop printed nothing while running**, so a dead stream and a
+   healthy one looked identical for 60 s — and would for 36 min on the coil pass.
+   **Three header-only recordings were made before anyone could tell.** Now prints
+   a live rate-and-counts line every 5 s, plus a 2 s stream preflight before any
+   coil is touched.
+9. **STILL OPEN: a plain `SIGTERM` (`pkill`) skips `status.py`'s `finally`**, so
+   the coils are left at whatever voltage the drive last set. **This happened on
+   2026-08-17** when the coil pass was stopped, and the coils had to be parked by
+   hand afterwards.
+
+### 10. Two control-design points worth keeping
+
+- ~~**Colocation cuts the cost of measuring A by 3x.**~~ **SUPERSEDED 2026-08-17
+  (evening): colocation does not hold on this rig.** The claim was that each OSEM's
+  coil and sensor are colocated, so `A[m,j] = lambda_j * Phi[j,m]` — 8 unknowns
+  rather than 24, mostly signs, and 12 min of bench time instead of 36. It is the
+  wrong identity: the rig owner states **four coils point the same way, two are
+  diametrically opposed, three different planes**, and two measurements agree — two
+  independent coil passes gave λ signs `(+,+,+,+)` vs `(+,-,-,+)`, and a
+  colocation-constrained rank-1 fit came out **second/first singular value 0.67**
+  where colocation predicts ~0. A must be measured over every coil used, at all
+  three modes. `zeta`/`eta`'s colocation sign check is therefore gating on an
+  identity that does not hold, which is why it refused a clean coil pass.
+- **Reordering a matrix is a no-op.** A permutation matrix is orthogonal, so
+  permuting rows or columns leaves **rank, condition number and achievable modal
+  force identically unchanged**; it only relabels which coil is which. Recorded
+  because it was proposed as an alternative to measuring A and cannot be one.
+  Choosing a **subset** of coils (pivoted QR / subset selection) is a real
+  technique but still requires knowing A. **Rank reduction** is also real and
+  `osem.zeta.py` does **not** do it: `Modal.allocate` refuses the entire mask when
+  `cond > MODAL_COND_MAX = 12` and drops the whole loop back to diagonal, where
+  truncating the smallest singular value would still damp the two well-conditioned
+  modes modally. **Open improvement.** *(Done since this was written: both `zeta`
+  and `eta` truncate in `Modal._build_tables` — `keep = sum(sv >= sv[0]/12)` — and
+  refuse only the directions that are actually unreachable.)*
+
+---
+
+## On the bench, 2026-08-17 (evening) — `zeta` closes a modal loop, and it wins
+
+**The first modal run in this repo's history, and the first result that is not four
+independent SISO loops.** `zeta` only; `eta` first ran the following night
+(§ *On the bench, 2026-08-18*). Records are `data/20260817_19*` — five `signtest.py`
+trials, five `jerk.py` sets, and the coil pass at 19:47.
+
+### 1. Modal damping beats diagonal by 5x, measured as a decay rate
+
+Two runs, same session, same rig, one law swapped, three hand kicks each (`jerk.py`
+asks out loud; a human shoves the table), decay fitted to the envelope after each
+kick.
+
+| law | peak ratios | decay 1/s | median | re-quiet | r² |
+|---|---|---|---|---|---|
+| **modal** | 3.96–4.70 | 0.0600 / 0.1393 / 0.1940 | **0.1393** | 5.3 s | 0.79–0.90 |
+| diagonal | 3.66–4.44 | 0.0184 / 0.0278 / 0.0311 | 0.0278 | 17.4 s | 0.53–0.69 |
+
+**The ranges do not overlap: the worst modal kick beats the best diagonal kick by
+2x.** Peaks are matched across the two sets, so the re-quiet times are comparable
+too. Against the plant's intrinsic **0.0072 /s** (τ > 138 s, `analysis/ringdown.md`)
+that is **~4x for diagonal and ~19x for modal**.
+
+**Caveats, and they are not a formality: three kicks per law, one session, ambient
+drifts between the sets, and the two laws ran as blocks rather than interleaved.**
+
+This is the number to quote rather than § 2's 0.08 — a decay rate is a dissipation
+measurement, an amplitude is not.
+
+### 2. The sign sweep, and the colocation check as a complete discriminator
+
+Four per-mode sign patterns of A plus the diagonal control, 70 s each, scored by
+median live-channel `ratio` over t ≥ 30 s (`data/signtest_20260817_192808_*`):
+
+| law | median | p90 | faults | modal % |
+|---|---|---|---|---|
+| **modal +++** | **0.08** | 0.17 | 0 | 97 % |
+| modal +-- | 1.35 | 1.55 | 0 | 0 % |
+| modal ++- | 1.51 | 1.94 | 0 | 0 % |
+| modal +-+ | 1.54 | 1.99 | 0 | 0 % |
+| diagonal | 1.58 | 2.01 | 0 | 0 % |
+
+The last three ran at **modal 0 %** because the colocation sign check **refused
+them**, so they are diagonal runs and land on diagonal's number. **On this data that
+check was a complete discriminator of wrong sign patterns**, not the partial one its
+own docstring predicted. It is also a warning: **a refusal is invisible in the
+score** — only the `modal` column distinguishes those trials from a diagonal run.
+
+**0.08 is 12x quieter than the calibration window, and that deserves suspicion.**
+`ratio` is an amplitude, so **holding** the optic and damping it are identical in it.
+§ 1 shows the modal law does dissipate faster; it does **not** establish that the
+static 0.08 is dissipation. **Not excluded.**
+
+### 3. The sign of A is physics
+
+On resonance the response lags the drive by 90°, so with Φ rotated real the whole of
+A sits in the imaginary part with a determined sign:
+`A = -Im(a * conj(rot_phi))`. Verified numerically against this repo's own lock-in —
+an undamped oscillator driven on resonance from rest gives `H = -1.2024i` for
+`Φ·A > 0` and `+1.2024i` for `Φ·A < 0`. `status.py --save-modal` does that.
+
+**The earlier attempt picked the per-mode sign by maximising colocation consistency
+and PUMPED: median ratio 1.5 diagonal → 2.3 modal.** Nothing offline catches it — a
+wrong-signed A is still exactly inverted by the allocator, so the force is right in
+the model and backwards in the plant. The selftest, the gate and the colocation
+check all pass while the loop adds energy.
+
+### 4. Colocation does not hold on this rig, and it is geometry not miswiring
+
+See § *10. Two control-design points*, first bullet, now marked superseded.
+Reported by the rig owner: **four coils point the same way, two are diametrically
+opposed, three different planes.** Measured: two independent coil passes gave λ signs
+`(+,+,+,+)` vs `(+,-,-,+)`; a colocation-constrained rank-1 fit gave second/first
+singular value **0.67** where colocation predicts ~0.
+
+**The `DAC_MAP` "coil j dominates sensor j" heuristic cannot work either** for a
+suspended rigid body — one coil moves the whole optic. Coil 1 gave a0 **+37.2** and
+a1 **+36.1** counts/V, two sensors nearly equal. **Weak evidence, not a wiring
+verdict**, and it is recorded that way because "only the bench catches a wrong coil
+map" is still true and this is the bench check.
+
+### 5. Φ is measured and TALL
+
+**4×3, rows a0–a3, null space dimension 1, and dropping any single row still leaves
+rank 3.** `data/20260817_182021_status_phi.csv`, 113 412 samples, 300 s, ambient,
+nothing driven.
+
+The rows being exactly the four **in-plane corner sensors** matches the geometric
+prediction: four corners span three rigid-body DOF plus one **warp** direction that
+no rigid-body motion produces, and **the warp is the out-of-mode residual.**
+
+### 6. A is measured, and its phase is contaminated
+
+Coils 0–3, modal matrix **rank 3 of 3**, `data/20260817_182701_status_coils.csv`.
+
+**CAVEAT, and it is live:** that pass ran with the defective unwind (§ 7), so
+off-quadrature came out **0.736 / 2.088 / 0.812** where resonance wants small —
+**A's phase is contaminated.** The sign survives; the magnitudes within each row do
+not, and the 5x rests on them.
+
+**A's SIGNS were settled on 2026-08-18** — 12 of 12 across three determinations that
+share no estimator — and its **magnitudes were not**. § *On the bench, 2026-08-18*.
+
+A cleaner pass at **19:47** was **REJECTED** by the colocation check on 2 of 4 coils
+(`MODAL_MIN_COILS = 3`), which § 4 now explains as the check being wrong rather than
+the data. **`data/modal.json` currently holds the 18:27 A — the one the 5x was
+measured with.**
+
+### 7. The unwind bug, in two halves, both fixed
+
+`status.py` reversed each drive with an anti-phase segment and **retried** on a
+residual test.
+
+- **The retry had no feedback.** It reissued the same command against a state now
+  near rest, i.e. a fresh excitation. **Residuals grew 0.188 → 0.277 → 0.422 V
+  against a 0.259 V peak.**
+- **The comparison was broken.** `peak` was a lock-in over the **whole ramping
+  drive**, which averages to about half the end-of-drive amplitude, so
+  `resid <= 0.25*peak` was really `<= 0.125*final` and failed points that had
+  cancelled fine.
+
+Both fixed — `UNWIND_EXTRA = 0`, and `peak` measured over the last 8 s of the drive.
+**The next pass ran with ZERO retries.**
+
+### 8. The fault-clear deadlock — the night's worst bug
+
+The runaway breaker **freezes all channels**, and the per-channel amplitude `ratio`
+**stops being recomputed** — but clearing the fault is gated on amplitude coming
+down. Measured: **`ratio = 3.59` identical across every print for 1085 s**, gains
+zero, nothing damping. **One hand kick killed the entire run.**
+
+**Freezing the actuators is the safety action. Freezing the measurement is the bug.**
+
+**Outcome, 2026-08-18: the frozen measurement is fixed and the deadlock is not.**
+`ratio` is now live during FAULT — 1.4–3.8 print to print — and both runs that night
+still faulted on their first hand kick and never cleared, under **both** laws.
+§ *On the bench, 2026-08-18* and `CLAUDE.md` § 1.
+
+`jerk.py` cannot distinguish a frozen `ratio` from one that never comes down — it
+records `nan` after `DECAY_TIMEOUT_S` either way.
+
+### 9. Residual motion, per mode and per axis
+
+Over **28 775 modal damping samples**. Modal velocity rms:
+
+| mode A | mode B | mode C |
+|---|---|---|
+| 0.64 | **2.61** | **3.15** |
+
+**THAT READING IS WITHDRAWN.** It said "B and C are 4–5x worse than A while all three
+run the same gain — the first real argument for a per-mode gain". Two things kill it:
+the run it came from (`data/20260817_201454`) was in **FAULT for 1085 of its 1168 s**
+and holds only **14 s** of damping, and a residual with no open-loop reference cannot
+tell a badly-damped mode from a hard-driven one. Measured against a control
+(`CLAUDE.md` § *Per-mode residual*), **B and C are the modes modal damping wins on** —
+5.9x and 6.7x — and **A** is the one it does not. The rms numbers above stand; the
+inference did not.
+
+Per-sensor residual counts rms:
+
+| a0 | a1 | a2 | a3 | a4 (side) | a6 (vert) | a7 (vert) |
+|---|---|---|---|---|---|---|
+| 86.2 | 57.9 | 96.0 | 92.4 | 43.4 | **61.3** | 32.6 |
+
+a0–a3 are the four rows of Φ. **a4, a6 and a7 have no Φ row, so the DOF they watch
+are unobserved and undamped: a6 carries 61 counts rms that nothing acts on.** The
+vertical mode frequencies have never been measured.
+
+### 10. Actuator saturation — coil 3 clips, and that voids the guarantee
+
+Measured demand about bias on coils 0–3:
+
+| | coil 0 | coil 1 | coil 2 | coil 3 |
+|---|---|---|---|---|
+| rms V | 0.0273 | 0.0328 | 0.0255 | **0.0819** |
+| max V | 0.1863 | 0.2239 | 0.1949 | **0.4229** |
+
+**Coil 3 reached 169 % of the 0.25 V half-window and clipped**, while the modal
+allocation stayed inside its own **0.20 V** cap the whole time — **the derivative
+term is added after the cap.** Once a coil clips the realised force is no longer
+`A_C^+ f` and the dissipation guarantee is void. **The 5x was measured with this
+happening.**
+
+Compare § *Diagonal reallocation* in `CLAUDE.md`, where the term eating the headroom
+was Ki (peak 0.1135 → 0.0056 V). It is now Kd.
+
+### 11. a5 is a disconnected pin; a6/a7 came back with no cause
+
+**a5: exactly one distinct value, 0.0 counts, variance exactly zero, across 236 387
+samples in three records**, while a0–a4 ran std 41–90 counts. A live ADC input
+carries ±1 count of dither. **Now disabled in the controller.**
+
+**a6/a7 were bottom-railed at 4.3 / 8.8 counts (std 0.48–0.56) at 17:59 and read
+591.3 / 566.0 at 18:20. They came back and NO CAUSE IS RECORDED.**
+
+### 12. The mode frequencies are stable on an hours timescale
+
+Re-measured **0.72294 / 0.99193 / 1.65657 Hz** at 17:21 and **confirmed within
+0.001 Hz at 19:50**. So they are stable within a session even though they moved up to
+**0.0170 Hz — 9 half-widths — over the 11 days** from 2026-08-06. One 11-day interval
+is still not enough to state a drift rate.
+
+### 13. The board runs at 115200 baud, not the 500000 this tree declares
+
+`pyDAC2.probe_baud` / `resolve_baud` now probe it for every tool. **At the wrong rate
+both transports scan 200 lines at a 2 s timeout — up to 400 s of silence with nothing
+printed**, which is indistinguishable from a hung program.
+
+### 14. a4, a6 and a7 DO see the optic — this reverses § 4 of the afternoon
+
+**Measured once, on one ambient record, and untested on the bench.** Multiple
+coherence against a0–a3 over 0.6–1.8 Hz, from
+`data/20260817_205211_status_sensors.csv` (113 418 samples, 300 s, 378 Hz, 26
+segments, multiple-coherence bias floor 3/26 = **0.12**), bias-corrected usable
+fraction:
+
+| a0 | a4 (side) | a6 (vert) | a7 (vert) |
+|---|---|---|---|
+| 1.00 | **0.46** | **0.26** | **0.50** |
+
+**Roughly half of a4's and a7's in-band motion is the optic.**
+
+**Why the driven test said otherwise, and it is the important part.** The coil pass
+gave those channels |H| **0.02–0.39 V/V** at SNR **0–6**, which was read as blind
+sensors. It is not: **coils 0–3 barely push the side and vertical DOF**, so a weak
+driven response says the **coils** do not reach those degrees of freedom, not that
+the **sensors** cannot see. This is the same family of error as "a4–a7 are not
+wired" and "the flags are misaligned" — a test that cannot distinguish a broken
+sensor from one pointed where the actuator is not.
+
+`eta` is being given a **per-channel PID on those three, at gain scaled by the
+coherent fraction.** The argument: dissipation is linear in gain while injected
+noise is quadratic, so there is always a gain at which noisy feedback is net
+dissipative, and gain proportional to the coherent fraction is the Wiener-optimal
+weight rather than a fudge. **Untested on the bench.**
+
+### 15. The suite, after the 2026-08-17 deletions
+
+`make check` on the final code: **161 passed / 40 failed in 513 s**, `sysid` skipped.
+
+| | passed | failed |
+|---|---|---|
+| delta | 42 | 8 |
+| epsilon | 37 | 12 |
+| zeta | 41 | 10 |
+| eta | 41 | 10 — **failure set identical to `zeta`'s** |
+
+`delta`'s 8 match what was recorded for v12, so the rename and the deletions cost
+nothing there. `epsilon`'s 12 are the worst on the ladder and it has never been on
+the rig. All of them are **unattributed**: none of these files has been committed,
+so there is no baseline to diff against. Commit, then bisect.
+
+**That table is stale in one row — `delta` has since been deleted — and the suite has
+not been re-run since the deletions or the 2026-08-17/18 `status.py` / `stdlib.py` /
+`jerk.py` work.**
+
+### What this session did NOT establish
+
+Recorded here so the next session does not assume otherwise: **A's phase**;
+**holding vs damping** for the 0.08; **the χ²/dof distribution** on this rig; **the
+vertical mode frequencies**; **why a6/a7 recovered**; **why colocation fails, in
+detail** — that it fails is measured, but no coil→DOF geometry exists to replace it
+with; and **whether feeding back on a4/a6/a7 at coherence-scaled gain helps**, which
+is one ambient record and an argument.
+
+---
+
+## On the bench, 2026-08-18 (00:00–00:30) — `eta`'s first run, A's signs, and two faults
+
+**`eta`'s first time on the rig**, and the first modal loop closed on a **geometric**
+Φ. Two runs: a diagonal null test and a modal run. Records are
+`data/20260818_001819_jerk_eta.log` + `data/20260818_001841_fast_lock.csv` and
+`data/20260818_002207_jerk_eta.log` + `data/20260818_002229_fast_lock.csv`; the coil
+work is `data/20260817_231251_status_coils.csv` and
+`data/20260817_235950_status_coils.csv`.
+
+### 1. A's SIGNS are settled — 12 of 12, three independent determinations
+
+Sign of `A[mode, coil]` over coils 0–3, from static steps at **23:12**, static steps
+at **23:59**, and the **resonant lock-in** on the 23:12 file. All three agree on all
+twelve:
+
+| mode | coil 0 | coil 1 | coil 2 | coil 3 |
+|---|---|---|---|---|
+| A (T1) | −1 | +1 | +1 | +1 |
+| B (Z) | −1 | +1 | −1 | −1 |
+| C (T2) | −1 | −1 | −1 | +1 |
+
+**Why it is stronger than three repeats.** The static and the resonant
+determinations **share no estimator** — a 20 s mean against a lock-in at the mode
+frequency — so they cannot fail the same way. And **a static step is immune to the
+leftover-ring contamination that ruins the driven phase** (§ *The 23:12 coil pass* in
+`CLAUDE.md`), because the ring is zero-mean about the new equilibrium.
+
+**A's MAGNITUDES are NOT settled.** The two DC passes reproduce individual entries
+only to a factor **0.23–1.8**, and the driven pass is off-quadrature **0.624 / 0.749
+/ 1.196** where resonance wants ~0.
+
+`data/modal.json` now holds **geometric Φ** and the driven 23:12 A, `basis:
+"geometric"`, written 00:15:54, accepted by `stdlib.Modal`.
+
+### 2. The multisine is a NEGATIVE RESULT on resonance
+
+`status.py coils --multisine` drives all three modes at once, one point per coil,
+**9.9 min instead of 18**.
+
+| | one-at-a-time | multisine |
+|---|---|---|
+| per-coil phase spread | 73–89° | **31.6 / 36.7 / 7.8°** |
+| signs agreeing with the two DC passes | **12 of 12** | **7 of 12** |
+
+**The reason is structural.** An on-resonance response **ramps**, so it has broad
+1/f² spectral skirts rather than a clean line and the loudest mode leaks into the
+quietest mode's bin. Mode A is strongest (**|H| 8.58**), mode B weakest (**|H|
+3.03**), and **mode B is exactly where the multisine signs go wrong.** The flag
+exists and stays; it is not the right trade on resonance.
+
+### 3. Both runs faulted on their first hand kick — state blocks, measured
+
+| run | file | length | CALIBRATING | DAMPING | FAULT |
+|---|---|---|---|---|---|
+| diagonal | `data/20260818_001841_fast_lock.csv` | 160 s | 0.0–20.0 s | **20.0–40.9 s**, gain 0.0333, median ratio **1.24** | **40.9–159.6 s**, gain 0.0000, median ratio **2.40** |
+| modal | `data/20260818_002229_fast_lock.csv` | 133 s | 0.0–2.0 s | **2.0–38.5 s**, gain 0.0342, median ratio **0.25** | **38.5–133.0 s**, gain 0.0000, median ratio **2.25** |
+
+**The null test confirmed the refusal path and nothing else.** With
+`data/modal.json` moved aside `eta` runs `epsilon`'s diagonal law and **modal never
+engages** — `modal` flag / rank `[('0','0')]` across the whole run, banner
+`[modal] REFUSED -- running DIAGONAL`. **It did not produce a comparable decay set.**
+
+**One partial kick per law, and neither is clean:**
+
+| law | peak | decay 1/s | r² | why partial |
+|---|---|---|---|---|
+| diagonal | 4.67 | **0.0434** | 0.782 | its 16.2 s decay window crosses the fault boundary at 40.9 s |
+| modal | 4.73 | **0.0683** | 0.670 | 9.6 s re-quiet, and the run entered FAULT at 38.5 s |
+
+**Every later "kick" in both runs was fitted to an UNDRIVEN plate** — gains exactly
+0.0000 from the trip to the end — so those fits measure neither control law; one
+comes out at **−0.0053 /s, r² 0.065**.
+
+**WITHDRAWN the same night:** a "median 0.0434 /s over three kicks, 1.6x the
+2026-08-17 diagonal median" was derived here first and is **false**, two of the three
+fits being to an undriven plate. **There is no measured session-to-session scatter of
+the diagonal law.** And 2026-08-18 **neither reproduced nor refuted the 5x** — leave
+§ 1 of the 08-17 evening section standing with its own caveats.
+
+### 4. The runaway breaker trips on a normal hand kick under EITHER law
+
+- **Diagonal**: quiet ratio **1.24**, kick **4.67** — **3.8x**, against the **1.8x**
+  breaker.
+- **Modal**: quiet **0.25** over the DAMPING block, **0.117** per channel in the
+  quiet periods, against the diagonal run's quiet periods of **1.449 / 1.832 /
+  1.769** — about **13x** lower. Kick **4.73**.
+
+**So it is not a modal-specific mis-scaling.** Modal's lower operating point makes it
+worse; the defect is present under the diagonal law too. Both faults then persisted
+**95–119 s to the end of the run** and neither cleared: ch3 held at **2.1–3.2**
+against `FAULT_CLEAR_RATIO = 1.4`.
+
+**Half of the 08-17 deadlock is fixed:** `ratio` is **live during FAULT**, varying
+1.4–3.8 print to print, where 2026-08-17 measured it frozen at **3.59 for 1085 s**.
+**The deadlock is not.** Every threshold on this rig — the breaker at 1.8x, the clear
+gate at 1.4, the lock detector at 0.35x, and `jerk.py`'s own triggers — is an absolute
+multiple of a baseline measured with the loop **off**. `CLAUDE.md` § 1.
+
+**A fix is in flight in `osem.eta.py` / `stdlib.py` / `jerk.py`. Nothing here claims
+it is done and its design is not described here.**
+
+### 5. `LOCKED`, for the first time in this repo's history
+
+    *** LOCKED -- 20.7s after gain was applied (t=22.7s total), 4/7 channels
+        driven and quiet -- DEGRADED, 4/7 healthy ***
+
+`data/20260818_002207_jerk_eta.log`, on the modal run. Read the qualifiers with it:
+**DEGRADED** (a4/a6/a7 demoted by `inband-floor` before the announcement), and the
+run **engaged on the stored baseline** after a 2.0 s warm-up rather than a fresh 20 s
+calibration, so 22.7 s is not comparable with a cold start. It faulted 12 s later.
+**Anything in this tree still saying no rung has ever printed `LOCKED` is stale.**
+
+### 6. The hybrid PID channels have never run
+
+Measured across **both** runs: **ch4, ch6 and ch7 carried `|gain|` exactly 0.0000 for
+100 % of all DAMPING samples.** They were demoted at engage, both times:
+
+    !! ch4, ch5, ch6, ch7 demoted -- in-band 0.0027 / 0.0000 / 0.0026 / 0.0024V,
+       under 10% of the 0.0834V median across enabled channels
+
+`inband-floor` measures in-band amplitude at the three **horizontal** mode
+frequencies, and **a4 senses X while a6/a7 sense Y** — axes orthogonal to the damped
+Z / T1 / T2 — so their in-band amplitude is small **by construction**, not because
+they are blind. Their measured coherence with the optic is **0.46 / 0.26 / 0.50**.
+
+**This is the fourth instance of one error family**, after "a4–a7 are not wired",
+"the flags are misaligned", and "a weak driven response says the coils do not reach
+those DOF, not that the sensors cannot see". A fix is being attempted in
+`osem.eta.py`; **nothing here claims it is done.**
+
+### 7. First χ²/dof numbers off the rig — six prints, not a distribution
+
+Modal run, `dof = 4`: **8.00 / 2.10 / 2.90 / 2.31 / 0.32 / 0.03** while DAMPING,
+**888.74** on the kick that tripped the breaker, then **3662.82 / 563.59 / 226.61 /
+54.71 / 97.48** through FAULT. These are the 5 s status prints, and there is **no
+`CALIBRATING` population at all** because the run engaged on a stored baseline. **No
+threshold follows from six numbers** — § *eta* and `CLAUDE.md` § 5 stand.
+
+### 8. Tooling, and what was deleted
+
+`status.py` gained **geometric Φ as the default export basis** (`--phi geo|svd`),
+`phase_consistency`, `phase_compare`, `--multisine`, `--settle`, `--hand-damp`, and
+**`MODES` updated to the 840 s empty-room values 0.72194 / 0.99193 / 1.65607 Hz** —
+they had been the **2026-08-06** values, up to **0.0170 Hz** stale.
+
+**`settle` — damp between coil points with a colocated diagonal velocity loop. It is
+NEUTRAL, not damping, and OFF by default.**
+
+- **The first version PUMPED.** It ran at the **379 Hz** sample rate, about
+  **182 kbit/s** of `SET` traffic against a **115200** baud link, so the wire
+  saturated and the applied voltage lagged by a growing delay: in-band rms **40 → 84
+  counts**. **This is exactly what `delta`'s `decimate` exists for, and the lesson
+  did not transfer until it was repeated.**
+- **After decimating to a 100 Hz control clock it is neutral**: **55.45 → 53.73
+  counts over 45 s.** An open item, not a solution.
+
+**Deleted in this session** (the rest of the tree dates these to 2026-08-17; the
+session spans midnight): **`osem.delta.py`** — retired to git at `b90c983`, ladder now
+**epsilon → zeta → eta**; **`signtest.py`** — a geometric Φ leaves no per-mode sign to
+search, its five records survive as `data/signtest_20260817_192808_*`; and
+**`build/`**, gitignored staging regenerated by `bench.py --flash`.
+
+### What this session did NOT establish
+
+**A's magnitudes**; **any session-to-session scatter of the diagonal law**; **whether
+the 5x reproduces**; **whether the hybrid PID on a4/a6/a7 helps** — it has still
+never run; **the χ²/dof distribution**; and **whether `settle` can be made to damp**.
+`osem.eta.py` still declares `BENCH_STATUS = "untested"`, which is now wrong.
+
+---
+
+## eta — the modal velocity comes from ONE filter over the modal coordinates
+
+`osem.eta.py`, written 2026-08-17. It is `zeta`'s modal law with `zeta`'s gains,
+`zeta`'s refusal ladder and `epsilon`'s supervisor, unchanged, and **one thing
+replaced: the estimator behind the modal velocity.** A bench run therefore compares
+two *estimators* and not two gain vectors.
+
+**It ran on 2026-08-18** — § *On the bench, 2026-08-18*. **The file still declares
+`BENCH_STATUS = "untested"`, which is now wrong.**
+
+**The 0.08 median `ratio` measured on 2026-08-17 is `zeta`'s, not `eta`'s** —
+`signtest.py` (since deleted) launched `bench.py zeta`. **`eta`'s first runs did not
+reproduce or refute it**: the modal run held at per-channel `ratio` **0.117** in its
+quiet periods, about **13x** below the diagonal run's 1.449 / 1.832 / 1.769, but it
+faulted at 38.5 s of 133 s and never recovered, so there is no 70 s scored window to
+compare with. See README § 8 for the signtest table and its caveats.
+
+Run it with `make run V=eta`. `python3 osem.eta.py --selftest` is where the modal
+math and the modal filter are asserted; `make check` cannot reach either, because
+`sim/server.py` models **two** modes and this runs **three**.
+
+### What changed against `zeta`
+
+**1. `ModalKalman` — 14 states, and Phi is now inside the estimator.**
+
+    x    = [q_A, v_A, q_B, v_B, q_C, v_C, d_0 .. d_7]      2x3 modes + 8 sensor DC
+    y_i  = SUM_m Phi[i,m] q_m + d_i + n_i                  n_i ~ N(0, KALMAN_R[i])
+    qdot = [v_A, v_B, v_C]
+
+`zeta` estimated each mode by an inverse-variance scalar least squares across
+**eight independent 7-state per-sensor filters**; `eta` runs **one** filter whose
+state *is* the modal coordinates, plus one DC/drift state per sensor because each
+OSEM has its own slowly-moving rest offset. Same plant assumption as `epsilon` and
+`zeta` and it is measured: **Q > 433 at 1σ, τ > 138 s** (`analysis/ringdown.md`)
+against a 2.9–4.7 s closed loop, so the modes are undamped oscillators on the
+timescales the filter runs at.
+
+**A demoted, railed or absent sensor is a DELETED ROW, never a re-weighting.** It
+leaves `H`, it leaves `R`, the dof falls by one, and nothing else changes. A
+sensor that comes back re-primes its own DC state (its covariance row and column
+cleared, reset to `R_i`) and the modal states are untouched, because the other
+sensors were measuring them throughout. That is the property row deletion buys and
+channel-blanking does not, which is why `RAIL_BLANK` stays `False`.
+
+**No new tuning constants.** `R` is the measured `KALMAN_R`; the per-mode process
+noise is `q_modal[m] = SUM_{i: rowok[i,m]} KALMAN_Q[i,m]` — 24 measured numbers and
+`T_AMP_S`, with the `w_m^2` cancelling exactly because Phi's columns are unit-norm
+— and `Q_DC = KALMAN_R / T_DC_S` as before.
+
+**The gain is NOT precomputed, unlike `KALMAN_K`, and cannot be.** `K` depends on
+Phi, which arrives at *run time* from `data/modal.json`, and on *which sensors are
+live*, which changes mid-run. So the filter carries its own covariance, in
+**Joseph form** — `(I-KH) P (I-KH)^T + K R K^T` — because the short form is only
+PSD at exactly the optimal gain and this loop runs for hours with rows appearing
+and disappearing. There is deliberately no flag to switch it.
+
+**2. chi² per degree of freedom — the residual becomes calibrated.**
+
+    e    = y_live - H xpred
+    S    = H Ppred H^T + diag(R_live)
+    chi2 = e^T S^-1 e ,   dof = |live|
+
+`zeta`'s out-of-mode residual can only say "the sensors disagree by this
+fraction"; `S` is the filter's own belief about how big its innovations should be,
+so **chi²/dof is order 1 exactly when the readings fit three oscillators at
+`F_MODE_HZ` to within the MEASURED per-channel noise**, and it says so *in sigma
+of measured noise*. It is the check that catches a bad sensor which is neither
+railed nor signal-less — the failure every other interlock here is blind to.
+
+**It is LOGGED AND NOT ACTED ON, deliberately.** The distribution on this rig has
+never been measured, so any threshold would be a guess, and adding an unmeasured
+fault source to a rig whose fault history is the main thing wrong with it is the
+trade `analysis/mimo_closed.md` § 4.5 already refused. `eta` adds the columns
+(`chi2`, `ndof`) on every CSV row, accumulates the distribution **per state** —
+`CALIBRATING` is undriven and is the cleanest population a threshold should be
+derived from — and prints a summary at exit. **That distribution is the
+deliverable of the run**; the lock time is `delta`'s and is unchanged.
+
+**3. Both estimators are carried, and the per-sensor one is not a fallback.** It
+owns `bp = displacement()`, and `bp` is what the gain schedule, the runaway
+breaker, the lock detector and `baseline-floor` all read — so it owns **every
+per-channel interlock and the baseline**. That is why `_fingerprint` is unchanged
+and a `zeta`-measured floor is legitimately reusable here, and it is what makes
+the fallback cheap: with Phi refused the modal filter is never built at all
+(`self.mkf is None` *is* the fallback) and what runs is `epsilon`'s diagonal law on
+`epsilon`'s estimator. `zeta`'s least squares also still runs, logged only, as
+`qls*`, so one bench run compares the two estimators on identical samples.
+
+### What it costs, stated rather than buried
+
+`Modal.sense`'s docstring is explicit that `zeta` avoids any matrix inverse **on
+purpose**, so that `cond(Phi)` is not load-bearing in the estimator. **`eta`
+reverses that**, and the reversal is the whole risk: a wrong Phi now gives a wrong
+modal velocity with no per-sensor modal velocity to retreat to. Two mitigations,
+both in the file: `zeta`'s refusal ladder kept whole, and **chi², which is the
+statistic that detects a wrong Phi**. The new risk and its detector arrive
+together. The only thing inverted is `S = H P H^T + R`, which is `|live|×|live|`
+and bounded below by **measured** `R` rather than by a ridge somebody chose
+(`mimo_closed.md` § 3.5 had to pick `eps = (2 σ̄)²` by hand for exactly this).
+
+A Kalman filter is also **more** sensitive to a wrong frequency than a bandpass
+is, because modelling the oscillator is the point of it. `F_MODE_HZ` is the
+re-measured 2026-08-17 set and `Modal._load` enforces 0.005 Hz against the file.
+**How much chi² rises per Hz of frequency error is NOT established** — no
+measurement of it exists here or in `analysis/kalman.md`, and the selftest does not
+cover it.
+
+### `dead-pin` — the one interlock change, and it is why a bench run is possible
+
+A rail during `CALIBRATING` is a whole-rig fault by design, correctly: it normally
+means the optic is against a mechanical stop. But on 2026-08-17 **a5 was measured
+to be a disconnected pin** — exactly one distinct value, 0.0 counts, variance
+exactly zero, over three records totalling 236 387 samples — which is below
+`RAIL_LOW = 12`, and **the rig sat in FAULT for 50 s with every gain at zero
+because of one bad solder joint**. `ENABLE_CHANNEL[5] = False` handles a5.
+
+**a6/a7 are the case that config cannot handle.** At 17:59 they sat *bottom-railed
+at 4.3 and 8.8 counts with std 0.48–0.56*, and at 18:20 they read 591.3 (std
+24.23) and 566.0 (std 17.76) — they came back, and **no cause is recorded
+anywhere**. So their state at the start of a session is unknown, and while they are
+railed neither `zeta` nor `eta`-as-first-written gets past calibration.
+
+The test is: **railed AND essentially motionless → demote that one channel; railed
+and still moving → fault the whole rig, exactly as before.** What changed on
+2026-08-17 is *which statistic*, and the reason is measured:
+
+- **The first version used peak-to-peak SPAN over 64 control samples of the
+  decimated mean, against 1.0 count**, on the argument that a5's variance is
+  exactly zero so any sub-LSB number would do. True of a5, false of a6/a7.
+- **A bigger threshold could not fix it.** Replaying
+  `data/20260817_175912_status_sensors.csv` (26 092 samples, 60.0 s, 434.85 Hz
+  wire) through `eta`'s own decimation and mains-null, span per 64-sample window:
+  a6 **0.925 / 1.292 / 2.900** and a7 **0.900 / 1.583 / 4.625**
+  (median / p99 / MAX), against a0–a4 at 95.5–142 median. The simulator's occluded
+  channel — the only *railed-but-moving* example in evidence — runs **2.71 / 3.96 /
+  5.17** on the same statistic. **Those overlap**, and the overlap is decisive
+  because `rail_now` is evaluated every control step: one window over the line
+  faults the rig.
+- **The statistic is now the std of the RAW counts over `RAIL_SUSTAIN_S`, at the
+  wire rate** — the rail interlock's own window, rate and samples. A span is set by
+  the single most extreme sample in its window; a std over the 217–555 samples that
+  window holds concentrates to 3–5%, which is what turns a 4× difference in σ into
+  two populations that do not touch. It is also available exactly when `rail` arms
+  and not one sample later.
+- **Both edges of the threshold are measured on that statistic.** Bench, 8625
+  windows: a5 exactly **0.0000**, a6 **0.377 / 0.497 / 0.621**, a7 **0.263 / 0.407
+  / 0.853**; live a0–a4 never below **4.80** in *any* window. Simulator's occluded
+  channel, 2257 windows: **1.998 MIN**, 2.397 median. Threshold =
+  `sqrt(0.853 × 1.998) = 1.31` → **`DEAD_PIN_STD_COUNTS = 1.3`**: 1.52× above the
+  loudest dead window measured, 1.53× below the quietest moving one, and 3.7× below
+  the quietest live window.
+
+Two guards on top, both because this test must not weaken the fault path:
+
+- **A witness is required.** If the demotion would leave *no* enabled channel
+  behind, nobody is demoted and the rail fault stands — every channel railed and
+  flat at once is a dead ADC, an unplugged loom or an optic hard against a stop,
+  not eight dead pins. Same shape as `lock-quorum` and `runaway-quorum`.
+- **It is announced loudly, once per channel, with the measured std**, so the
+  number to change is in the log rather than in somebody's head.
+
+**Known limit, stated rather than discovered later:** this is a test over *one*
+rail window, so an optic parked hard against a stop for longer than
+`RAIL_SUSTAIN_S` with under 1.3 counts of its own noise is, over that window,
+indistinguishable from an unwired pin. What covers that case instead is
+`baseline-floor`, which demotes a channel that calibrates a floor under 10% of the
+median, and the witness rule, which faults if the condition takes every channel
+with it.
+
+**`osem.zeta.py` still carries `DEAD_PIN_SPAN_COUNTS = 1.0`** and was deliberately
+not touched. If `zeta` is run tonight with a6/a7 bottom-railed, it will fault
+through calibration.
+
+### One more thing to check before every modal run: the export itself
+
+`eta` loaded and gated both 2026-08-17 exports of `data/modal.json`, and **they do
+not agree**:
+
+| written | source | verdict |
+|---|---|---|
+| 19:26:47 | `20260817_182701_status_coils.csv` | **LOADED** — all 4 coils kept, full mask cond **1.97**, rank 3, 80 of 256 masks run MIMO. Off-quadrature 0.736 / 2.088 / 0.812. This is the pair `signtest` scored **0.08** on |
+| 20:05:41 | `20260817_194726_status_coils.csv` | **REFUSED** — only **2 of 4** coils pass the colocation sign check (`MODAL_MIN_COILS = 3`); coils 1 and 2 dropped on `A/Phi` sign disagreement. Off-quadrature **1.662 / 0.737 / 1.181** |
+
+So the refusal ladder is **live**, not decorative, and "there is a `data/modal.json`
+on disk" is not the same statement as "this is a modal run". Read the `[modal]`
+banner; it prints before any coil is energised, and `Modal.report()` prints Φ, A,
+the surviving coils, the cond per mask and the per-mode gain with it.
+
+### `--selftest`, 2026-08-17 — all pass
+
+Every check asserts a *planted* property against a plant known exactly; nothing
+asserts what the code printed.
+
+| | measured |
+|---|---|
+| filter shape | 14 states = 2×3 modes + 8 sensor DC |
+| `q_modal` = summed measured modal variances | `[0.00491, 0.55021, 0.10104]` |
+| exact-ZOH conserves oscillator energy, 1e5 steps | drift **1.03e-11**; a Euler step at the same dt drifts **3.3e+89** |
+| recovers a planted modal velocity, all rows | rel err ≤ **0.0042** |
+| …with a0 deleted / a0+a1 deleted | **0.0042** / **9.7e-4** |
+| …with two rows leaving mid-run at t=30 s | **6.8e-4**, still finite |
+| chi²/dof when the model fits | mean **1.0111**, max 4.71 over 6 dof |
+| P stays positive definite (Joseph form) | min eigenvalue **9.1e-07** |
+| …and stays order 1 as rows go | 5 rows **1.006**, 4 rows **1.011** |
+| 3σ / 5σ extra noise on one sensor | **2.341** / **4.754** |
+| one sensor's gain wrong by 1.5× | **38.4** |
+| one sensor's sign inverted | **595.8** |
+| one sensor stuck at a constant | **149.6** |
+| the same fault on a quieter sensor | a0 (√R 0.068 V) **2.00** vs a3 (0.007 V) **38.37** |
+| a STATIC offset is invisible — the DC state absorbs it | **1.0111** against 1.0111 baseline. Designed, not a gap |
+| a STEP offset is visible, then absorbed | **3.681** for 0–40 s, **0.985** after |
+| the filter's own force dissipates against TRUE qdot | mean f·qdot **−1.43e-01**, negative on **100.0%** of steps |
+| cost of one modal step | **84.9 µs = 0.85%** of the 10 ms period (asserted < 20%) |
+| a6/a7 bottom-railed as measured | std 0.624 / 0.575 counts → both demoted, **0 faults**, still `CALIBRATING` |
+| the running-sum std vs a direct one | agree to **8.9e-13** over 551 samples |
+| a railed channel that is still MOVING | std 152.4 counts → **1 fault**, state `FAULT` |
+| every enabled channel railed and motionless | **1 fault**, **0 demotions**, no-witness announced |
+| every refusal (schema, frequencies, age, gauge, provisional A, sign-flipped A, missing A, missing file) | refuses |
+
+Those chi² figures are **synthetic** — the readings are generated from the filter's
+own `R` and `Q`, so order 1 is order 1 *by construction*. **What chi²/dof
+distributes as on the real rig is unmeasured, and that is exactly why nothing in
+the file acts on it.**
+
+### Suite
+
+`python3 harness.py --test eta` → **41 passed, 10 failed** (181–228 s, 2026-08-17),
+and **`zeta` is 41/10 with a byte-identical failure set**: the rigid-body
+undriven-decay check, 4 in the wrong-sign / `soft-saturation` / `saturation-latch`
+group, `baseline-floor`'s known out-of-band-interference limit, `fast-refault`,
+2 × `warm-restart`, and the baseline-reuse bound. Verified again *after* the
+`dead-pin` change: same 41/10, same set, and `a rail during CALIBRATION is still a
+whole-rig fault` still reports **1 fault, 0 demotions, state=FAULT**. The fix does
+not swallow the case it must not swallow, and that is measured rather than argued.
+
+The 10 failures are **unattributed** and are the same ones `zeta` carries; neither
+has ever been committed, so there is no baseline to diff against. Commit, then
+bisect. Note that these are the eight-OSEM body, so `eta`'s *supervisor* and
+*diagonal* law are simulated; its **modal** path is not reachable from
+`make check` at all (two modes in the simulator, three in the controller).

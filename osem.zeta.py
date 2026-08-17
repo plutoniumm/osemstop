@@ -1,36 +1,76 @@
 """
-epsilon: delta's loop with a Kalman velocity estimator in place of
-bandpass-and-differentiate.
+zeta: epsilon's loop with a MODAL (MIMO) law in place of the per-channel one --
+when, and only when, a measured Phi and A are on disk.
 
-Per channel, SISO, seven states: three undamped oscillators at the MEASURED
-0.7155 / 0.9949 / 1.6396 Hz plus a random-walk DC state, exact ZOH, steady-state
-gain solved offline and shipped as KALMAN_K. EXACT at the three modes, unity
-gain and zero phase for any Q and any R, where delta runs 0.826 / 0.842 / 0.772
-and +6.16 / -9.48 / -35.21 deg, which makes 44.5% of what Kp commands at mode C
-a spring rather than a dashpot (analysis/kalman.md §5).
+    q_dot_m  =  weighted LS over sensors of  v[i,m] / Phi[i,m]     (per mode)
+    f        = -K_m * q_dot_m                                      (3 forces)
+    u_C      =  A_C+ f                                             (min-norm)
 
-New: `kalman-velocity`; `mains-null`, one line, a 20 ms boxcar nulling 50.06 Hz
-exactly; `lock-quorum`, a channel nothing drives may not veto a lock, which is
-why delta never once announced LOCKED. Ki is zero and STRUCTURALLY unnecessary,
-not tuned down: the drift is the estimator's `b` state, v_hat never reads it, so
-an integrator has nothing left to reject.
+then epsilon's clip, slew, anti-windup and every interlock, unchanged.
 
-DELIBERATELY NOT here: LOCK_SUSTAIN_S and FAULT_CLEAR_SUSTAIN_S stay at 5.0 s
-and Kd stays where delta had it, so the first bench run can answer "did the
-estimator help" without also asking "or did the shorter windows". `rail-blank`
-ships OFF, unvalidated.
+THE MATRICES ARE NOT IN THIS FILE. Phi and A are measured, live in
+data/modal.json, and are written by `status.py --save-modal`. With no file, an
+unparseable one, one measured at other frequencies, one older than
+MODAL_MAX_AGE_S, one whose Phi and A come from different measurements, or one
+that fails the colocation sign check, this file runs EPSILON'S DIAGONAL LAW and
+prints which of those it was, before the coils are energised.
+
+That refusal is the DEFAULT path and not a branch, which is the one lesson v13
+left: it carried a modal law, defined its refusal as `_unused_main`, never
+called it, and `make run V=v13` would have driven the optic from a file whose
+own docstring said it must not (versions.md). A modal law with hard-coded
+matrices is that defect again with better numbers.
+
+WHY THIS IS REOPENED AT ALL, given CLAUDE.md closes it. The closure is correct
+about the ARGUMENT -- a square Phi has no null space, so it cannot degrade and
+its out-of-mode residual is identically zero -- and wrong about the NUMBER. Phi
+was called 3x3 on the strength of one measurement, the 15-tone multisine behind
+gains.json, whose tones miss all three modes by 59-68 half-widths because the
+grid was designed before the ringdown knew where the modes were. That run put
+1.5-1.7% of the available response on the sensors and passed 207 of 960 cells;
+its own caveat reads "raise the dither or lengthen the record".
+
+Re-measured from ambient motion on data/20260806_192723_quiet_openloop.csv --
+already on disk, no bench time -- Phi is 5x3: a0 a1 a2 a3 a4 determined at all
+three modes, cond 7.85, and dropping any one still leaves rank 3. a1, the sensor
+the closure rests on, comes back at SNR 12.6 / 19.9 / 15.8.
+
+WHAT IS DIFFERENT FROM THE mimo_closed.md DESIGN, and it is the whole reason
+this is buildable now. That design projects a BROADBAND per-channel velocity
+through Phi_S+, so the SENSOR SET has to separate the modes -- and Secs 4.2-4.3
+are mostly about the damage that does, two clusters degenerate to under 2.5 deg,
+`a0,a2` at cond 64, `a0,a5` singular, 256 cached pseudo-inverses to survive it.
+
+epsilon already solved that and nobody noticed. `KalmanVelocity.modal_velocity()`
+returns an (8, 3) array -- per channel, PER MODE -- because the estimator carries
+one oscillator state per mode and separates them in frequency, exactly, at the
+measured f_m. Its docstring says "nothing here reads it yet". So each mode is a
+SCALAR least squares across sensors: no matrix inverse, no conditioning to
+degrade, no cross-mode leakage. Sensor diversity now buys SNR only. The mask
+table survives on the ALLOCATION side, where dropping coils really can make
+A_C rank-deficient, and there it is still 256 lookups built once at start-up.
 
 WATCH:
-  * STEADY_GAIN[2] is POSITIVE because ch2 is mounted the other way round. Not a
-    typo. A wrong sign PUMPS, it does not under-damp.
-  * Kp = -0.040 is the documented instability / rail onset; do not exceed -0.035
-    unattended. Extra phase margin at the modes is NOT a licence to go there.
-  * The rail interlock reads RAW COUNTS at the full wire rate, never the
-    estimate: a railed sensor flatlines whatever you filter, and an RMS-only
-    check reads a flatline as perfect stability.
-  * Every baseline written before this file is REFUSED, `bp` being displacement()
-    now; and re-measure the three frequencies each session, since the design
-    rests on them and their day-to-day stability is NOT measured.
+  * MODAL_GAIN_SCALE = 0.5. FIRST LIGHT IS AT HALF. Every sensor now reaches
+    every coil, so a gain that was safe diagonally is NOT thereby safe here, and
+    Kp = -0.040 is the documented rail onset with one sentence of evidence
+    behind it (CLAUDE.md item 7).
+  * A WRONG SIGN PUMPS. Phi and A are each determined only up to a shared sign
+    per mode, so a Phi from one run paired with an A from another is a coin
+    flip per mode. `gauge` refuses that pair outright, and the colocation
+    identity A[m,j] = lambda_j Phi[j,m] is the physical cross-check: one head
+    means one lambda per channel, so its sign must agree at every mode.
+  * The out-of-mode residual is COMPUTED AND LOGGED AND NOT ACTED ON. It is the
+    only check that can catch a sensor which is neither railed nor signal-less,
+    and there is no measured threshold for it. The first bench run records the
+    distribution; the threshold comes after.
+  * `make check` CANNOT reach the modal law -- sim/server.py models two modes
+    and this runs three -- and Controller's default is no modal data so the
+    suite stays reproducible. `python osem.zeta.py --selftest` covers the modal
+    math. Whether it damps the optic is a bench question only.
+  * Everything epsilon warns about still applies: STEADY_GAIN[2] is POSITIVE by
+    measurement, the rail interlock reads RAW COUNTS at the wire rate, and every
+    baseline written before epsilon is refused.
 
 Sensing is 5.02 V over 1023 counts; actuation a 2.5 V DAC restricted to 0..0.5 V
 around BIAS = 0.25. `enabled` is static config, `healthy` runtime, and
@@ -62,7 +102,7 @@ PORT, A_VCC, ADC_MAX_COUNTS, N = "COM7", 5.02, 1023, 8
 # onto somebody else's coil. Verify on the bench, one coil at a time.
 DAC_CHANNELS = [1, 3, 5, 7, 0, 2, 4, 6]
 
-VERSION_TAG = "epsilon"
+VERSION_TAG = "zeta"
 # A NAME, not a number. See ladder.py.
 FIXES = ("saturation-latch", "rail-threshold", "runaway-baseline", "auto-disable",
          "fast-refault", "fast-calib", "warm-restart", "runaway-trend",
@@ -78,13 +118,37 @@ FIXES = ("saturation-latch", "rail-threshold", "runaway-baseline", "auto-disable
          # `trim-quiet`      the bias trim steps and judges only while LOCKED,
          #                   reverts a step it could not evaluate, and stops at a
          #                   total bias excursion budget.
-         "runaway-quorum", "runaway-peak", "trim-quiet")
+         "runaway-quorum", "runaway-peak", "trim-quiet",
+         # Added 2026-08-15. The modal law, and the three things that make it
+         # refusable rather than merely optional.
+         # `modal-law`       per-mode scalar LS on the Kalman's own per-mode
+         #                   velocity, then min-norm allocation through A+.
+         # `modal-refuse`    no measured Phi/A -> epsilon's diagonal law, loudly.
+         # `modal-colocation` A/Phi sign must be one constant per channel.
+         # `modal-residual`  per-mode out-of-mode residual, logged, NOT acted on.
+         "modal-law", "modal-refuse", "modal-colocation", "modal-residual")
 
 # All eight. `enabled` buys a place in the quorum, the lock claim and the trim;
 # every channel is filtered, rail-checked and watched regardless. Safe only via
 # `baseline-floor`: a channel reading nothing calibrates ~0.002 V, every ratio
 # explodes, and the breaker faults the rig (v5.5: ten times in 145 s).
-ENABLE_CHANNEL = [True, True, True, True, True, True, True, True]
+# ch5 OFF. a5 is not a weak sensor, it is a disconnected input: measured
+# 2026-08-17 across three independent records (96883, 26092 and 113412 samples)
+# it takes EXACTLY ONE distinct value, 0.0 counts, with variance exactly zero. A
+# live ADC line always carries at least +/-1 count of dither, so that pin is at
+# hard ground. On 2026-08-06 it rested at 554.3 counts, so it was reading once.
+#
+# IT HAS TO BE DISABLED RATHER THAN LEFT TO DEMOTE. 0 counts is below
+# RAIL_LOW = 12, so calibration calls it RAILED, and a rail during CALIBRATION is
+# a whole-rig fault by design -- correctly, since a railed sensor during
+# calibration normally means the optic is against a stop. Measured tonight: the
+# rig sat in FAULT for 50 s straight with every gain at zero, damping nothing,
+# because of one dead pin. Same shape as the LOCKED veto in CLAUDE.md item 1: one
+# channel that cannot contribute must not be able to veto the seven that can.
+#
+# Turn it back on the moment the pin is fixed; nothing else here depends on it,
+# and data/modal.json already carries a5's Phi row as identically zero.
+ENABLE_CHANNEL = [True, True, True, True, True, False, True, True]
 
 BIAS = np.full(N, 0.25)
 VMIN, VMAX, MAX_SLEW_PER_S = 0.0, 0.5, 2.0     # nominal; the trim moves the
@@ -155,12 +219,35 @@ CONTROL_PERIOD_S = 1.0 / CONTROL_HZ
 MAINS_NULL = True
 
 # ===== the velocity estimator =====
-# Three modes, MEASURED to +-0.0005 Hz over a 276 s fitted window
-# (analysis/out/quiet_frequencies.csv, analysis/ringdown.md). Everything the
-# estimator does that a bandpass cannot rests on these three numbers, and their
-# day-to-day stability is NOT measured: drift WITHIN one 320 s record is
-# <= 1.2e-4 Hz, which is 90 deg of phase in 36-68 minutes.
-F_MODE_HZ = np.array([0.7155, 0.9949, 1.6396])
+# Three modes. Everything the estimator does that a bandpass cannot rests on
+# these three numbers.
+#
+# RE-MEASURED 2026-08-17 (data/20260817_172150_status_sensors.csv, `status.py
+# sensors`): consensus over the five sensors above SNR 8, inter-sensor spread
+# 0.0005 Hz. THE MODES HAD MOVED, and this is the first session anybody checked:
+#
+#     mode   2026-08-06   2026-08-17   shift       half-widths at Q=433
+#     A      0.7155       0.72294      +0.00744     9.1
+#     B      0.9949       0.99193      -0.00297     2.6
+#     C      1.6396       1.65657      +0.01697     9.0
+#
+# The half-width is f/(2Q); at n half-widths off, a drive reaches 1/sqrt(1+n^2)
+# of the on-peak response and its PHASE is wrong. So these are not cosmetic
+# digits -- the same 0.010-0.017 Hz error made status.py's anti-phase unwind
+# PUMP the optic instead of cancelling (residual 0.188 -> 0.277 -> 0.422 V
+# against a 0.259 V drive peak), because 60 s of drive-plus-unwind accumulates
+# more than 180 deg of phase error at that offset.
+#
+# Quoted to five decimals, which is the precision the 90 s record supports. The
+# 16-digit values that were here came from the 276 s ringdown fit
+# (analysis/out/quiet_frequencies.csv) and are kept above as the 08-06 column;
+# do NOT restore that precision on top of a 90 s measurement.
+#
+# THEIR STABILITY IS STILL NOT ESTABLISHED. Two observations 11 days apart is
+# not a drift rate. Drift WITHIN one 320 s record is <= 1.2e-4 Hz. Re-measure at
+# the START of every session, before driving anything -- `status.py sensors`
+# prints the numbers and `status.py --freqs` takes them.
+F_MODE_HZ = np.array([0.72294, 0.99193, 1.65657])
 # T_AMP is the only tuning constant in the estimator: the time in which a mode's
 # amplitude may change by order itself. 50 s is the middle of a flat optimum,
 # settle 1.4-1.6 s over T_AMP 20-100 (analysis/out/kalman_sweep_synthetic.csv).
@@ -363,6 +450,58 @@ FAULT_CLEAR_SUSTAIN_S = 5.0
 # justified the same 2.0 s as 5 tau of a 0.4 Hz highpass that no longer exists.
 REARM_SUSTAIN_S = 2.0
 MIN_HEALTHY_CHANNELS = 1     # one channel damps the whole mass (provenance.md §3)
+
+# ===================== MODAL (MIMO) =====================
+# Phi and A are MEASURED and are NOT in this file. They arrive in data/modal.json,
+# written by `status.py --save-modal`. With no file, an unparseable file, a stale
+# file or one that fails the checks below, this controller runs epsilon's DIAGONAL
+# law and says which of those it was.
+#
+# THAT REFUSAL IS THE DEFAULT PATH, NOT A BRANCH. `versions.md` records why: v13
+# carried a modal law, defined its refusal as `_unused_main`, never called it, and
+# `make run V=v13` would have driven the optic from a file whose own docstring
+# said it must not. A modal law with hard-coded matrices is that defect again with
+# better numbers, so there are no matrices here to hard-code.
+MODAL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "data", "modal.json")
+MODAL_SCHEMA = "osem-modal-1"
+
+# Per-mode Kp, applied to the modal velocity. Comparable to the diagonal |Kp| =
+# 0.035 BY CONSTRUCTION, because Phi's columns and A's rows are normalised to unit
+# 2-norm over the surviving sets at load time: q_dot is then a weighted mean of
+# sensor velocities in V/s, the same units and roughly the same size as the `vel`
+# the diagonal law multiplies, and the min-norm command comes back in coil volts.
+# That normalisation is what makes one scale factor meaningful and is the reason
+# it exists -- Phi's and A's own scales are arbitrary per mode.
+MODAL_KP = np.array([0.035, 0.035, 0.035])
+# FIRST LIGHT IS AT HALF. Kp = -0.040 is the documented instability / rail onset
+# and it is the least-evidenced number in the repo (CLAUDE.md item 7): one
+# sentence in a deleted docstring, and the simulator provably cannot reproduce it.
+# The modal law's whole point is that every sensor now reaches every coil, so a
+# gain that was safe diagonally is not thereby safe here. Raise it on the bench,
+# with a scope, in its own run.
+MODAL_GAIN_SCALE = 0.5
+# Hard ceiling on |u| the modal allocator may ask for, before the per-channel clip
+# sees it. The clip and `soft-saturation` are still there and unchanged; this
+# bounds the ALLOCATION, so one badly-conditioned mask cannot demand 10 V and let
+# the clip quietly turn it into a permanent rail.
+MODAL_DEMAND_CAP_V = 0.20
+
+# The gate, per surviving-coil mask. cond is a BACKSTOP, not the criterion --
+# mimo_closed.md Sec 4.4 shows why a count or a cond alone is the wrong statistic.
+MODAL_COND_MAX = 12.0
+# A sensor row counts toward the modal estimate only if status.py determined it at
+# every mode. Partial rows are the a1-2026-08-06 failure and are worse than absent:
+# an undetermined entry is free to set the allocation at that mode.
+MODAL_MIN_SENSORS = 2        # per mode; the estimate is a scalar LS, not an inverse
+MODAL_MIN_COILS = 3          # rank(A_C) must reach the mode count
+# Refuse an A that was not driven. `status.py --derive-a-colocation` can produce
+# one from Phi and the DC matrix under the colocation identity, which is useful for
+# testing the loop off the bench and is NOT a measurement of A.
+MODAL_ALLOW_PROVISIONAL_A = os.environ.get("OSEM_MODAL_PROVISIONAL", "0") not in ("", "0")
+# Modal data older than this is refused: the whole reason for status.py's pulse is
+# that these numbers drift.
+MODAL_MAX_AGE_S = 7 * 24 * 3600.0
 
 # ===== when the fault path may borrow the baseline it already has =====
 # An engagement of >= FAST_REFAULT_S resets the reuse budget, the loop having just
@@ -623,10 +762,426 @@ GAIN_RAMP = _parse_gain_ramp(os.environ.get("OSEM_GAIN_RAMP", "").strip())
 _LOG = (("bp", ".5f"), ("vel", ".5f"), ("out", ".4f"), ("gain", ".5f"),
         ("ratio", ".4f"), ("p", ".5f"), ("i", ".5f"), ("d", ".5f"))
 # `ctl` marks the row that completed a control step, `n_avg` how many. See csv_row.
-CSV_HEADER = "time_s,state,ctl,n_avg," + ",".join(
+# Run-level modal columns, after `n_avg` and before the per-channel block, the
+# same place delta put `ctl`/`n_avg`. `mres*` is the out-of-mode residual, which
+# nothing acts on: the first bench run exists to record its distribution so a
+# threshold can be derived rather than guessed (mimo_closed.md Sec 4.5).
+_MODAL_COLS = (["modal", "mmask", "mrank"]
+               + [f"q{m}" for m in range(len(F_MODE_HZ))]
+               + [f"kmode{m}" for m in range(len(F_MODE_HZ))]
+               + [f"mres{m}" for m in range(len(F_MODE_HZ))])
+CSV_HEADER = "time_s,state,ctl,n_avg," + ",".join(_MODAL_COLS) + "," + ",".join(
     f"ch{i}_{c}" for i in range(N)
     for c in ("counts", "V") + tuple(k for k, _ in _LOG) + ("rail", "locked", "healthy"))
 # ====================================================
+
+
+class Modal:
+    """Phi and A, loaded from disk, validated, and turned into a per-mask table.
+
+    ------------------------------------------------------------------------
+    THE SENSING SIDE IS NOT A PSEUDO-INVERSE, AND THAT IS THE WHOLE CHANGE
+    ------------------------------------------------------------------------
+
+    `analysis/mimo_closed.md` Sec 3.2 projects a BROADBAND per-channel velocity
+    through `Phi_S+`, and Secs 4.2-4.3 are then mostly about the damage that
+    does: the sensing channels fall into two clusters degenerate to under 2.5
+    degrees, so `a0,a2` comes out at cond 64 and `a0,a5` singular, and 256
+    cached pseudo-inverses exist to survive it.
+
+    That problem is an artefact of asking the SENSOR SET to separate the modes.
+    It does not have to. `KalmanVelocity.modal_velocity()` already returns an
+    (N, 3) array -- per channel, PER MODE -- because the estimator carries one
+    oscillator state per mode and separates them in frequency, exactly, at the
+    measured f_m. epsilon shipped that and nothing read it.
+
+    So for mode m the measurement model is scalar:
+
+        v[i, m]  =  Phi[i, m] * q_dot_m  +  noise_i
+
+    and the estimate is an inverse-variance weighted least squares over the
+    surviving sensors,
+
+        q_dot_m  =  SUM_i w_im Phi_im v_im  /  SUM_i w_im Phi_im^2 ,
+        w_im     =  1 / sigma_im^2
+
+    There is no matrix to invert, no conditioning to degrade, and no way for one
+    mode to leak into another through the estimator. Sensor diversity now buys
+    SNR only -- it is no longer load-bearing for identifiability. `a0,a2`, the
+    cond-64 case, is simply two noisy estimates of the same three scalars.
+
+    THE ALLOCATION SIDE STILL NEEDS AN INVERSE, and that is where the mask table
+    survives: `u_C = A_C+ f`, `A_C` is 3 x |C|, and dropping coils really can
+    make it rank-deficient. All 2^8 coil masks are inverted once here, at
+    start-up, and the control step does one lookup and one matrix-vector
+    product. No matrix arithmetic in the loop, constant worst-case step cost.
+
+    ------------------------------------------------------------------------
+    WHAT IT REFUSES, AND WHY EACH REFUSAL IS SEPARATE
+    ------------------------------------------------------------------------
+
+    Every refusal below returns a REASON, and the controller prints it and runs
+    diagonal. They are separate because "no file" and "the file is for a
+    different rig" want different actions from whoever is at the bench.
+    """
+
+    def __init__(self, path=MODAL_PATH, n=N, nm=None, now=None):
+        self.path, self.n = path, n
+        self.nm = len(F_MODE_HZ) if nm is None else nm
+        self.ok = False
+        self.why = "not loaded"
+        self.source = ""
+        self.created = ""
+        self.phi = np.zeros((n, self.nm))
+        self.sigma = np.full((n, self.nm), np.inf)
+        self.rowok = np.zeros((n, self.nm), bool)
+        self.a = None
+        self.a_coils = []
+        self.imag_frac = [float("nan")] * self.nm
+        self.notes = []
+        self._load(now)
+
+    # ---- loading ---------------------------------------------------------
+    def _refuse(self, why):
+        self.ok, self.why = False, why
+        return False
+
+    def _load(self, now=None):
+        if self.path is None:
+            return self._refuse("no modal path given -- this Controller was "
+                                "built without one, which is the default "
+                                "everywhere except main()")
+        if not os.path.exists(self.path):
+            return self._refuse("no %s -- run `status.py phi --save-modal`"
+                                % os.path.basename(self.path))
+        try:
+            with open(self.path) as fh:
+                d = json.load(fh)
+        except (OSError, ValueError) as e:
+            return self._refuse("%s is unreadable (%s)"
+                                % (os.path.basename(self.path), e))
+        if d.get("schema") != MODAL_SCHEMA:
+            return self._refuse("schema is %r, this file wants %r"
+                                % (d.get("schema"), MODAL_SCHEMA))
+        if int(d.get("n_sensors", -1)) != self.n or int(d.get("n_modes", -1)) != self.nm:
+            return self._refuse("measured for %s sensors x %s modes, this file is "
+                                "%d x %d" % (d.get("n_sensors"), d.get("n_modes"),
+                                             self.n, self.nm))
+        # The frequencies are the one thing Phi is meaningless without: a shape
+        # measured at 0.9949 Hz says nothing about a mode that has moved to 0.99.
+        # epsilon's docstring already asks for these to be re-measured each
+        # session and this is where that becomes enforceable rather than advice.
+        fs = [m.get("f_hz") for m in d.get("modes", [])]
+        if len(fs) != self.nm or any(
+                abs(float(a) - float(b)) > 0.005 for a, b in zip(fs, F_MODE_HZ)):
+            return self._refuse("measured at %s Hz, this file runs at %s Hz -- "
+                                "re-measure, or the shapes do not apply"
+                                % ([round(float(x), 4) for x in fs],
+                                   [round(float(x), 4) for x in F_MODE_HZ]))
+        self.created, self.source = d.get("created", ""), d.get("source", "")
+        age = self._age(self.created, now)
+        if age is not None and age > MODAL_MAX_AGE_S:
+            return self._refuse("measured %.1f days ago (limit %.1f) -- these "
+                                "numbers drift, re-run status.py"
+                                % (age / 86400.0, MODAL_MAX_AGE_S / 86400.0))
+
+        p = d.get("phi") or {}
+        try:
+            self.phi = np.asarray(p["value"], float).reshape(self.n, self.nm)
+            self.sigma = np.abs(np.asarray(p["sigma"], float)).reshape(self.n, self.nm)
+            self.rowok = np.asarray(p["ok"], bool).reshape(self.n, self.nm)
+        except (KeyError, ValueError, TypeError) as e:
+            return self._refuse("phi block is malformed (%s)" % e)
+        self.imag_frac = [float(x) for x in p.get("imag_frac", [float("nan")] * self.nm)]
+        for mi, f in enumerate(self.imag_frac):
+            if f == f and f > 0.35:
+                self.notes.append("mode %d shape is %.0f%% imaginary -- no real mode "
+                                  "shape explains that; treat it as provisional"
+                                  % (mi, 100.0 * f))
+
+        a = d.get("a")
+        if a is None:
+            return self._refuse("phi is present but A is not -- run "
+                                "`status.py coils --save-modal`. Sensing is "
+                                "solved; allocation is not.")
+        try:
+            self.a = np.asarray(a["value"], float).reshape(self.nm, self.n)
+            self.a_coils = [int(c) for c in a.get("coils", [])]
+        except (KeyError, ValueError, TypeError) as e:
+            return self._refuse("a block is malformed (%s)" % e)
+        if a.get("provisional") and not MODAL_ALLOW_PROVISIONAL_A:
+            return self._refuse("A is PROVISIONAL (%s) and was never driven. Set "
+                                "OSEM_MODAL_PROVISIONAL=1 to run on it anyway, "
+                                "which is a test configuration, not a bench one."
+                                % a.get("provenance", "?"))
+        self.provisional_a = bool(a.get("provisional"))
+
+        # Normalise so MODAL_KP means what its comment says. Per mode, over the
+        # channels that mode actually has: an unmeasured row contributes 0 and
+        # must not be allowed to change the scale.
+        for m in range(self.nm):
+            s = np.linalg.norm(self.phi[self.rowok[:, m], m])
+            if s > 0:
+                self.phi[:, m] /= s
+                self.sigma[:, m] /= s
+            s = np.linalg.norm(self.a[m, self.a_coils]) if self.a_coils else 0.0
+            if s > 0:
+                self.a[m] /= s
+        # --- the colocation sign check --------------------------------------
+        # Phi and A must come from ONE factorisation. Each mode's Phi and A are
+        # determined only up to a shared scale and sign, so a Phi from the
+        # passive run paired with an A from the driven one has an INDEPENDENT
+        # sign per mode -- and a wrong sign PUMPS, it does not under-damp.
+        # `save_modal` writes both from one run and stamps `gauge`; this refuses
+        # a pair that was assembled by hand.
+        if (p.get("gauge") or "") != (a.get("gauge") or ""):
+            return self._refuse("phi and A come from different measurements "
+                                "(%r vs %r). Their per-mode signs are then "
+                                "independent, and a wrong sign pumps. Re-run "
+                                "`status.py coils --save-modal`, which writes "
+                                "both from one factorisation."
+                                % (p.get("gauge"), a.get("gauge")))
+
+        # The physical cross-check, and it is independent of the gauge: sensor
+        # and coil are the same OSEM head, so A[m,j] = lambda_j * Phi[j,m] with
+        # ONE lambda per channel (mimo_closed.md Sec 3.2). lambda_j's SIGN must
+        # therefore be the same at every mode. Where it is not, the pair is
+        # inconsistent on that channel and the channel is dropped from the
+        # allocator rather than trusted -- this is the same test Sec 2.3 passes
+        # on ch0-ch3 with `sign(P_0j) = sign(P_1j)`.
+        keep = []
+        for j in self.a_coils:
+            lam = [self.a[m, j] / self.phi[j, m]
+                   for m in range(self.nm)
+                   if self.rowok[j, m] and abs(self.phi[j, m]) > 1e-12]
+            if len(lam) < 2:
+                self.notes.append("coil %d: too few determined modes to check its "
+                                  "colocation sign; kept, unverified" % j)
+                keep.append(j)
+            elif all(x > 0 for x in lam) or all(x < 0 for x in lam):
+                keep.append(j)
+            else:
+                self.notes.append(
+                    "coil %d DROPPED: A/Phi has inconsistent sign across modes "
+                    "(%s). Sensor and coil are one head, so that ratio is one "
+                    "constant per channel; disagreeing signs mean Phi and A "
+                    "disagree, and a wrong sign pumps."
+                    % (j, ", ".join("%+.3f" % x for x in lam)))
+        if len(keep) < MODAL_MIN_COILS:
+            return self._refuse("only %d coil(s) pass the colocation sign check "
+                                "(need %d): %s"
+                                % (len(keep), MODAL_MIN_COILS, self.notes[-1:]))
+        self.a_coils = keep
+
+        self._build_tables()
+        self.ok = True
+        self.why = "loaded"
+        return True
+
+    @staticmethod
+    def _age(created, now=None):
+        if not created:
+            return None
+        try:
+            t = datetime.fromisoformat(created)
+        except ValueError:
+            return None
+        ref = datetime.now() if now is None else now
+        if t.tzinfo is not None:
+            t = t.replace(tzinfo=None)
+        return max((ref - t).total_seconds(), 0.0)
+
+    def _build_tables(self):
+        """One A_C+ per coil mask, plus the gate verdict, computed once.
+
+        2^8 = 256 masks, each a 3 x |C| pseudo-inverse. ~30 kB and a few ms at
+        start-up, against a data-dependent pseudo-inverse inside a 100 Hz loop.
+        `mimo_closed.md` Sec 4.2 is the source of this and it is still right on
+        the allocation side even though the sensing side no longer needs it.
+        """
+        self.pinv = [None] * (1 << self.n)
+        self.cond = [float("inf")] * (1 << self.n)
+        self.gate = [False] * (1 << self.n)
+        self.rank = [0] * (1 << self.n)
+        drivable = np.zeros(self.n, bool)
+        drivable[self.a_coils] = True
+        for mask in range(1 << self.n):
+            cols = [j for j in range(self.n)
+                    if (mask >> j) & 1 and drivable[j]]
+            if len(cols) < MODAL_MIN_COILS:
+                continue
+            Ac = self.a[:, cols]
+            U, sv, Vh = np.linalg.svd(Ac, full_matrices=False)
+            if sv[0] <= 1e-9:
+                continue
+            self.cond[mask] = float(sv[0] / sv[-1]) if sv[-1] > 1e-12 else float("inf")
+
+            # TRUNCATE, DO NOT REFUSE. This used to compute a full pinv and then
+            # veto the whole mask when cond exceeded MODAL_COND_MAX, which threw
+            # the loop back to diagonal on ALL THREE modes because ONE modal
+            # direction was badly reachable. Keeping the directions that ARE
+            # reachable and dropping only the rest damps two modes modally
+            # instead of none, which is strictly more damping for strictly less
+            # actuator demand.
+            #
+            # `keep` is by conditioning against the LARGEST singular value, which
+            # is what bounds the volts: a direction at sv[0]/sv[k] = 50 costs 50x
+            # the command for the same modal force, and that is the number the
+            # 0.250 V half-window cannot pay.
+            keep = int(np.sum(sv >= sv[0] / MODAL_COND_MAX))
+            keep = min(keep, int(np.linalg.matrix_rank(Ac, tol=1e-6)))
+            if keep < 1:
+                continue
+            Uk, svk, Vhk = U[:, :keep], sv[:keep], Vh[:keep, :]
+
+            # Weighted min-norm over the kept directions: mimo_closed.md Sec 3.4.
+            # W is per-coil headroom, constant here because the window is; making
+            # it track LIVE headroom would put a nonlinearity inside the loop and
+            # is refused.
+            P = (Vhk.conj().T * (1.0 / svk)) @ Uk.conj().T
+            # The projector onto the commandable modal subspace. The loop applies
+            # it to the modal VELOCITY before the gain, not to the force after it.
+            # That ordering is what keeps the law dissipative: the realised modal
+            # force is then -Proj K Proj qdot, and Proj K Proj is symmetric
+            # positive semidefinite for any positive gain vector, so
+            # qdot . f <= 0 always. Projecting the force instead gives
+            # -Proj K qdot, which is NOT symmetric unless every gain is equal,
+            # and can pump.
+            self.pinv[mask] = (cols, np.real(P), np.real(Uk @ Uk.conj().T))
+            self.rank[mask] = keep
+            self.gate[mask] = keep >= 1
+
+    # ---- the loop reads these -------------------------------------------
+    def sense(self, vmodal, sense_ok):
+        """(q_dot, residual) from the (N, nm) per-mode velocities.
+
+        `residual` is the part of each mode's sensor pattern that is NOT
+        proportional to Phi's column, normalised. No rigid-body motion can
+        produce it, so a sustained non-zero is sensors DISAGREEING -- a bad
+        sensor that is neither railed nor signal-less and is therefore invisible
+        to every other interlock. It is computed and logged and NOT ACTED ON:
+        there is no measured threshold, and adding an unmeasured fault source to
+        a rig whose fault history is the main thing wrong with it is a bad trade
+        (mimo_closed.md Sec 4.5). The first bench run records the distribution.
+
+        Per MODE, not global, which is better than the design asked for: with
+        |S| sensors determined at a mode the check has |S|-1 degrees of freedom
+        instead of |S|-nm, so it survives down to two sensors.
+        """
+        q = np.zeros(self.nm)
+        r = np.zeros(self.nm)
+        nseen = np.zeros(self.nm, int)
+        for m in range(self.nm):
+            use = sense_ok & self.rowok[:, m]
+            k = int(use.sum())
+            nseen[m] = k
+            if k < MODAL_MIN_SENSORS:
+                continue
+            phi = self.phi[use, m]
+            v = vmodal[use, m]
+            w = 1.0 / np.maximum(self.sigma[use, m], 1e-12) ** 2
+            den = float(np.sum(w * phi * phi))
+            if den <= 0:
+                continue
+            q[m] = float(np.sum(w * phi * v)) / den
+            res = v - phi * q[m]
+            nv = float(np.linalg.norm(v))
+            r[m] = float(np.linalg.norm(res) / nv) if nv > 0 else 0.0
+        return q, r, nseen
+
+    def mask_of(self, drive_ok):
+        """Coil-mask for a boolean per-coil vector. Bit j is coil j."""
+        mask = 0
+        for j, b in enumerate(drive_ok):
+            if b:
+                mask |= 1 << j
+        return mask
+
+    def project(self, qdot, drive_ok):
+        """(commandable part of qdot, rank). Apply BEFORE the gain, never after.
+
+        With rank reduction the allocator can only push in `rank` of the `nm`
+        modal directions. Zeroing the modal velocity in the directions it cannot
+        reach means the gain never asks for a force that will not be delivered,
+        and -- the part that matters -- it keeps the law dissipative: the realised
+        force becomes -Proj K Proj qdot, and Proj K Proj is symmetric PSD for any
+        positive gain vector, so the modal power qdot . f is never positive.
+        Applying the gain first and projecting the force gives -Proj K qdot,
+        which is not symmetric unless all the gains are equal and can inject
+        energy into the modes it drops.
+        """
+        mask = self.mask_of(drive_ok)
+        e = self.pinv[mask]
+        if not self.gate[mask] or e is None:
+            return np.zeros(self.nm), 0
+        return e[2] @ np.asarray(qdot, float), self.rank[mask]
+
+    def allocate(self, f, drive_ok):
+        """(u, mask, ok). Modal force 3-vector -> coil volts. One table lookup."""
+        # Bit j is coil j. Written out rather than with np.packbits, which was
+        # here first and had the array reversed: the mask then indexed a
+        # DIFFERENT valid table entry, so it failed the gate and returned a zero
+        # command instead of raising -- the loop just quietly stopped being
+        # modal. Eight shifts at 100 Hz is not worth a subtlety.
+        mask = 0
+        for j, b in enumerate(drive_ok):
+            if b:
+                mask |= 1 << j
+        if not self.gate[mask] or self.pinv[mask] is None:
+            return np.zeros(self.n), mask, False
+        cols, P, Proj = self.pinv[mask]
+        u = np.zeros(self.n)
+        # Project again here so `allocate` is correct on its own terms even if a
+        # caller hands it an unprojected force: Proj is idempotent, so this is a
+        # no-op on a force the loop already projected via `project()`.
+        u[cols] = P @ (Proj @ f)
+        # Bound the ALLOCATION, not just the output. The per-channel clip is
+        # still below this and unchanged; this stops one poorly-conditioned mask
+        # demanding a command the clip would silently turn into a standing rail.
+        pk = float(np.max(np.abs(u))) if u.size else 0.0
+        if pk > MODAL_DEMAND_CAP_V:
+            u *= MODAL_DEMAND_CAP_V / pk
+        return u, mask, True
+
+    def report(self):
+        """What preflight prints. The file about to run stays the thing you read."""
+        out = ["[modal] %s" % ("LOADED" if self.ok else "REFUSED -- running DIAGONAL")]
+        out.append("[modal] %s" % self.why)
+        if self.source:
+            out.append("[modal] source: %s" % self.source)
+        if self.created:
+            out.append("[modal] measured: %s" % self.created)
+        for n in self.notes:
+            out.append("[modal] NOTE: %s" % n)
+        if not self.ok:
+            return out
+        rows = [i for i in range(self.n) if self.rowok[i].all()]
+        out.append("[modal] Phi rows determined at every mode: %s" % rows)
+        out.append("[modal] Phi (unit-norm columns), sigma below each:")
+        for i in range(self.n):
+            out.append("[modal]   a%d  %s   %s"
+                       % (i, " ".join("%+8.4f" % x for x in self.phi[i]),
+                          "".join("y" if x else "." for x in self.rowok[i])))
+        out.append("[modal] A rows (unit-norm), coils %s:" % self.a_coils)
+        for m in range(self.nm):
+            out.append("[modal]   mode %d  %s"
+                       % (m, " ".join("%+8.4f" % x for x in self.a[m])))
+        full = int(sum(1 << j for j in self.a_coils))
+        out.append("[modal] full coil set %s: cond %.2f, gate %s"
+                   % (self.a_coils, self.cond[full],
+                      "PASS" if self.gate[full] else "FAIL"))
+        for j in self.a_coils:
+            m2 = full & ~(1 << j)
+            out.append("[modal]   drop coil %d -> cond %.2f, %s"
+                       % (j, self.cond[m2], "MIMO" if self.gate[m2] else "diagonal"))
+        npass = sum(1 for g in self.gate if g)
+        out.append("[modal] %d of %d coil masks run MIMO; the rest fall back to "
+                   "epsilon's diagonal law, which is a degradation and not a fault."
+                   % (npass, 1 << self.n))
+        out.append("[modal] Kp per mode %s x scale %.2f = %s"
+                   % (np.round(MODAL_KP, 4), MODAL_GAIN_SCALE,
+                      np.round(MODAL_KP * MODAL_GAIN_SCALE, 4)))
+        return out
 
 
 class KalmanVelocity:
@@ -899,15 +1454,42 @@ class Controller:
     second implementation of the loop."""
 
     def __init__(self, dac, dac_channels=None, enable=None, steady=None,
-                 capture=None, ki=None, kd=None, bias=None, baseline_file=None):
+                 capture=None, ki=None, kd=None, bias=None, baseline_file=None,
+                 modal_path=None):
         f = lambda v, d: np.array(d if v is None else v, dtype=float)
         self.enabled = np.array(ENABLE_CHANNEL if enable is None else enable, bool)
+        self._pin_hist = []          # dead_pin's rolling window
+        self._pin_said = np.zeros(N, bool)
         self.steady, self.capture = f(steady, STEADY_GAIN), f(capture, CAPTURE_GAIN)
         self.ki, self.kd, self.bias = f(ki, KI_GAIN), f(kd, KD_GAIN), f(bias, BIAS)
         self.act = Actuator(dac, DAC_CHANNELS if dac_channels is None else dac_channels)
 
         # One estimator, eight independent filters, K shipped as a constant.
         self.kf = KalmanVelocity()
+        # Phi and A, or the reason there are none.
+        #
+        # `modal_path=None` means NO MODAL DATA, and that is the default so that
+        # the suite and the simulator are REPRODUCIBLE: with the default reading
+        # MODAL_PATH, `make check` would score differently depending on whether
+        # somebody happened to have run status.py, which is exactly the kind of
+        # hidden input this repo has been bitten by. Only `main()` -- the bench
+        # path -- passes the real path, so opting in to the modal law is
+        # explicit and lives in one place.
+        #
+        # The simulator could not test it anyway: `sim/server.py` models TWO
+        # modes (SHAPE_8 is 8x2) and this file runs three. `--selftest` covers
+        # the modal math instead, and says so.
+        self.modal = Modal(modal_path)
+        self.nmode = self.modal.nm
+        self.qdot = np.zeros(self.nmode)          # modal velocity, V/s
+        self.mode_gain = np.zeros(self.nmode)     # scheduled K_m, >= 0
+        self.modal_res = np.zeros(self.nmode)     # out-of-mode residual, logged only
+        self.mode_seen = np.zeros(self.nmode, int)
+        self.modal_on = False                     # did THIS step run the modal law?
+        self.modal_mask = 0
+        self.modal_rank = 0
+        self.modal_u = np.zeros(N)
+        self.modal_says = None                    # one-shot reason, printed once
         self.dfilt = OnePole(D_SMOOTH_HZ)
         self.rms_sch, self.rms_run = _bank(SCHEDULE_WINDOW_S), _bank(ENVELOPE_WINDOW_S)
         self.env_hist = deque()          # (t, envelope) for the trend test
@@ -1000,6 +1582,42 @@ class Controller:
 
     def _say(self, msg):
         self.events.append("\n" + msg + "\n")
+
+    # Sub-LSB. A live ADC line always carries at least +/-1 count of dither, so a
+    # channel whose reading has not moved AT ALL across a calibration window is
+    # not a sensor at a stop, it is a pin at a rail. Measured 2026-08-17 over
+    # three records totalling 236 387 samples: a5 takes exactly ONE distinct
+    # value, 0.0 counts, variance exactly zero, while a0-a4 in the same records
+    # ran std 41-90 counts. There is no ambiguity to tune around here; the
+    # threshold only has to be under one count.
+    DEAD_PIN_SPAN_COUNTS = 1.0
+    DEAD_PIN_WINDOW = 64          # samples; ~0.6 s at 100 Hz control
+
+    def dead_pin(self, volts):
+        """Which channels are at a rail AND not moving at all -- i.e. unwired.
+
+        Kept deliberately narrow: it returns True only for channels that are
+        ALREADY railed, so it cannot demote a healthy quiet channel. A real rail
+        excursion clips and still wanders; a dead pin does not move.
+        """
+        v = np.asarray(volts, float)
+        self._pin_hist.append(v)
+        if len(self._pin_hist) > self.DEAD_PIN_WINDOW:
+            self._pin_hist.pop(0)
+        if len(self._pin_hist) < 8:
+            return np.zeros(N, bool)
+        H = np.asarray(self._pin_hist, float)
+        span = (H.max(axis=0) - H.min(axis=0)) / (A_VCC / ADC_MAX_COUNTS)
+        flat = span < self.DEAD_PIN_SPAN_COUNTS
+        out = self.rail & flat
+        for i in np.where(out & ~self._pin_said)[0]:
+            self._say(f"[pin] ch{i} is railed and has not moved {span[i]:.2f} "
+                      f"counts in {len(self._pin_hist)} samples -- treating it as "
+                      f"an UNWIRED PIN, not a plant excursion. It is demoted, and "
+                      f"it will not fault the rig. Fix the wiring or set "
+                      f"ENABLE_CHANNEL[{i}] = False.")
+            self._pin_said[i] = True
+        return out
 
     def _fault(self, t, msg, railed=False):
         self._say("!! " + msg)
@@ -1424,8 +2042,25 @@ class Controller:
 
         if self.state == "CALIBRATING":
             self.calib.append(self.bp)
-            if self.rail.any():
-                self._fault(t, f"{self._who(self.rail)} railed during calibration -- "
+            # ENABLED CHANNELS ONLY, and a DISABLED one must not be able to fault
+            # the rig. Measured 2026-08-17: ch5's pin is at hard ground, so it
+            # reads 0 counts, which is below RAIL_LOW; this test faulted the whole
+            # rig on it for 55 s with every gain at zero -- and kept doing so
+            # after ENABLE_CHANNEL[5] was set False, because the test never
+            # consulted ENABLE_CHANNEL. The console said `ch5:off` in the same
+            # breath as faulting on ch5.
+            #
+            # A DEAD PIN IS NOT A PLANT EXCURSION, and the two must be separated
+            # or the whole graceful-degradation ladder is defeated by one bad
+            # solder joint. The rail fault here is correct in its original
+            # meaning: a rail during calibration normally means the optic is
+            # against a stop, which nothing downstream can measure around. But a
+            # channel that is railed from the FIRST sample with no variance at all
+            # is not against a stop -- it is not connected. Variance separates
+            # them: a real excursion clips and still moves, a dead pin does not.
+            rail_now = self.rail & self.enabled & ~self.dead_pin(volts)
+            if rail_now.any():
+                self._fault(t, f"{self._who(rail_now)} railed during calibration -- "
                                 f"check alignment.", railed=True)
             elif self.file_baseline is not None:
                 self._warm_from_file(t)
@@ -1632,6 +2267,22 @@ class Controller:
         want, cap = self.steady + frac * (self.capture - self.steady), GAIN_SLEW_PER_S * dt
         self.gain = np.where(live, self.gain + np.clip(want - self.gain, -cap, cap), 0.0)
 
+        # The modal gain, one scalar per MODE. There is deliberately NO
+        # capture/steady blend here, and no amplitude term: `capture` exists to
+        # grab a large amplitude, and the modal law's claim is better ALLOCATION
+        # of a given force, not more reach. Adding a second unvalidated gain
+        # vector to buy nothing the law claims is how a first bench run stops
+        # being able to answer what it was run to answer.
+        #
+        # So the target is constant and the SLEW LIMIT is the whole schedule:
+        # GAIN_SLEW_PER_S is the same limiter the diagonal law uses, so the soft
+        # start is the one already on the bench, and `mode_gain` reaching its
+        # target takes the same time a channel gain does.
+        self.mode_gain = (self.mode_gain + np.clip(
+            MODAL_KP * MODAL_GAIN_SCALE - self.mode_gain,
+            -GAIN_SLEW_PER_S * dt, GAIN_SLEW_PER_S * dt)
+            if self.modal.ok else np.zeros(self.nmode))
+
         # Gated on `healthy` not `live`: a blind channel measures nothing.
         env = _rms(self.rms_run, t, self.bp, self.healthy)
         # `runaway-trend`. A level test cannot tell a runaway from a ringdown, so it
@@ -1733,6 +2384,47 @@ class Controller:
     def _actuate(self, t, dt):
         # Takes `t`: the saturation interlock is a time window, not a count.
         live = self.enabled & self.healthy & (self.state == "DAMPING")
+
+        # ===== the modal law =====
+        # Two sets, not one (mimo_closed.md Sec 4.1). SENSE_OK is "this sensor's
+        # opinion counts"; DRIVE_OK is "this coil is driven". They differ, and a5
+        # is the case that proves it: a live sensor with a dead coil is exactly
+        # what a single `live` flag cannot represent.
+        sense_ok = live & ~self.floor_bad
+        drive_ok = live & ~self.floor_bad
+        self.modal_on = False
+        self.modal_u[:] = 0.0
+        if self.modal.ok and self.state == "DAMPING":
+            # The estimator already separates the modes -- per channel, per mode
+            # -- so this is nm scalar least-squares fits, not a pseudo-inverse.
+            # See Modal.sense: cond(Phi) stops being load-bearing entirely.
+            vmodal = self.kf.modal_velocity()
+            self.qdot, self.modal_res, self.mode_seen = self.modal.sense(vmodal, sense_ok)
+            enough = self.mode_seen >= MODAL_MIN_SENSORS
+            # PROJECT FIRST, THEN GAIN. The allocator may only reach `rank` of
+            # the nm modal directions after truncation; zeroing the velocity in
+            # the rest is what makes the realised force -Proj K Proj qdot, which
+            # is guaranteed dissipative. See Modal.project.
+            qd, self.modal_rank = self.modal.project(self.qdot, drive_ok)
+            # A mode nobody can see gets zero force rather than a guess. The
+            # OTHER modes are still damped: that is the degradation MIMO is for.
+            f = np.where(enough, -self.mode_gain * qd, 0.0)
+            u, self.modal_mask, ok = self.modal.allocate(f, drive_ok)
+            if ok and enough.any():
+                self.modal_on = True
+                self.modal_u = u
+            elif self.modal_says is None:
+                self.modal_says = (
+                    "[modal] falling back to DIAGONAL: %s. Not a fault -- "
+                    "epsilon's law, epsilon's gains, restricted to the survivors."
+                    % ("no modal direction is reachable (mask %d, cond %.2f,"
+                       " rank %d of %d)"
+                       % (self.modal_mask, self.modal.cond[self.modal_mask],
+                          self.modal.rank[self.modal_mask], self.modal.nm)
+                       if not ok else
+                       "no mode has %d determined sensors" % MODAL_MIN_SENSORS))
+                self._say(self.modal_says)
+
         err = -self.vel                                # setpoint is zero velocity
         self.p = self.gain * err
         self.prev_vel[~self.primed] = self.vel[~self.primed]
@@ -1752,6 +2444,14 @@ class Controller:
                     -I_CLAMP_V, I_CLAMP_V),
             0.0)
 
+        # The modal command REPLACES P, not adds to it: both are the proportional
+        # velocity-feedback term and running them together would double the loop
+        # gain. D survives on both paths (it is per-channel effective mass and is
+        # unchanged by the allocation) and Ki is zero on both, structurally --
+        # v_hat never reads the estimator's drift state, so there is nothing left
+        # for an integrator to reject.
+        if self.modal_on:
+            self.p = np.where(live, self.modal_u, 0.0)
         raw = self.bias + self.p + self.i + self.d
         clipped = np.clip(raw, self.vmin, self.vmax)
         self.clip_excess = np.where(live, raw - clipped, 0.0)
@@ -1884,7 +2584,13 @@ class Controller:
         rate = (f"{self.wire_hz:.0f}/{CONTROL_HZ:.0f}Hz avg{self.n_avg:d}"
                 if self.wire_hz == self.wire_hz else f"--/{CONTROL_HZ:.0f}Hz")
         bad = f" bad{self.bad_samples}" if self.bad_samples else ""
-        return (f"[{t:7.1f}s] {self.state:11s} {rate}{bad} "
+        if self.modal.ok:
+            mode = ("MIMO" if self.modal_on else "diag") + (
+                " q=" + "/".join(f"{x:+.3f}" for x in self.qdot)
+                + " res=" + "/".join(f"{x:.2f}" for x in self.modal_res))
+        else:
+            mode = "diag(no modal data)"
+        return (f"[{t:7.1f}s] {self.state:11s} {rate}{bad} {mode} "
                 + "  ".join(one(i) for i in range(N)))
 
     def csv_row(self, t, counts):
@@ -1897,7 +2603,12 @@ class Controller:
         version is not comparable to one measured here."""
         row = [f"{t:.4f}", self.state,
                "1" if self.stepped else "0",
-               str(self.n_avg if self.stepped else 0)]
+               str(self.n_avg if self.stepped else 0),
+               "1" if self.modal_on else "0", str(self.modal_mask),
+               str(self.modal_rank)]
+        row += [f"{x:.6f}" for x in self.qdot]
+        row += [f"{x:.5f}" for x in self.mode_gain]
+        row += [f"{x:.5f}" for x in self.modal_res]
         for i in range(N):
             row += [str(int(counts[i])), f"{counts[i] * (A_VCC / ADC_MAX_COUNTS):.4f}"]
             row += [format(getattr(self, k)[i], f) for k, f in _LOG]
@@ -2050,6 +2761,188 @@ def load_baseline(path=BASELINE_PATH, fresh=False, now=None):
     return (np.array(b, float), np.array(fl, bool)), say
 
 
+def _selftest():
+    """The modal math, against a plant whose Phi and A are known exactly.
+
+    WHY THIS EXISTS AND THE SIMULATOR DOES NOT REPLACE IT. `sim/server.py`
+    carries a measured eight-OSEM body, but it models **two** modes
+    (`MODE_F0_8`, `SHAPE_8` is 8x2) and the ringdown has since measured
+    **three**. So `make check` exercises this file's supervisor, its transport
+    and its DIAGONAL law -- everything zeta shares with epsilon -- and cannot
+    reach the modal path at all. That is a real gap and it is stated here rather
+    than left for somebody to assume the suite covered it.
+
+    What the bench still has to answer, and this cannot: whether the modal law
+    damps the actual optic, and whether Kp = -0.040's rail onset moves when
+    every sensor reaches every coil. The simulator's own README already records
+    that it cannot tell you a safe gain.
+    """
+    import tempfile
+    ok = True
+
+    def check(name, cond, detail=""):
+        nonlocal ok
+        ok = ok and bool(cond)
+        print("   %-46s %s%s" % (name, "PASS" if cond else "FAIL",
+                                 ("   " + detail) if detail else ""))
+
+    rng = np.random.default_rng(20260815)
+    nm = len(F_MODE_HZ)
+    # A consistent pair, built the way physics builds one: sensor and coil are
+    # the same head, so A[m,j] = lambda_j * Phi[j,m] with ONE lambda per channel
+    # (mimo_closed.md Sec 3.2). Anything else is not a plant zeta should accept.
+    Phi = np.sign(rng.normal(size=(N, nm))) * (0.5 + rng.random((N, nm)))
+    Phi[6] = Phi[7] = 0.0                       # two blind sensors, as measured
+    lam = np.array([1.0, -0.8, 1.4, -1.1, 0.2, 0.3, 0.0, 0.0])
+    A = np.array([[lam[j] * Phi[j, m] for j in range(N)] for m in range(nm)])
+    okrow = np.zeros((N, nm), bool)
+    okrow[:6] = True
+    d = dict(schema=MODAL_SCHEMA,
+             created=datetime.now().isoformat(timespec="seconds"),
+             git_rev="selftest", source="selftest", n_sensors=N, n_modes=nm,
+             modes=[dict(name=c, f_hz=float(f))
+                    for c, f in zip("ABC", F_MODE_HZ)],
+             phi=dict(value=Phi.tolist(),
+                      sigma=np.full((N, nm), 0.01).tolist(),
+                      ok=okrow.tolist(), imag_frac=[0.0] * nm, gauge="selftest"),
+             a=dict(value=A.tolist(), coils=[0, 1, 2, 3], gauge="selftest",
+                    provisional=False, provenance="selftest"))
+    tmp = os.path.join(tempfile.gettempdir(), "zeta_selftest_modal.json")
+    with open(tmp, "w") as fh:
+        json.dump(d, fh)
+
+    print("\n  === osem.zeta.py modal selftest ===\n")
+    m = Modal(tmp)
+    check("a consistent Phi/A pair loads", m.ok, m.why)
+    if not m.ok:
+        return 1
+    check("colocation sign check keeps all four coils", m.a_coils == [0, 1, 2, 3],
+          str(m.a_coils))
+
+    full = int(sum(1 << j for j in m.a_coils))
+    check("the full coil mask passes the gate", m.gate[full],
+          "cond %.2f" % m.cond[full])
+
+    # --- sensing: plant a modal velocity, see whether it comes back ---------
+    sense_ok = np.array([True] * 6 + [False, False])
+    qtrue = np.array([0.30, -0.12, 0.07])[:nm]
+    # From m.phi, NOT the Phi written to the file: _load normalises the columns
+    # to unit norm so that MODAL_KP means the same thing as the diagonal Kp, and
+    # q_dot is defined against the normalised shape. Synthesizing from the
+    # unnormalised one measures the scale factor, not the estimator.
+    v = m.phi * qtrue                            # v[i,m] = Phi[i,m] * qdot_m
+    q, res, seen = m.sense(v, sense_ok)
+    check("sensing recovers a planted modal velocity",
+          np.allclose(q, qtrue, rtol=1e-9, atol=1e-12),
+          "%s vs %s" % (np.round(q, 6), np.round(qtrue, 6)))
+    check("out-of-mode residual is zero on a consistent reading",
+          float(np.max(np.abs(res))) < 1e-9, "max %.2e" % float(np.max(np.abs(res))))
+
+    # One sensor disagreeing is the failure NO other interlock can see: not
+    # railed, not signal-less, just wrong. It must show up in the residual.
+    vbad = v.copy()
+    vbad[1] *= -3.0
+    _, rbad, _ = m.sense(vbad, sense_ok)
+    check("a disagreeing sensor raises the residual",
+          float(np.max(rbad)) > 0.2, "max %.3f" % float(np.max(rbad)))
+
+    # --- allocation: is the realised modal force the one asked for? ---------
+    f = -np.array([0.02, 0.01, 0.015])[:nm]
+    u, mask, gok = m.allocate(f, sense_ok & np.array([True] * 4 + [False] * 4))
+    got = m.a[:, [0, 1, 2, 3]] @ u[[0, 1, 2, 3]]
+    check("allocation is exact at full row rank (A A+ = I)",
+          gok and np.allclose(got, f, rtol=1e-8, atol=1e-12),
+          "%s vs %s" % (np.round(got, 6), np.round(f, 6)))
+
+    # THE safety property. f = -K qdot with K > 0, and at full row rank the
+    # realised force equals it, so the modal power is strictly negative: the law
+    # removes energy. A sign error anywhere in Phi, A or the allocation flips
+    # this, and a wrong sign PUMPS rather than under-damps.
+    K = MODAL_KP[:nm] * MODAL_GAIN_SCALE
+    fq = -K * qtrue
+    uq, _, _ = m.allocate(fq, sense_ok & np.array([True] * 4 + [False] * 4))
+    power = float((m.a[:, [0, 1, 2, 3]] @ uq[[0, 1, 2, 3]]) @ qtrue)
+    check("the realised modal force DISSIPATES (f . qdot < 0)", power < 0,
+          "f.qdot = %+.6f" % power)
+
+    # --- degradation --------------------------------------------------------
+    for j in m.a_coils:
+        mm = full & ~(1 << j)
+        dok = np.zeros(N, bool)
+        for k in m.a_coils:
+            if k != j:
+                dok[k] = True
+        # Project first, exactly as the loop does, so what is checked is the law
+        # that actually runs and not a more favourable variant of it.
+        qd, rk = m.project(qtrue, dok)
+        fj = -K * qd
+        uu, mk, gg = m.allocate(fj, dok)
+        cols = [k for k in m.a_coils if k != j]
+        if gg:
+            realised = m.a[:, cols] @ uu[cols]
+            # WHAT "CORRECT" MEANS AFTER TRUNCATION. At full rank the realised
+            # force equals the demand. At reduced rank it equals the demand
+            # PROJECTED onto the reachable directions -- that is the whole point,
+            # and demanding exactness would be demanding the old refuse-instead
+            # behaviour back. What must hold in BOTH cases is dissipation.
+            exact = np.allclose(realised, fj, rtol=1e-6, atol=1e-9)
+            power = float(realised @ qtrue)
+            ok_here = mk == mm and power < 0 and (exact or rk < nm)
+            check("drop coil %d -> rank %d of %d, dissipates%s"
+                  % (j, rk, nm, ", and exact" if exact else " (truncated)"),
+                  ok_here,
+                  "cond %.2f, f.qdot %+.6f%s" % (m.cond[mm], power,
+                  "" if exact else ", realised = demand projected"))
+        else:
+            # Still the designed floor: nothing reachable at all, so the loop
+            # runs epsilon's diagonal law on the survivors. Checked here is that
+            # it refuses CLEANLY rather than returning a wrong command.
+            check("drop coil %d -> nothing reachable, refuses cleanly" % j,
+                  mk == mm and not uu.any() and rk == 0,
+                  "cond %.2f, rank 0" % m.cond[mm])
+    for i in range(4):
+        s2 = sense_ok.copy()
+        s2[i] = False
+        q2, _, seen2 = m.sense(v, s2)
+        check("drop sensor a%d -> modal velocity still exact" % i,
+              np.allclose(q2, qtrue, rtol=1e-8, atol=1e-12),
+              "seen %s" % seen2)
+
+    # --- every refusal actually refuses ------------------------------------
+    print()
+    def refuses(name, mutate):
+        e = json.loads(json.dumps(d))
+        mutate(e)
+        p2 = tmp + ".bad"
+        with open(p2, "w") as fh:
+            json.dump(e, fh)
+        mm = Modal(p2)
+        check(name, not mm.ok, mm.why[:64])
+
+    refuses("refuses a wrong schema", lambda e: e.__setitem__("schema", "nope"))
+    refuses("refuses modes at other frequencies",
+            lambda e: e["modes"][1].__setitem__("f_hz", 1.20))
+    refuses("refuses a stale file",
+            lambda e: e.__setitem__("created", "2020-01-01T00:00:00"))
+    refuses("refuses a Phi/A gauge mismatch",
+            lambda e: e["a"].__setitem__("gauge", "somewhere else"))
+    refuses("refuses a provisional A by default",
+            lambda e: e["a"].__setitem__("provisional", True))
+    def flip(e):
+        # One mode's sign flipped on A alone: exactly the pump, and exactly what
+        # the colocation identity is there to catch.
+        e["a"]["value"][0] = [-x for x in e["a"]["value"][0]]
+    refuses("refuses a sign-flipped A (the pump)", flip)
+    refuses("refuses a missing A", lambda e: e.__setitem__("a", None))
+    check("refuses a file that is not there", not Modal(tmp + ".nope").ok)
+
+    print("\n  %s\n" % ("ALL PASS -- the modal math is right and every refusal "
+                        "refuses.\n  NOT tested here, and only the bench can: "
+                        "whether it damps the optic." if ok else
+                        "FAILURES ABOVE -- do not run this on the bench."))
+    return 0 if ok else 1
+
+
 def main(argv=None):
     # Line-buffer stdout: Python block-buffers when it is not a terminal, so every
     # print here is invisible for 8 kB at a time whenever the run is piped or
@@ -2060,11 +2953,21 @@ def main(argv=None):
     except Exception:
         pass
     argv = list(sys.argv[1:] if argv is None else argv)
+    if "--selftest" in argv:
+        sys.exit(_selftest())
     fresh = ("--fresh" in argv
              or os.environ.get("OSEM_FRESH_CALIB", "0") not in ("", "0"))
     loaded, report = load_baseline(BASELINE_PATH, fresh=fresh)
     print()
     for line in report:
+        print(line)
+    print()
+
+    # Printed BEFORE the coils are energised and before any prompt, out of the
+    # object that is about to run: whether this is a modal run or a diagonal one
+    # is the single most important fact about it, and it must not be something
+    # you discover from the traces.
+    for line in Modal(MODAL_PATH).report():
         print(line)
     print()
 
@@ -2079,7 +2982,8 @@ def main(argv=None):
     else:
         print("DAC biases set. stdin is not a tty -- starting without the prompt.")
     dac.start_stream()
-    ctl = Controller(dac, baseline_file=loaded)
+    # The ONE place the modal law is opted into. See Controller.__init__.
+    ctl = Controller(dac, baseline_file=loaded, modal_path=MODAL_PATH)
 
     os.makedirs("data", exist_ok=True)
     path = os.path.join("data", datetime.now().strftime("%Y%m%d_%H%M%S") + "_fast_lock.csv")
@@ -2156,16 +3060,33 @@ def main(argv=None):
     except KeyboardInterrupt:
         print("\nStopped by user.")
     finally:
-        log.close()
-        dac.stop_stream()
+        # PARK FIRST, and guard every step separately. `stop_stream()` blocks
+        # waiting for an ACK a busy board may never send -- measured 2026-08-18,
+        # it survived 90 s of SIGINT to both the process and its group while
+        # holding the port. With the park behind it, a hang there left the coils
+        # ENERGISED, which is the one outcome this block exists to prevent, and
+        # it is why they had to be parked by hand three times that session.
+        # One `try` around several steps has the same defect: the first raise
+        # skips the rest.
+        try:
+            log.close()
+        except Exception:
+            pass
         print("Returning DAC outputs to bias voltages...")
         for c, b in zip(DAC_CHANNELS, BIAS):
             try:
                 dac.set_voltage(channel=c, voltage=float(b))
-            except RuntimeError:
+            except Exception:
                 pass                      # best effort; the board resets on reconnect
         time.sleep(0.1)
-        dac.close()
+        try:
+            dac.stop_stream()
+        except Exception:
+            pass
+        try:
+            dac.close()
+        except Exception:
+            pass
         print(f"Log saved to {path}")
         print(f"{rows} raw samples, {ctl.ctl_steps} control steps "
               f"({rows / max(ctl.ctl_steps, 1):.1f} averaged per step), "

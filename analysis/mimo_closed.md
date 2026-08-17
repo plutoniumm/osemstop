@@ -1,6 +1,31 @@
 # Full MIMO / modal damping — the design
 
-`research.md` item 2. Written 2026-08-06, against `osem.v12.py` and `tune.py`,
+> **SUPERSEDED ON THE SENSOR SIDE, 2026-08-17. Every measurement in this file
+> stands for the data it was taken on; two of its conclusions do not.**
+>
+> 1. **a1 is no longer the blocker.** The 2026-08-17 census
+>    (`data/20260817_172150_status_sensors.csv`, 37 619 samples, 90 s, 418 Hz)
+>    grades a1 **GOOD** at SNR 68.2 / 48.3 / 54.0, and **five** sensors (a0–a4)
+>    carry all three modes at SNR 48–107. Four determined rows are the requirement
+>    for a tall Φ, so the sensor-side blocker is **cleared**. Φ need not come out
+>    square, and **square was never a property of the geometry** — the reported
+>    layout (four corner sensors, one warp direction no rigid-body motion can
+>    produce) predicts a non-empty null space regardless.
+> 2. **Every frequency in this file is stale.** The modes moved between 2026-08-06
+>    and 2026-08-17 by up to **0.0170 Hz = 9.0 half-widths at Q = 433**, so any
+>    quantity here derived from a drive or a fit at the old frequencies is
+>    attenuated in magnitude and wrong in phase by up to 84°. That includes the
+>    8-coil actuation matrix. **A is effectively a hole again.**
+>
+> **"MIMO works" is still not established:** the Φ gate has never run on a valid
+> record (it needs ≥ 192 s undisturbed) and A is unmeasured. See `versions.md`
+> § *On the bench, 2026-08-17* and `CLAUDE.md` items 1–3. The modal law now lives
+> in `osem.zeta.py` (2026-08-15, `untested`), which loads a measured Φ and A from
+> `data/modal.json` and falls back to the diagonal law when they are absent or
+> stale — **do not delete it.**
+
+the modal-damping item. Written 2026-08-06, against what is now `osem.delta.py`
+and `tune.py`,
 and revised the same day when the 8-coil closed-loop measurement landed.
 
 Reproduce every number with
@@ -278,7 +303,7 @@ minimise ℓ∞. Handled, not hidden:
   `W = diag(w_j)` **fixed for the run**, set from each channel's own headroom
   `min(bias_j − vmin_j, vmax_j − bias_j)`. Still one constant linear map,
   computed once, printed at preflight. Making `W` track live headroom would put
-  a nonlinearity inside the loop and is refused on `research.md`'s rule that the
+  a nonlinearity inside the loop and is refused on the standing rule that the
   control law stays classical and certifiable.
 - the residual is left to v12's existing per-channel clip, slew limit and
   back-calculation anti-windup, all unchanged.
@@ -472,7 +497,7 @@ the four-log spread used here.
 **When the gate fails, v13 runs v12.** Not a fault — v12's law, v12's gains
 restricted to the survivors, unchanged to the last digit. That path has 27 bench
 logs behind it and damps with a single healthy channel
-(`MIN_HEALTHY_CHANNELS = 1`, `provenance.md` §3), strictly below anything MIMO
+(`MIN_HEALTHY_CHANNELS = 1`; one pair damps the whole mass), strictly below anything MIMO
 can do.
 
 | healthy set | v13 runs |
@@ -754,7 +779,7 @@ A modal estimator built from the calibration covariance would have inferred mode
 content from an 11.5x-inflated, ringdown-dominated window and reported a
 confident answer. That is not hypothetical — the deleted modal v4 did exactly
 that, taking "98.8% / 1.2% mode content from the calibration covariance"
-(`research.md` item 2).
+(the modal-damping item).
 
 **v13 does not estimate anything modal from live data.** `Phi`, `A`, their
 covariances and the whole 256-mask table are **constants in the file**,
@@ -762,7 +787,7 @@ transcribed by a human from `gains.json` after a driven measurement, exactly as
 `gains.json` demands ("Nothing loads this file... A human transcribes"). The
 only live inputs to the modal path are `vel`, which is already filtered, and the
 health mask, which is a set of booleans. There is no adaptive identification in
-the loop and there will not be, on the `research.md` rule: learn the model
+the loop and there will not be, on the standing rule: learn the model
 offline, keep the control law and the interlocks classical and certifiable.
 
 The calibration baseline still enters v13 — through the gain schedule, the

@@ -8,7 +8,7 @@
 PY ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 FQBN ?= arduino:avr:mega        # CS on pin 53 is Mega/Due specific
 
-.PHONY: run arduino ports test check sim list help
+.PHONY: run status replay arduino ports test check scope list help
 .DEFAULT_GOAL := help
 
 help:                ## show this
@@ -18,8 +18,14 @@ help:                ## show this
 	@echo
 	@$(PY) harness.py --list
 
-run:                 ## ON HARDWARE: preflight the board, then run a controller (make run V=delta)
+run:                 ## ON HARDWARE: preflight the board, then run a controller (make run V=eta)
 	@$(PY) bench.py $(V) $(if $(PORT),--port $(PORT))
+
+status:              ## ON HARDWARE: graded sensor/coil census + the MIMO gate (make status W=sensors|coils|phi|pulse)
+	@$(PY) status.py $(or $(W),sensors) $(if $(PORT),--port $(PORT))
+
+replay:              ## the same census offline against a recorded log (make replay F=data/x.csv W=sensors)
+	@$(PY) status.py $(or $(W),sensors) --replay $(F)
 
 arduino:             ## ON HARDWARE: compile arduino.ino and upload it (make arduino FQBN=...)
 	@$(PY) bench.py --flash $(if $(PORT),--port $(PORT)) --fqbn $(FQBN)
@@ -33,8 +39,8 @@ test:                ## interactive runner: pick a version, watch it damp, press
 check:               ## the same suite headless across every version (CI form)
 	@$(PY) harness.py --test all
 
-sim:                 ## browser simulator on the newest version -- make sim V=beta to pick
-	@$(PY) harness.py $(V)
+scope:               ## 8-channel scope in the browser: the real board, or the live run's CSV
+	@$(PY) scope.py $(if $(PORT),--port $(PORT)) $(if $(HTTP),--http $(HTTP))
 
 list:                ## what versions exist and what each one changes
 	@$(PY) harness.py --list

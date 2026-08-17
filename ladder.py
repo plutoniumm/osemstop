@@ -13,34 +13,65 @@ worse than v9 did. Numbers also imply a total order that the history does not
 have -- v7 was a branch off v5, not a successor to it. Names force the question
 "which one do I run" to be answered by reading, not by taking the largest number.
 
-    zero     the original. One channel. A saturation trip LATCHES: it is an
-             absorbing fault state needing a manual restart. Kept as the
-             baseline the ladder is measured against, NOT to be run unattended.
-    alpha    graceful degradation. One blind OSEM is demoted rather than
-             faulting the rig.
-    beta     the supervisor, four channels. `runaway-trend` -- the breaker
-             tests for GROWTH rather than level, which is what stopped the
-             post-kick fault thrash. Best DAMPING fraction on record, 83.1%.
-    delta    eight channels, 500000 baud, a 100 Hz control clock decoupled from
-             the wire, and the fixes that made that safe: `sample-guard`,
-             `decimate`, `persist-baseline`, `baseline-sanity`. The one to run.
     epsilon  the Kalman velocity estimator replacing bandpass-and-differentiate,
              `mains-null` decimation, and Ki dropped to zero because the filter
              carries drift as a state rather than integrating it. Written
-             2026-08-07, `BENCH_STATUS = untested`: it has never run on the
-             bench, so delta is still the one to run.
+             2026-08-07. It has never run on the bench, and its suite failures
+             are the worst on the ladder.
+    zeta     the modal (MIMO) law, and the first rung whose control law is not
+             in its own file: Phi and A live in data/modal.json, written by
+             `status.py --save-modal`. With no file, a stale one, or one that
+             fails its own checks, zeta runs epsilon's diagonal law and says
+             which. RAN ON THE RIG 2026-08-17 and damped 5x better than the
+             diagonal law by decay rate -- the first result on this rig that is
+             not four independent SISO loops.
+    eta      the same modal law with the velocity coming from ONE Kalman filter
+             whose STATE is the modal coordinates -- 3 modes x 2 plus a DC state
+             per sensor, 14 states -- instead of zeta's per-mode least squares
+             over eight per-sensor filters. A demoted or railed sensor is a
+             DELETED ROW, no re-weighting. The point of it is that a filter knows
+             its own innovation covariance, so zeta's out-of-mode residual
+             becomes a CALIBRATED statistic: chi2 per degree of freedom, order 1
+             when the three-mode model fits. It is LOGGED AND NOT ACTED ON -- the
+             distribution on this rig has never been measured, so a threshold
+             would be a guess, and deriving one from a bench run is the next
+             rung. The cost is that Phi is now inside the estimator, so a wrong
+             Phi gives a wrong velocity; zeta's refusal ladder is kept whole and
+             chi2 is what detects it. Written 2026-08-17, not yet on the bench.
+    theta    the same modal law written as a bank of causal FIR KERNELS instead
+             of a matrix and a gain -- `u_i(t) = sum_j h_ij * y_j`, which is the
+             general LTI MIMO controller and contains every rung above it as a
+             special case. What it adds is the only per-mode freedom the matrix
+             form cannot express: PHASE. Velocity feedback is a 90 degree shift
+             on displacement, and only exact quadrature dissipates -- anything
+             else is partly a spring. `KERNEL_PHASE_DEG` defaults to [0, 0, 0],
+             at which the taps reduce to the unit impulse EXACTLY and theta is
+             bit-identical to eta: measured max |du| = 0.000e+00 V over 30 000
+             samples across 8 channels. So it changes nothing until somebody
+             sets a phase, which is deliberate -- a kernel has 140 taps per pair
+             against three measured numbers, and a wrong one does not under-damp,
+             it PUMPS. Blocked on A's MAGNITUDES, which are not established.
+             Written 2026-08-18, not yet on the bench.
 
-Alphabetical order is NOT ladder order -- "zero" sorts last and is first. That is
-the whole reason this is an explicit tuple rather than a sort key.
+Alphabetical order is NOT ladder order -- eta is the newest rung and sorts before
+zeta. That is the whole reason this is an explicit tuple rather than a sort key.
 
 Deleted rungs are in git history and `versions.md` says what each one was:
-v1, v2, v3, v5, v5.5, v7, v8, v10, v11, v13, and the v6 sysid variants.
+zero (v0), alpha (v4), beta (v9), delta (v12), and v1, v2, v3, v5, v5.5, v7, v8,
+v10, v11, v13 plus the v6 sysid variants. `RETIRED` below is why typing one of
+those names still gets an answer rather than "no such version".
+
+DELTA WAS DELETED 2026-08-17 and it was the only rung ever marked validated on
+hardware. What replaces it is not another file: zeta and eta both run epsilon's
+diagonal law verbatim when `data/modal.json` is absent or refused, so the
+diagonal control is still one run away -- that is the null test in CLAUDE.md
+Sec 4. `git show b90c983:osem.delta.py` if a direct comparison is ever needed.
 """
 
 # Ladder order. Position in this tuple IS the order; nothing is derived from
 # the name. Appending a name here is how a new rung becomes visible to
 # `make run`, `make check` and `make list` at once.
-LADDER = ("zero", "alpha", "beta", "delta", "epsilon")
+LADDER = ("epsilon", "zeta", "eta", "theta")
 
 # Files matching `osem.<name>.py` that are NOT rungs. They close no loop, so the
 # simulator refuses them and `make run` prints a different banner. Each also
@@ -53,7 +84,7 @@ SUFFIX = ".py"
 
 
 def stem(basename):
-    """'osem.delta.py' -> 'delta'. Returns None if it is not one of ours."""
+    """'osem.eta.py' -> 'eta'. Returns None if it is not one of ours."""
     if not (basename.startswith(PREFIX) and basename.endswith(SUFFIX)):
         return None
     name = basename[len(PREFIX):-len(SUFFIX)]
@@ -77,46 +108,65 @@ def sort_key(basename):
 
 
 def filename(name):
-    """'delta' -> 'osem.delta.py'."""
+    """'eta' -> 'osem.eta.py'."""
     return PREFIX + name + SUFFIX
 
 
-def resolve_name(text):
-    """Accept 'delta', 'osem.delta', 'osem.delta.py' -> 'delta', else None.
-
-    Numbers are accepted and REDIRECTED rather than rejected, because every log,
-    docstring and bench note written before the rename says 'v12'. Telling
-    somebody that v12 does not exist is true and useless; telling them it is
-    now `delta` is what they needed.
-    """
-    if not text:
-        return None
-    t = text.strip()
+def bare(text):
+    """Strip the prefix and suffix: 'osem.eta.py' -> 'eta'. Not a lookup."""
+    t = (text or "").strip()
     if t.startswith(PREFIX):
         t = t[len(PREFIX):]
     if t.endswith(SUFFIX):
         t = t[:-len(SUFFIX)]
+    return t
+
+
+def resolve_name(text):
+    """Accept 'eta', 'osem.eta', 'osem.eta.py' -> 'eta', else None.
+
+    Numbers are accepted and REDIRECTED rather than rejected, because every log,
+    docstring and bench note written before the rename says 'v12'. Telling
+    somebody that v12 does not exist is true and useless; telling them what
+    happened to it is what they needed -- and since delta itself is now deleted,
+    'v12' redirects to "that one is gone" rather than to a missing file.
+    """
+    if not text:
+        return None
+    t = bare(text)
     return t if t in LADDER or t in TOOLS else None
 
 
 # The rename, for error messages. Keys are the old numbered names WITHOUT the
-# leading 'v'. Versions that were deleted rather than renamed map to None, and
-# the caller says so rather than pointing at a file that is not there.
-RENAMED = {"0": "zero", "4": "alpha", "9": "beta", "12": "delta", "6": "sysid",
-           "1": None, "2": None, "3": None, "5": None, "5.5": None,
-           "7": None, "8": None, "10": None, "11": None, "13": None}
+# leading 'v'. A version that is gone maps to None and the caller says so rather
+# than pointing at a file that is not there -- which is why 0, 4, 9 and now 12
+# are None and not "zero"/"alpha"/"beta"/"delta": a two-step redirect to a
+# deleted file is worse than saying it is deleted.
+RENAMED = {"6": "sysid",
+           "0": None, "1": None, "2": None, "3": None, "4": None, "5": None,
+           "5.5": None, "7": None, "8": None, "9": None, "10": None,
+           "11": None, "12": None, "13": None}
+
+# Names that were rungs and are not any more, so that `beta` -- which is what
+# the notes and logs say -- gets the same answer as `v9` rather than falling
+# through to "no such version".
+RETIRED = ("zero", "alpha", "beta", "delta")
 
 
 def redirect(text):
-    """'v12' -> ('delta', True). 'v3' -> (None, True). 'zzz' -> (None, False).
+    """'v6' -> ('sysid', True). 'v3' / 'beta' / 'delta' -> (None, True).
+    'zzz' -> (None, False).
 
-    The second element says whether this LOOKED like an old version name, which
-    is what lets a caller distinguish "that was renamed" from "no idea what you
-    typed".
+    The second element says whether this LOOKED like a former version name,
+    which is what lets a caller distinguish "that one is gone" from "no idea
+    what you typed".
     """
     if not text:
         return None, False
-    t = text.strip().lstrip("vV")
+    t = bare(text)
+    if t in RETIRED:
+        return None, True
+    t = t.lstrip("vV")
     if t in RENAMED:
         return RENAMED[t], True
     return None, False

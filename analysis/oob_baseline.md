@@ -1,4 +1,7 @@
-# Out-of-band baseline (`research.md` 6b, option c) — does it work?
+# Out-of-band baseline — does it work?
+
+*(The proposal was `research.md` item 6b option (c); that file was folded into
+`CLAUDE.md` and deleted 2026-08-17.)*
 
 **No. Do not build it.** Regenerate every number with
 `.venv/bin/python analysis/oob_baseline.py` (25 runs, 3 days, 20.0 min of logged
@@ -226,4 +229,4 @@ For the record, if someone wants to revisit:
 
 - `analysis/oob_baseline.py` — regenerates every number above.
 - Related: `analysis/where_is_power.py` (in-band vs out-of-band power fractions),
-  `analysis/kp040.md` (per-run context), `research.md` item 6b (the proposal).
+  `analysis/kp040.md` (per-run context).

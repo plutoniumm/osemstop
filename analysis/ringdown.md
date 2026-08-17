@@ -16,6 +16,31 @@ Offline throughout. No serial port opened.
 
 ## Verdict
 
+> **THE FREQUENCIES BELOW ARE THE 2026-08-06 VALUES AND THEY HAVE MOVED.**
+> Re-measured 2026-08-17 from `data/20260817_172150_status_sensors.csv` (37 619
+> samples, 90 s, 418 Hz, clean), consensus over the five sensors above SNR 8
+> (a0–a4), inter-sensor spread 0.0005 Hz:
+>
+> | mode | 2026-08-06 | 2026-08-17 | shift | half-widths at Q = 433 |
+> |---|---|---|---|---|
+> | A | 0.7154396674928515 | **0.72294** | **+0.00750** | 9.1 |
+> | B | 0.9949288053475371 | **0.99193** | **−0.00300** | 2.6 |
+> | C | 1.6395739504316790 | **1.65657** | **+0.01700** | 9.0 |
+>
+> **The method and the ±0.0005 Hz precision stand; only the numbers moved.** The
+> ±0.0005 Hz here is a measurement precision, not a stability claim — and this
+> file's own stability check (§ 2, "same frequencies on all three days … to within
+> one zero-pad bin") was at a **0.0139 Hz** bin, which cannot resolve a 0.0030 or
+> 0.0075 Hz shift at all. **The day-to-day stability of these frequencies is not
+> established**: one 11-day interval is all the evidence there is, and it is not
+> enough to state a drift rate. Re-measure at the start of every session.
+> `versions.md` § *On the bench, 2026-08-17* § 2 has the consequences —
+> `F_MODE_HZ` in `epsilon` and `zeta` is stale, and a drive at a stale frequency
+> **pumps** the optic rather than merely under-reading it.
+>
+> **Q is unaffected.** Nothing below about Q, γ or τ depends on the absolute
+> frequency.
+
 **f0 is settled to 0.0005 Hz. Q is still a bound, but the bound has moved by a
 factor of four and it has changed which claims survive: Q = 100 is now excluded
 too, and Q = 2334 is the only prior claim left standing.**
@@ -34,7 +59,7 @@ too, and Q = 2334 is the only prior claim left standing.**
 | prior claim | verdict | the number that decides it |
 |---|---|---|
 | Q = 20-22 (`mimo_design.md:677`) | **dead**, and never was an open-loop measurement | 21.7 sigma; all 73 windows behind it had the other 3 channels damping |
-| Q ~ 50 (`research.md:105`, `sim/server.py:294`) | **dead** | 8.7 sigma |
+| Q ~ 50 (`sim/server.py:294`, and the deleted `research.md:105`) | **dead** | 8.7 sigma |
 | Q = 100 (the bound in the previous version of this file) | **now excluded too** | 4.3 sigma |
 | Q = 288 at 0.7149 Hz (`tune.py fit`) | **disfavoured, not excluded** | 1.5 sigma; and `quiet_linewidth.csv` puts mode A at Q ≤ 451 |
 | Q = 2334 at 0.9941 Hz (`tune.py fit`) | **survives.** Compatible, still not established | 0.2 sigma |
@@ -287,7 +312,10 @@ Three checks that these are mechanical and not instrumentation:
    dominates ch1/ch3. A DAQ or ground-loop artefact appears with the same weight
    everywhere; a mode shape does not.
 2. **Same frequencies on all three days**, 2026-08-03 / 04 / 06, to within one
-   zero-pad bin.
+   zero-pad bin. **Read this as a weak stability bound, not a stability result:
+   the bin is 0.0139 Hz.** It cannot resolve the 0.0030–0.0075 Hz shifts measured
+   on 2026-08-17, and only mode C's +0.0170 Hz would have exceeded it. This check
+   is why nobody noticed the drift for eleven days.
 3. **Same frequencies across a 3.11x change in raw sample rate**, 357.14 Hz on
    08-03/04 and 1111.11 Hz on 08-06. A line locked to the ADC cadence would move.
 
@@ -471,7 +499,7 @@ the number.
 
 ### 4.2 Q ~ 50 — an assumption, now excluded
 
-`research.md:105` states Q = 50, f0 ~ 1 Hz, tau = Q/(pi·f0) ~ 16 s.
+The deleted `research.md:105` stated Q = 50, f0 ~ 1 Hz, tau = Q/(pi·f0) ~ 16 s.
 `sim/server.py:294` says outright that it is an assumption: "with the
 simulator's Q = 50 (the report measures no Q, so this part inherits that
 assumption)". f0 ~ 1 Hz is right to 0.3%. Q = 50 is excluded at 3.0-6.6 sigma.
@@ -510,7 +538,7 @@ struck through in words.
 
 ### 5.1 `CALIBRATION_S = 20 s`
 
-The stated justification (`research.md:105-106`) is "Cause is **ringdown** —
+The stated justification (deleted `research.md:105-106`) is "Cause is **ringdown** —
 Q = 50, f0 ~ 1 Hz, tau = Q/(pi·f0) ~ **16 s** — so median-of-sub-windows helps
 only when the window is comparable to tau".
 
@@ -531,7 +559,7 @@ mean concretely:
   0.7155, 0.9949 and 1.6396 Hz, spread 2.3x, beating at 1.551 s.
 - With tau > 138 s, a shock inside a 20 s window has decayed by at most 13.4%
   before the window ends. Median-of-sub-windows cannot average it away, which
-  is consistent with `research.md` recording that `fast-calib`'s agreement
+  is consistent with the record that `fast-calib`'s agreement
   ratio of 1.20 **never fired on the bench** — the sub-windows do not agree
   because the ringdown is still there in all of them.
 - **Re-derive the window from the measured modes, and do not tune it in the

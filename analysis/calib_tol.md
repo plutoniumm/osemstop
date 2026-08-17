@@ -53,7 +53,7 @@ test, and `sub_start` is reset to the boundary time rather than to `t0 + 2k`.
 
 **Skew** here is `|early baseline / that same window's 20 s ceiling baseline − 1|`,
 worst over the solid channels ch0–3 (`harness.py`'s `solid`; a4/a6/a7 measure
-0.1–9 % in-band and a5 ~1/12 of a0, `research.md` 6b). The ceiling baseline is
+0.1–9 % in-band and a5 ~1/12 of a0, `CLAUDE.md` § *Where the constants came from*). The ceiling baseline is
 the number the bench stores today, so this is the measured cost of the change and
 not a simulated one. It is *not* the same quantity `harness.py` asserts — that
 one compares a shocked run to a separate clean run — but it is the only version
@@ -140,7 +140,8 @@ compare to the same window's 20 s answer (245 positions).
 | all positions | 9.5 % | 27.5 % | 71.2 % |
 
 4.5 % of arbitrary positions land past 35 %. **"Exit at 6 s, no test" gives 71.2 %
-worst case on the bench** — against `research.md`'s simulator sweep giving 74.3 %
+worst case on the bench** — against the simulator sweep giving 74.3 %
+(`CLAUDE.md` § *Why the calibration window is 20 s*)
 for `CALIBRATION_S = 5 s`. The two agree closely, which is independent evidence
 that the bench replay and the simulator sweep are measuring the same thing.
 Against that null, tol = 1.35 turning 71.2 % into 29.0 % is the test doing real
@@ -207,7 +208,7 @@ first structural fact: at a floor of 5 sub-windows the median-of-all in test (2)
 finally contains windows the tail does not, so the ringdown guard is armed at the
 earliest legal exit instead of being identically 1.000 there. Worst skew halves,
 27.2 % → 13.7 % on the high side, margin 1.21x → 2.5x, for 1.0 s more mean
-calibration than tol 1.35 alone. It is also exactly `research.md`'s own advice —
+calibration than tol 1.35 alone. It is also exactly the recorded advice —
 "scale the ceiling off Q" — since 10 s ≈ 0.63 tau is where a median over
 sub-windows starts to bound a 16 s decay.
 

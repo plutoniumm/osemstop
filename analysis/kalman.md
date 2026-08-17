@@ -1,5 +1,23 @@
 # A Kalman velocity estimator for the OSEM damping loop
 
+> **CAVEAT ADDED 2026-08-17: every frequency in this file is stale, and this file
+> is the one most exposed to that.** The estimator is three undamped oscillators
+> at 0.7155 / 0.9949 / 1.6396 Hz (§ *The model*), and those frequencies moved
+> between 2026-08-06 and 2026-08-17 by **+0.00750 / −0.00300 / +0.01700 Hz** —
+> 9.1 / 2.6 / 9.0 half-widths at Q = 433. Re-measured from
+> `data/20260817_172150_status_sensors.csv`; `versions.md`
+> § *On the bench, 2026-08-17* § 2.
+>
+> **By this file's own arithmetic** (§ 7a: a fixed frequency error accrues
+> `360 × Δf` °/s), offsets of 0.0030–0.0170 Hz reach 90° in **15–83 s**, against
+> the **2146–4065 s** § 7a quotes for the within-record drift the design was sized
+> against — a factor of 26–277. **What that does to this filter's steady-state
+> error, as opposed to an open-loop phase-matcher's accumulating error, is not
+> derived here and is not established.** The design is not invalidated; its
+> central premise — "the frequencies are already known" — now needs re-measuring
+> each session rather than reading off a constant, and `F_MODE_HZ` in
+> `osem.epsilon.py:163` must be updated before the filter goes on the bench.
+
 Design and offline validation. Nothing here was run on hardware, no serial port
 was opened, and no controller was executed. Everything is replay of records
 already on disk, in the way `sample-guard` and `decimate` were designed and

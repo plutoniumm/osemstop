@@ -163,7 +163,7 @@ USAGE
 -----
     .venv/bin/python tune.py self-test                 # no hardware, proves the maths
     .venv/bin/python tune.py fit  data/..._raw.csv     # no hardware
-    .venv/bin/python tune.py measure --port /dev/... --controller osem.v9.py
+    .venv/bin/python tune.py measure --port /dev/... --controller osem.eta.py
 """
 
 import argparse
@@ -187,7 +187,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # defaults. Every one of these is either a repo constant or a stated policy.
 # ---------------------------------------------------------------------------
 GAIN_CEILING = 0.035          # CLAUDE.md / analysis/kp040.md. Hard box.
-DEFAULT_CONTROLLER = "osem.delta.py"   # the shipping controller; see ladder.py
+DEFAULT_CONTROLLER = "osem.eta.py"     # newest rung; see ladder.py
 DEFAULT_MODES_HZ = (1.046, 1.657)      # analysis/out/modes.csv; refitted, not assumed
 DEFAULT_Q = 50.0                       # seed only; zeta is fitted
 
@@ -474,13 +474,7 @@ def acquire_closed(dac, ctl, seconds, damper, dither, chans, rec, update_hz,
 def run_measure(args, dac=None, clock=None, tag="tune"):
     """One bench run. Everything else in this file is offline."""
     ctl = Controller(args.controller)
-    if ctl.bench_status == "broken":
-        sys.exit("  REFUSING: %s declares BENCH_STATUS = 'broken'. Pick another "
-                 "controller with --controller." % os.path.basename(ctl.path))
-    if ctl.bench_status != "validated":
-        print("  !! %s declares BENCH_STATUS = %r -- its filter chain and coil map "
-              "are what this proposal will be FOR." % (os.path.basename(ctl.path),
-                                                       ctl.bench_status))
+    # No BENCH_STATUS gate: the label went stale faster than it was updated.
 
     coils = list(range(min(args.ncoil, ctl.n)))
     chans = [ctl.dac_channels[c] for c in coils]

@@ -7,14 +7,14 @@ opposite number: it talks to the real Arduino and then hands control to a real
 controller. Nothing in here simulates anything.
 
     python3 bench.py              # pick a version interactively, then run it
-    python3 bench.py delta        # run that one
-    python3 bench.py delta --port /dev/cu.usbserial-1120
+    python3 bench.py eta          # run that one
+    python3 bench.py eta --port /dev/cu.usbserial-1120
     python3 bench.py --ports      # just list candidate serial ports
     python3 bench.py --flash      # compile and upload arduino.ino, nothing else
 
 or through make, which is the intended form:
 
-    make run              make run V=delta           make run V=delta PORT=COM7
+    make run              make run V=eta             make run V=eta PORT=COM7
     make arduino          make arduino FQBN=arduino:sam:arduino_due_x
 
 What it does before anything reaches the coils:
@@ -68,15 +68,17 @@ import argparse
 import glob
 import importlib.util
 import os
-import re
 import shutil
 import subprocess
 import sys
 
-import ladder
-
+# Ahead of every import below it: load() runs a controller by PATH, which puts
+# nothing on sys.path, and the controllers import `stdlib` and `pyDAC2` by bare
+# name from this directory.
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+
+import ladder                                      # noqa: E402
 
 # Arduino/clone USB-serial bridges: genuine (2341, 2A03), CH340 (1A86),
 # FTDI (0403), CP210x (10C4). Ranked above other USB serial devices, which are
@@ -111,7 +113,7 @@ def versions():
 
 
 def resolve(name):
-    """'delta', 'osem.delta', 'osem.delta.py' or a path -> an absolute path."""
+    """'eta', 'osem.eta', 'osem.eta.py' or a path -> an absolute path."""
     all_versions = versions()
     if not all_versions:
         sys.exit("No controllers found next to bench.py.")
@@ -136,8 +138,8 @@ def resolve(name):
             return cand
     have = ", ".join(ladder.stem(os.path.basename(p)) for p in all_versions)
     if was_numbered:
-        sys.exit("%s was deleted, not renamed -- it is in git history, and "
-                 "versions.md says what it was.\n  Have: %s" % (name, have))
+        sys.exit("%s is not on the ladder any more -- git history still has the "
+                 "file and versions.md says what it was.\n  Have: %s" % (name, have))
     sys.exit("No such version: %s. Have: %s" % (name, have))
 
 
@@ -205,18 +207,23 @@ def choose_port(explicit):
 
 
 def preflight(port):
-    """Open the port through the shipping transport and confirm the sketch is
-    alive. DACController.__init__ raises unless `READY` arrives, which is the
-    one check that distinguishes 'wrong port' from 'board not flashed'."""
-    from pyDAC import DACController        # late: needs the real `serial`
-    print("\n  preflight: opening %s (the board resets on open, ~2s)..." % port)
+    """READY handshake before any coil moves: tells wrong-port from not-flashed."""
+    import pyDAC2
+    from pyDAC2 import FastDAC             # late: needs the real `serial`
+    # Baud first: at the wrong rate the READY scan is 200 lines x 2 s = 400 s silent.
+    print("\n  preflight: %s" % port)
+    pyDAC2.resolve_baud(port)
+    print("  opening (the board resets on open, ~2s)...")
     try:
-        dac = DACController(port=port)
+        dac = FastDAC(port=port)
     except serial.SerialException as e:
         sys.exit("  FAILED to open %s: %s" % (port, e))
     except RuntimeError as e:
         sys.exit("  FAILED: %s\n  The sketch is not running -- try `make arduino`." % e)
-    dac.close()
+    try:
+        dac.close()
+    except Exception:
+        pass
     print("  preflight OK -- sketch answered READY.")
 
 
@@ -234,11 +241,27 @@ def load(path):
 
 
 def gains(mod):
+    """The four gain vectors off the loaded module.
+
+    A missing name is REPORTED, not raised. Now that the gains can come from
+    `stdlib` rather than the file itself, a traceback here would land on the
+    screen an operator reads before energising coils.
+    """
+    def vec(name):
+        try:
+            return [float(v) for v in getattr(mod, name, None)]
+        except (TypeError, ValueError):
+            return None             # absent, or not a sequence of numbers
+
     def row(label, arr):
-        return "  %-9s %s" % (label, "  ".join("%+.4f" % float(v) for v in arr))
-    lines = [row("steady", mod.STEADY_GAIN), row("capture", mod.CAPTURE_GAIN)]
-    if any(float(v) for v in mod.KI_GAIN) or any(float(v) for v in mod.KD_GAIN):
-        lines += [row("ki", mod.KI_GAIN), row("kd", mod.KD_GAIN)]
+        if arr is None:
+            return "  %-9s no readable vector of that name here" % label
+        return "  %-9s %s" % (label, "  ".join("%+.4f" % v for v in arr))
+
+    ki, kd = vec("KI_GAIN"), vec("KD_GAIN")
+    lines = [row("steady", vec("STEADY_GAIN")), row("capture", vec("CAPTURE_GAIN"))]
+    if ki is None or kd is None or any(ki) or any(kd):
+        lines += [row("ki", ki), row("kd", kd)]
     else:
         lines.append("  ki, kd    all zero -- the law is pure P")
     return "\n".join(lines)
@@ -350,7 +373,8 @@ def flash(port, fqbn):
 def main():
     ap = argparse.ArgumentParser(
         description="Preflight the board and run a controller on the hardware.")
-    ap.add_argument("version", nargs="?", default=None, help="v0, v1, ... (default: ask)")
+    ap.add_argument("version", nargs="?", default=None,
+                    help="epsilon, zeta, eta, ... (default: ask)")
     ap.add_argument("--port", default=os.environ.get("PORT") or None,
                     help="serial port (default: auto-detect, else ask)")
     ap.add_argument("--flash", action="store_true",

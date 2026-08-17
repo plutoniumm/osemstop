@@ -234,7 +234,7 @@ exactly zero.** At any p_latch ≥ 0.1 it is the worst version by an order of
 magnitude. Two further caveats on the 96.5% itself: it is high only because
 `CALIBRATION_S = 8.0` rather than 20.0, and v0 drives **one channel**
 (`ENABLE_CHANNEL = [True, False, False, False]`), which damps the whole body in
-≈70 s against ≈17 s for four (`provenance.md` §3/§4). Its uptime seconds are not
+≈70 s against ≈17 s for four (`CLAUDE.md` § *One channel damps the whole mass*). Its uptime seconds are not
 worth the same as the others'.
 
 ---
