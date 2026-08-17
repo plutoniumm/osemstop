@@ -21,29 +21,87 @@ osem.<name>.py (control law, safety, logging) <-- analogRead ----------'
 
 Re-judged 2026-08-18 with `jerk.py`'s replay and its state check. **A decay rate is
 the only dissipation measurement here** — a `ratio` is an amplitude and a % is a
-duty cycle, so the last column is not comparable row to row. Where a rung has no
-number it says so rather than borrowing one.
+duty cycle, and the duty cycles this table used to carry measured uptime, not
+damping. Where a rung has no number it says so rather than borrowing one.
 
-| rung | what it was | measured |
+**Two columns, and they are not the same class of evidence.**
+
+- **Commanded** — `jerk.py` asked for a shove, timed the decay, graded it and
+  printed its refusals. Peaks are matched across a set and every fitted sample is
+  DAMPING with a live gain.
+- **Accidental** — `analysis/decay_scan.py`, written 2026-08-18. It reads every
+  `data/*_fast_lock.csv` (90 files, 3.6 GB, ~6 M rows, in 70 s) and fits the amplitude
+  excursions that happened to occur *and* decayed while the loop was driving.
+  **Nobody asked for these transients and nothing records what caused them** —
+  a bump, a fault clearing, a gain ramp — so their peaks are not matched and the
+  population is whatever the room did. **Weaker evidence than a `jerk.py` set,
+  and it must not be quoted as if it were one.** It is graded against the only
+  fits known to be valid: over the four files `jerk.py --replay` accepts kicks
+  in, it independently finds **7 of the 8** and agrees to within **10 %** on 4 of
+  them and **33 %** on all 7. It misses one (2.1 s of decay, under its floor).
+
+| rung | what it was | commanded kicks (`jerk.py`) | accidental transients (`decay_scan.py`) |
+|---|---|---|---|
+| `zero` (v0) | one channel, latching saturation fault | none — predates `jerk.py`. **Simulator** ratio **0.188**, lock **12.1 s** (`harness.py`, `versions.md` § *The ladder*) | **not measured** — no bench CSV in `data/` is attributable to it |
+| `alpha` (v4) | + `auto-disable` (demote one blind OSEM) | none — predates `jerk.py`. **Simulator** ratio **0.029**, lock **10.6 s** | **0.4675 /s**, r² 0.97 — but **n = 1**, one 6.8 s transient at peak `ratio` 2.57 in `data/20260804_111807_fast_lock.csv`. See the era caveat below before believing it |
+| `beta` (v9) | + `runaway-trend` (growth gate on the breaker) | none. **83.1 %** of a 240 s run in DAMPING — **bench 2026-08-04**, still the best duty cycle on record, and it is uptime | **no usable fit.** 18 excursions in `data/20260804_135853_fast_lock.csv`: 11 quieter than the plate's own undriven motion, 4 that never rose, **3 that left DAMPING mid-decay**. Its loudest reached `ratio` 6.37 and only 5.46 of that while driving |
+| `delta` (v12) | 8 ch, 100 Hz clock off the wire, `decimate` | none. **77.5 %** of a 244 s run in DAMPING — **bench 2026-08-06**. Never printed `LOCKED` | **no usable fit** over 3 runs and 971 283 rows (`data/20260806_190046`, `_200158`, `_200822`): 60 excursions — 45 sub-baseline, 6 that never rose, **5 that left DAMPING**, 3 with no valid baseline behind them, 1 that never re-quieted. Its transients reached `ratio` 9.69 — they exist, and the breaker ate them |
+| `epsilon` | + Kalman velocity, Ki = 0 | **not measured** — never on the rig | **not measured** — never on the rig |
+| `zeta` | the modal law, Φ/A from `data/modal.json` | **modal 0.0197 /s**, r² 0.33, 1 kick (`data/20260817_193855`, 0 % FAULT). **Diagonal 0.0253 / 0.1072 / 0.0305 /s**, median **0.0305**, r² 0.57–0.78, 3 kicks (`data/20260817_194128`, 98.7 % DAMPING, **0 % FAULT**). Both sets pass the state check | modal **0.0133** (r² 0.23); diagonal **0.0278 / 0.0305** (r² 0.61 / 0.78) — the same events, found independently |
+| `eta` | modal + one 14-state filter whose state is the modal coordinates | **median 0.1093 /s** of 0.0624 / 0.1093 / 0.1098, r² 0.42–0.92, matched peaks 6.33 / 6.52 / 7.33 — 2026-08-18 02:43, `data/20260818_024240_jerk_eta.log`, **the first complete valid kick set on this rig**: 7 channels live, no faults, one further kick correctly refused. **15x the free plant.** Also **0.1355 /s**, r² 0.944, 1 kick of 4 on `data/20260817_213642` (56 % FAULT). First rung ever to print `LOCKED` (20.7 s, DEGRADED, warm start) | **median 0.0950 /s**, spread 0.0241–0.1609 over **11** transients in 5 runs, median r² 0.83 — much the largest usable population on the rig, and it brackets the commanded number |
+| `theta` | the same law as a bank of causal FIR kernels | **not measured** — never on the rig. At `KERNEL_PHASE_DEG = [0,0,0]` it is bit-identical to `eta`, max \|du\| **0.000e+00 V** over 30 000 samples (simulator) | **not measured** — never on the rig |
+
+**Best measured on this rig is `eta`'s commanded 0.1093 /s, and it is modal.** The
+free plant is 0.0072 /s (τ > 138 s, `analysis/ringdown.md`), so that is **15x**.
+
+### Two corrections the scan forced
+
+**The 2026-08-17 21:36 run was `eta`, not `zeta`.** `data/20260817_213620_jerk_eta.log`
+line 16 prints `osem.eta` and its fix list includes `modal-kalman`, which `zeta`
+does not have. The 0.1355 /s this table used to credit to `zeta` is an `eta`
+number and has been moved.
+
+**A valid diagonal kick set does exist**, and the earlier "there is none at all"
+was too strong. `jerk.py --replay data/20260817_194128_fast_lock.csv` keeps
+**3 kicks** — 0.0253 / 0.1072 / 0.0305 /s — off a run that is **98.7 % DAMPING and
+0 % FAULT**, with `modal` never engaged, i.e. `epsilon`'s diagonal law throughout.
+**It still does not rescue "modal damps 5x faster".** It points the other way: in
+that same `zeta` session modal measured **0.0197 /s** against diagonal's median
+**0.0305 /s**. The 5x quoted in § 8 remains **SUPERSEDED AND UNSUPPORTED** — its
+original diagonal half came from runs **78–99.7 % in FAULT with every gain at
++0.0000**, which fits the free plant and not a control law. It is left in place
+below, marked, because the correction is the point.
+
+### What the accidental fits cannot settle
+
+**They do not separate the laws.** Held to one evening, so the rig is fixed and
+only the law changed, the two evenings that ran both disagree in *direction* —
+and neither difference is bigger than the spread inside its own cell:
+
+| evening | diagonal | modal |
 |---|---|---|
-| `zero` (v0) | one channel, latching saturation fault | ratio **0.188**, lock **12.1 s** — **simulator** (`harness.py`, `versions.md` § *The ladder*). No decay rate; predates `jerk.py` |
-| `alpha` (v4) | + `auto-disable` (demote one blind OSEM) | ratio **0.029**, lock **10.6 s** — **simulator**. No decay rate |
-| `beta` (v9) | + `runaway-trend` (growth gate on the breaker) | **83.1 %** of a 240 s three-kick run in DAMPING, 4 faults, 4 locks — **bench 2026-08-04**, still the best duty cycle on record. No decay rate |
-| `delta` (v12) | 8 ch, 100 Hz clock off the wire, `decimate` | **77.5 %** of a 244 s five-kick run in DAMPING — **bench 2026-08-06**. Never printed `LOCKED`. No decay rate |
-| `epsilon` | + Kalman velocity, Ki = 0 | **not measured** — never on the rig |
-| `zeta` | the modal law, Φ/A from `data/modal.json` | decay **0.1355 /s**, r² 0.944 — bench 2026-08-17 21:36, but **1 valid kick of 4** and that run was **56 % in FAULT**. Separately, median `ratio` **0.08** (an amplitude, `signtest.py`) |
-| `eta` | modal + one 14-state filter whose state is the modal coordinates | decay **median 0.1093 /s** of 0.0624 / 0.1093 / 0.1098, r² 0.42–0.92, matched peaks 6.33 / 6.52 / 7.33 — bench 2026-08-18 02:43, `data/20260818_024240_jerk_eta.log`. **The first complete valid kick set on this rig**: 7 channels live, no faults, one further kick correctly refused. **15x the free plant's 0.0072 /s.** First rung ever to print `LOCKED` (20.7 s, DEGRADED, warm start) |
-| `theta` | the same law as a bank of causal FIR kernels | **not measured** — never on the rig. At `KERNEL_PHASE_DEG = [0,0,0]` it is bit-identical to `eta`, max \|du\| **0.000e+00 V** over 30 000 samples (simulator) |
+| 2026-08-17 | **0.0291** /s (n=2, 0.0278–0.0305) | **0.0542** /s (n=2, 0.0133–0.0950) |
+| 2026-08-18 | **0.1198** /s (n=3, 0.0241–0.1578) | **0.0702** /s (n=8, 0.0324–0.1609) |
 
-**Best measured on this rig is `eta`'s 0.1093 /s, and it is modal.** Those four
-rows are **every valid decay measurement that exists here**; the free plant is
-0.0072 /s (τ > 138 s, `analysis/ringdown.md`).
+(2026-08-17 spans both `zeta` and `eta`; 08-18 is `eta` apart from one
+unattributed run. `decay_scan.py`'s own *BY SESSION AND LAW* block prints this.)
 
-**THERE IS NO VALID DIAGONAL KICK MEASUREMENT AT ALL, so the "modal damps 5x
-faster than diagonal" quoted in § 8 is SUPERSEDED AND UNSUPPORTED.** Its diagonal
-half came from runs that were **78–99.7 % in FAULT with every gain at +0.0000** —
-those decays were fitted to the free plant, not to a control law. It is left in
-place below, marked, because the correction is the point.
+**And there is a 3–10x era gap nobody has explained**, on both laws. Median
+decay by session: 2026-08-04 **0.3774**, 08-06 **0.2534**, 08-07 **0.2137** /s
+(n = 13, median r² 0.92–0.97) against 08-17 **0.0291** and 08-18 **0.0844** /s
+(n = 15). `ratio` is the same quantity in both eras — a
+1.0 s sliding RMS over `SCHEDULE_WINDOW_S` divided by that run's own calibration
+baseline, unchanged from `osem.v9.py` through `osem.eta.py` — so the definition is
+not the cause. Candidates, none measured: the rig lost a5/a6/a7 and the modes
+moved 0.0170 Hz between the eras; the old runs are 3–5 live channels against 7;
+and `ratio` is normalised to each run's own 20 s `CALIBRATING` window, which is
+not the same room twice. **Until that gap is understood, no accidental fit should
+be compared across sessions**, which is most of what this column could otherwise
+be used for.
+
+**Nothing here separates damping from holding** either — a loop that pins the
+optic and one that dissipates its energy are identical in `ratio` (`CLAUDE.md`
+§ *Not established*).
 
 ---
 

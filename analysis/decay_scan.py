@@ -46,15 +46,25 @@ STABLE_MULT / KICK_MULT / KICK_RISE / R2_FLOOR, each with its measurement in tha
 file's constants block. Reusing them is the point: this tool has to be gradeable
 against the only fits known to be valid.
 
-CALIBRATION, and it reproduces. `jerk.py --replay` on the two files with valid
-commanded kicks gives:
+CALIBRATION, AND IT IS THE ONLY REASON TO BELIEVE ANY NUMBER HERE. `jerk.py
+--replay` accepts 8 kicks across 4 files. This scanner finds 7 of them, off the
+same records, with no knowledge of where they are:
 
-    data/20260817_213642_fast_lock.csv   0.1355 /s          r2 0.944
-    data/20260818_024302_fast_lock.csv   0.1093/0.0624/0.1098   r2 0.92/0.85/0.42
+    file / peak          jerk.py     here      diff
+    213642  9.28          0.1355    0.0950    -30 %
+    024302  6.33/6.51     0.1093    0.1102    + 1 %
+    024302  6.52/7.07     0.0624    0.0561    -10 %
+    024302  7.33/7.52     0.1098    0.1009    - 8 %
+    194128  3.66          0.0253    0.0278    +10 %
+    194128  3.32          0.1072       --     2.1 s of decay, under MIN_FIT_S
+    194128  4.44          0.0305    0.0305      0 %
+    193855  4.70          0.0197    0.0133    -33 %
 
-This scanner recovers those same events from the same files (see the run at the
-bottom of README's table discussion). If it ever stops doing so, the method is
-wrong and the numbers here mean nothing.
+4 of 7 inside 10 %, all 7 inside 33 %. The two worst are where the two tools
+disagree most about where the window ENDS (11.5 s here against jerk.py's 18.5 s
+re-quiet) or where neither fit is good (193855, r2 0.23 here and 0.33 there) --
+not a different definition of the rate. If this table stops holding, the method
+is wrong and nothing below means anything.
 
 WHAT IT CANNOT SAY. Nothing here separates DAMPING from HOLDING: a loop that
 pins the optic and one that dissipates its energy look the same in `ratio`
@@ -96,6 +106,12 @@ R2_FLOOR = 0.19         # jerk.py R2_FLOOR, and jerk.py's own comment applies
 PREKICK_S = 5.0         # the "level it rose from" is a median over this much
 PREKICK_LAG_S = 1.0     # history, ending this far before the excursion starts,
                         # because `ratio` is a 1.0 s sliding RMS.
+QUIET_WINDOW_S = 30.0   # jerk.py QUIET_WINDOW_S: the trailing window the local
+                        # quiet is the median of. Every band and trigger here is
+                        # a multiple of THAT, not of a whole-run median.
+QUIET_MIN_N = 100       # ...and this many VALID samples must be in it, ~0.3 s
+                        # of wire at the measured 347-435 Hz. Not measured; it
+                        # exists so a median is not taken over four points.
 PREKICK_MIN_N = 20      # ...and this many VALID samples must be in it. Valid
                         # only: a prekick level read off FAULT rows is a frozen
                         # `ratio` (CLAUDE.md § 1 -- 3.59 held for 1085 s), not a
@@ -111,6 +127,22 @@ GAIN_FLOOR_FRAC = 0.50  # a sample counts as driven only if max|gain| over the
                         # plant with extra steps. 0.5 is a round number chosen
                         # to exclude the ramp; on every file here it moves
                         # nothing, because the ramp is <0.1% of DAMPING rows.
+
+PEAK_FLOOR = 1.0        # AN ABSOLUTE FLOOR ON THE PEAK, and the single most
+                        # important line in this file after the DAMPING rule.
+                        # `ratio` is amplitude / the run's own CALIBRATING rms,
+                        # so ratio = 1 is "as loud as the undriven plate was
+                        # before the loop closed". Every threshold above is
+                        # RELATIVE to the run's quiet, and on a well-damped run
+                        # quiet is 0.038-0.12 -- so 4x quiet is a peak of 0.32,
+                        # a wiggle 20x smaller than any hand kick and quieter
+                        # than the plate's own undriven motion. Fitting those
+                        # gave `delta` 0.38 /s off a 2.5 s window, which is the
+                        # decorrelation time of the 1.0 s sliding RMS and not a
+                        # ringdown. The eight kicks jerk.py has ever accepted
+                        # peaked at ratio 3.66-10.33, so 1.0 is 3.7x below the
+                        # weakest real kick and 3x above the largest artefact
+                        # this floor removes.
 
 MIN_FIT_S = 2.0         # a window shorter than 1.4 cycles of the slowest mode
                         # (0.72194 Hz) is not an envelope decay. Not measured.
@@ -196,8 +228,15 @@ def load(path):
             if not live:
                 continue
             v = [float(f[r]) for r in live]
+            ev = median(v)
+            # data/20260806_185116_fast_lock.csv carries an INFINITE `ratio` --
+            # `baseline-floor` did not exist yet, so a channel reading nothing
+            # calibrated to ~0 and every ratio off it divided by zero. log(inf)
+            # would poison a fit silently, so those rows are dropped here.
+            if not math.isfinite(ev):
+                continue
             T.append(float(f[ti]))
-            E.append(median(v))
+            E.append(ev)
             NL.append(len(v))
             G.append(max(abs(float(f[g])) for g in gn))
             st = f[si]
@@ -243,13 +282,18 @@ def scan(d):
     if valid.sum() < MIN_FIT_N:
         return [], why, float("nan")
 
+    # A GLOBAL quiet, used ONLY to find candidate excursions cheaply. Every
+    # threshold that decides anything is recomputed LOCALLY below, because a
+    # whole-run median is wrong wherever the run's own level drifts: on
+    # data/20260817_193855_fast_lock.csv it reads 0.993 against jerk.py's 0.069
+    # at the moment of the kick, and the decay rate that follows differs by 4.5x
+    # (0.089 vs 0.0197 /s). That discrepancy is what this two-stage split fixes.
     quiet = float(np.median(env[valid]))
     d["quiet"] = quiet
     if not (quiet > 1e-9):
         return [], why, quiet
-    band, trig = BAND_MULT * quiet, TRIG_MULT * quiet
 
-    above = env > band
+    above = env > BAND_MULT * quiet
     n = len(env)
     fits = []
     i = 0
@@ -260,14 +304,48 @@ def scan(d):
         s = i
         while i < n and above[i]:
             i += 1
-        e = i                              # first sample back inside the band
+        e = i                              # candidate end, global band
         if e >= n:
             why["ran off the end of the record, no return to quiet"] += 1
             break
-        seg = env[s:e]
-        if seg.max() < trig:
+        p = s + int(np.argmax(env[s:e]))
+        if env[p] < PEAK_FLOOR:
+            why["peak under ratio %.1f -- quieter than the undriven plate"
+                % PEAK_FLOOR] += 1
+            continue
+
+        # LOCAL quiet: jerk.py's trailing QUIET_WINDOW_S median over samples the
+        # loop was actually driving, ending PREKICK_LAG_S before the rise, so
+        # the transient is never in its own reference. Frozen for the whole
+        # window -- jerk.py's `kick_stable`, "a moving finish line makes
+        # re-quiet meaningless".
+        qhi = t[s] - PREKICK_LAG_S
+        qm = valid & (t >= qhi - QUIET_WINDOW_S) & (t <= qhi)
+        if qm.sum() < QUIET_MIN_N:
+            why["no valid baseline in the %.0f s before it" % QUIET_WINDOW_S] += 1
+            continue
+        q = float(np.median(env[qm]))
+        if not (q > 1e-9) or env[p] < TRIG_MULT * q:
             continue                       # a wander, never a transient
-        p = s + int(np.argmax(seg))
+
+        # ...and it must have RISEN, over jerk.py's 5 s prekick median. This is
+        # what refuses a baseline drifting across the trigger.
+        pm = valid & (t >= qhi - PREKICK_S) & (t <= qhi)
+        base = float(np.median(env[pm])) if pm.sum() >= PREKICK_MIN_N else q
+        if env[p] < RISE_MULT * base:
+            why["peak under %.2fx the level it rose from" % RISE_MULT] += 1
+            continue
+
+        # The window ends where the envelope re-enters the LOCAL band, which may
+        # be past the candidate end. Bounded by MAX_FIT_S and by validity.
+        stop = np.nonzero(env[p + 1:] <= BAND_MULT * q)[0]
+        if stop.size == 0:
+            why["ran off the end of the record, no return to quiet"] += 1
+            i = max(i, p + 1)
+            continue
+        e = p + 1 + int(stop[0])
+        i = max(i, e + 1)
+
         if t[e] - t[p] < MIN_FIT_S or (e - p) < MIN_FIT_N:
             why["decay shorter than %.0f s" % MIN_FIT_S] += 1
             continue
@@ -279,17 +357,6 @@ def scan(d):
         # DAMPING with a live gain. Anything else fits the free plant.
         if not valid[s:e + 1].all():
             why["left DAMPING or gain went to zero inside the window"] += 1
-            continue
-
-        # ...and it must have risen from an established damping baseline.
-        lo, hi = t[s] - PREKICK_LAG_S - PREKICK_S, t[s] - PREKICK_LAG_S
-        pre = (t >= lo) & (t <= hi) & valid
-        if pre.sum() < PREKICK_MIN_N:
-            why["no valid baseline in the %.0f s before it" % PREKICK_S] += 1
-            continue
-        base = float(np.median(env[pre]))
-        if env[p] < RISE_MULT * base:
-            why["peak under %.2fx the level it rose from" % RISE_MULT] += 1
             continue
 
         rate, r2 = fit_decay(t[p:e + 1], env[p:e + 1])
@@ -305,7 +372,7 @@ def scan(d):
                "diag" if mo in ({"0"}, {"-"}) else "mixed")
         rk = Counter(d["mrank"][p:e + 1]).most_common(1)[0][0]
         fits.append(dict(t=float(t[p]), peak=float(env[p]),
-                         over=float(env[p] / quiet), rise=float(env[p] / base),
+                         over=float(env[p] / q), rise=float(env[p] / base),
                          rate=rate, r2=r2, win=float(t[e] - t[p]),
                          law=law, rank=rk,
                          nlive=int(np.median(d["nlive"][p:e + 1]))))
@@ -350,9 +417,9 @@ def main():
     print("  Thresholds are jerk.py's: band %.2fx quiet, trigger %.2fx, rise "
           "%.2fx, r2 >= %.2f.\n" % (BAND_MULT, TRIG_MULT, RISE_MULT, R2_FLOOR))
 
-    hdr = ("  %-30s %-7s %-6s %8s %7s %7s %7s %6s %5s  %s"
+    hdr = ("  %-30s %-7s %-6s %8s %7s %7s %7s %6s %6s %6s %5s  %s"
            % ("file", "rung", "law", "rows", "damp%", "fault%", "calib%",
-              "quiet", "fits", "decay 1/s (r2)"))
+              "quiet", "pkany", "pkdmp", "fits", "decay 1/s (r2)"))
     print(hdr)
     print("  " + "-" * (len(hdr) - 2))
 
@@ -373,18 +440,27 @@ def main():
         shown = "  ".join("%.4f (%.2f)" % (f["rate"], f["r2"]) for f in fits[:4])
         if len(fits) > 4:
             shown += "  +%d" % (len(fits) - 4)
-        print("  %-30s %-7s %-6s %8d %7.1f %7.1f %7.1f %6.3f %5d  %s"
+        # pkany / pkdmp: the loudest the plate got ANYWHERE in the run, and the
+        # loudest it got while the loop was actually driving. A run whose pkany
+        # is a real transient but whose pkdmp is not is a run where the breaker
+        # tripped on the transient -- CLAUDE.md sec 1, the fault-clear deadlock.
+        pkany = float(d["env"].max())
+        v = d["valid"]
+        pkdmp = float(d["env"][v].max()) if v.any() else float("nan")
+        print("  %-30s %-7s %-6s %8d %7.1f %7.1f %7.1f %6.3f %6.2f %6.2f %5d  %s"
               % (os.path.basename(p), rung, run_law(d), len(d["t"]),
                  du.get("DAMPING", 0.0), du.get("FAULT", 0.0),
                  du.get("CALIBRATING", 0.0),
                  quiet if math.isfinite(quiet) else float("nan"),
-                 len(fits), shown or "-"))
+                 pkany, pkdmp, len(fits), shown or "-"))
         if verbose:
             for f in fits:
                 print("        t=%7.1fs  peak %6.2f (%4.1fx quiet, %4.1fx rise)"
                       "  %5.1f s window  %s rank %s  %d live"
                       % (f["t"], f["peak"], f["over"], f["rise"], f["win"],
                          f["law"], f["rank"], f["nlive"]))
+            for k, n in why.most_common():
+                print("        refused %3d  %s" % (n, k))
 
     if skipped:
         print("\n  SKIPPED %d file(s) -- empty, truncated, or no chN_ratio / "
@@ -411,6 +487,21 @@ def main():
         summarise("BY LAW (the modal column over the fit window)", by("law"))
         summarise("BY RUNG (attributed from the session logs)", by("rung"))
         summarise("BY DATE", by("date"))
+
+        # THE RAW LAW SPLIT ABOVE IS CONFOUNDED AND MUST NOT BE QUOTED ON ITS
+        # OWN. Every diagonal fit from before 2026-08-17 was taken on a
+        # different rig: five sensors alive instead of seven, modes 0.0170 Hz
+        # away, a5/a6/a7 not yet failed, and a `ratio` normalised to that day's
+        # own 20 s CALIBRATING window. The modal law did not exist then, so
+        # "diagonal" and "before 08-17" are the same column of data. The only
+        # controlled comparison available offline is WITHIN ONE SESSION, where
+        # the rig is fixed and the law was swapped -- so that is what this
+        # prints.
+        for f in allfits:
+            f["session"] = "%s %s" % (f["date"], f["law"])
+        summarise("BY SESSION AND LAW -- THE ONLY COMPARISON HERE THAT HOLDS "
+                  "THE RIG FIXED", by("session"))
+
         print("\n  free plant, no control: %.4f /s (analysis/ringdown.md, "
               "tau > 138 s)" % FREE_PLANT)
     else:

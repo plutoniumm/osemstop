@@ -1,145 +1,183 @@
 #!/usr/bin/env python3
-"""theta -- eta's law written as a CONVOLUTION KERNEL BANK. Numerically eta by default.
+"""theta -- eta's law under ONE DECLARED ACTUATOR BUDGET, divided by NEED. Numerically eta by default.
 
     x     = [q_m, v_m] per mode + one DC state per sensor
     y_i   = sum_m Phi[i,m] q_m + d_i + n_i
-    f_m   = -K_m * (g_m * Proj qdot)_m                 per-mode KERNEL, then gain
+    f_m   = -w_m K_m * (Proj qdot)_m                   per-mode WEIGHT on eta's law
     u_C   = A_C+ f                                     min-norm, row-norm balanced
-    u_j   = c_j * Kp * (-vel_j)                        coils A does not cover
+    u_j   = w_d * c_j * Kp * (-vel_j)                  coils A does not cover
+    |u - bias| <= BUDGET_V on every coil               ONE number, solved on the TOTAL
 
 THE SHIPPED DEFAULT IS eta, BIT FOR BIT, AND THAT IS THE POINT OF THE FILE.
-KERNEL_PHASE_DEG is [0, 0, 0], which makes every g_m the unit impulse
-[1, 0, 0, ...] -- exactly, in floating point, by construction and not by rounding
-(see ModalKernel.taps) -- so f_m = -K_m (Proj qdot)_m and every number this file
-produces is eta's. `--selftest` asserts that twice: once against `osem.eta.py`
-itself, both controllers driven with the same synthetic sensor history and their
-commanded voltages compared sample by sample, and once against an explicit
-u = A_C+ (-K Proj qdot) written out in the test. WHY it matters that the default
-is not merely close: eta is the law that has fixes pending and a bench run
-planned, so those fixes must PORT into this file as a merge, not a
-reconciliation -- and a kernel bank has far more free parameters than three
-gains, while NOTHING OFFLINE CATCHES A WRONG ONE. That is measured, not a
-caution: on 2026-08-17 a wrong per-mode sign of A passed the selftest, the modal
-gate and the colocation check and took the median channel ratio from 1.5
-(diagonal) to 2.3 (modal) -- it PUMPED (README Sec 8).
+BUDGET_TILT is 0.0, at which every claimant's weight is EXACTLY 1.0 -- for every
+possible need vector, including zeros, nans and infinities, by construction and
+not by rounding (see BudgetAllocator._weights) -- so f_m = -K_m (Proj qdot)_m,
+the hybrid gains are HYBRID_GAIN unchanged, and every number this file produces
+is eta's. `--selftest` asserts that against `osem.eta.py` itself, both controllers
+driven with the same synthetic sensor history and their commanded voltages
+compared sample by sample through CALIBRATING -> FAULT -> CALIBRATING -> DAMPING.
+WHY it matters that the default is not merely close: eta has fixes pending and
+bench runs planned, so those fixes must PORT into this file as a merge and not a
+reconciliation -- and an allocator has more free parameters than a fixed split,
+while NOTHING OFFLINE CATCHES A WRONG ONE. That is measured, not a caution: on
+2026-08-17 a wrong per-mode sign of A passed the selftest, the modal gate and the
+colocation check and took the median channel ratio from 1.5 (diagonal) to 2.3
+(modal) -- it PUMPED.
 
-WHAT THE KERNEL FORM IS. The general LTI MIMO controller is a bank of kernels,
-one from every sensor to every coil, u_i(t) = sum_j int h_ij(tau) y_j(t-tau) dtau.
-Every law in this repo is a special case: the diagonal law is a per-channel
-kernel, and the modal law is A_C+ K Phi^T around a velocity estimator, i.e. a
-rank-3 bank whose three kernels are narrow resonant filters at the measured mode
-frequencies. This file does NOT materialise h_ij. It keeps eta's exact
-factorisation -- modal Kalman (built from the measured Phi, KALMAN_R, KALMAN_Q),
-the reachable-subspace projection and the allocator (built from A) -- and adds
-the ONE factor that factorisation cannot express: a per-mode kernel g_m between
-the velocity estimate and the gain.
+THE CONVOLUTION KERNEL LAYER IS GONE, AND IT WAS REMOVED ON EVIDENCE. The rung
+this file was built on carried a per-mode two-tap FIR on the modal velocity
+(`ModalKernel`, `KERNEL_PHASE_DEG`) whose phase was a free parameter, shipped at
+zero. It was swept on the rig on 2026-08-17 and ZERO IS THE OPTIMUM: median
+channel `ratio` came out 0.155 at 0 deg, 0.862 at -30 deg, 0.790 at +30 deg and
+1.867 at -60 deg. Every non-zero phase is worse, and -60 deg is worse than not
+damping. So the freedom buys nothing on this rig, and rather than carry a live
+code path whose only defensible value is the identity, it is deleted -- the modal
+force here is eta's `f = -K Proj qdot` written out. If a measured plant phase ever
+argues for cancelling one, git history has the machinery; do not re-add it on an
+argument.
 
-WHAT IT BUYS, AND IT IS ONLY THIS. Per-mode PHASE. The only per-mode freedom in
-eta is a scalar gain, MODAL_KP, flat [0.035, 0.035, 0.035]. A kernel sets
-magnitude AND phase per mode. g_m is built from a MEASURED number -- the mode
-frequency F_MODE_HZ -- as the two-tap kernel with EXACTLY unit magnitude and
-EXACTLY phase -psi_m at f_m: with omega = 2 pi f_m dt, D = psi/omega,
-k1 = floor(D), k2 = k1+1, the taps are sin(omega k2 - psi)/sin(omega) and
-sin(psi - omega k1)/sin(omega). At psi = 0 that is sin(omega)/sin(omega) = 1 and
-sin(0)/sin(omega) = 0, hence the exact impulse.
+WHAT THE BUDGET IS. One number, BUDGET_V = MODAL_TOTAL_HEADROOM * BIAS_SWING =
+0.225 V, the demand about bias any single coil may carry. That is eta's cap
+unchanged; what is new is that it is DECLARED, that every other cap in the file
+is quoted against it in one ledger, and that the split of it between control
+terms is a computed allocation instead of an accident. The split being implicit
+is not a stylistic complaint: it is how coil 3 reached 0.4229 V against a
+0.250 V half-window -- 169 % -- and clipped, while the modal allocation stayed
+inside its own 0.20 V cap for the entire run (CLAUDE.md Sec 2). Once a coil clips
+the realised force is no longer A_C+ f and the dissipation guarantee is void.
 
-WHAT A NON-ZERO PHASE DOES TO THE DISSIPATION, derived and then asserted
-numerically in the selftest. On a tone at f_m a lag psi is identically
-cos(psi) qdot + sin(psi) omega q, and <q qdot> = 0 over a cycle, so the
-cycle-averaged modal power is -K cos(psi) <qdot^2>: a phase RETAINS cos(psi) of
-the dissipation and spends the rest as a STIFFNESS term, which shifts the mode
-rather than damping it. Two consequences, both hard. psi = 0 is optimal for
-dissipation against a perfectly modelled plant, so this knob cannot buy damping
-in the model -- it exists to cancel a phase the model does not have (loop delay,
-the coil driver, the estimator's own lag, A's own phase). And |psi| >= 90 deg
-PUMPS by construction, which is why KERNEL_PHASE_HARD_CAP_DEG is 90 and is a
-derivation rather than a preference.
+WHO THE CLAIMANTS ARE, AND WHY THEY ARE THE MODES. Four: the three modes, and the
+per-channel (hybrid diagonal) block as one. Per-mode is the granularity the data
+argues for. Against a control, modal damping wins 5.9x on mode B (3.39 counts
+against 19.86) and 6.7x on mode C (2.37 against 15.80), but on mode A it is 6.31
+against a best diagonal of 6.86 -- INSIDE the run-to-run scatter of a factor 2-3,
+so its advantage there is not established (CLAUDE.md, per-mode residual). With the
+loop closed A/T1 is the LOUDEST mode. MODAL_KP is flat [0.035, 0.035, 0.035], so
+today nothing can express "this mode needs more than that one". This is the object
+that can.
 
-WHY IT SHIPS AT ZERO AND NOTHING ELSE WOULD BE HONEST. There is no measurement
-of the plant phase to cancel. A's magnitudes are NOT established: the two static
-passes reproduce entries only to a factor 0.23-1.8, and the driven pass came out
-off-quadrature 0.624 / 0.749 / 1.196 where resonance wants ~0. A's SIGNS are
-cross-validated 12/12 by three independent determinations, and that is the half
-that survives. CLAUDE.md Sec 16 says this work is blocked on Sec 3's clean A --
-a kernel designed against magnitudes that are not established is the sign-of-A
-failure with more degrees of freedom. So the machinery is here, wired, tested and
-ZEROED; nothing is claimed for it.
+WHAT NEED IS, AND WHY IT IS NOT `ratio`. THIS IS THE CRUX OF THE RUNG. `ratio` is
+amplitude over the CALIBRATION baseline and calibration runs at ZERO GAIN, so it
+measures the loop's own success and not the room: measured 2026-08-18, the same
+physical quiet reads 0.117 with the modal law engaged and 1.449-1.832 with the
+diagonal law -- a factor of 13 for the SAME plate (data/20260818_002207_jerk_eta.log,
+data/20260818_001841_fast_lock.csv). An allocator keyed on it would hand budget to
+whichever claimant is already winning, purely because it is winning: a positive
+feedback loop closed through the measurement. It can also FREEZE -- 3.59 identical
+for 1085 s on 2026-08-17 -- so a ramp keyed on it can latch.
 
-FOR SCALE, AND IT IS ARITHMETIC AND NOT A MEASUREMENT: the phase a pure 20 ms
-loop delay (one CONTROL_PERIOD_S plus the actuator's 10 ms throttle) costs at the
-three mode frequencies is 5.2 / 7.1 / 11.9 deg. cos(11.9 deg) = 0.978, so if that
-is the whole of the uncancelled phase there is about 2 % of mode C's dissipation
-in this knob. THE END-TO-END LOOP PHASE HAS NEVER BEEN MEASURED on this rig and
-those 20 ms are two constants added together, not a delay anybody timed.
+Need is instead the loop's OWN DISSIPATION RATE per claimant,
 
-COST AND CAUSALITY. KERNEL_TAPS = 140 taps = 1.40 s at the 100 Hz control clock,
-set by the slowest mode: 0.72194 Hz is a 1.385 s period = 138.5 samples, and a
-causal delay can only realise a phase LEAD as a lag of one period minus it, so
-reaching any phase in [0, 360) on mode A needs a full period of history plus the
-interpolation tap. Only two taps per mode are ever non-zero; the length is what
-the ring has to hold. Per control step that is a 3x140 shift and 3 dot products
-of length 140 -- about 840 flops at 100 Hz, against a 10 ms budget. THE REAL
-COST IS NOT ARITHMETIC: a lag is realised as a genuine time delay, so at
-psi = 45 deg on mode A the loop acts on that mode 0.173 s late. A transient is
-not a tone and the delay applies to it in full.
+    need_m = K_m qdot_m^2        need_diag = sum_j |g_j| vel_j^2
 
-NOT LOGGED, ON PURPOSE. The CSV columns are byte-identical to eta's so that
-jerk.py and everything in analysis/ read a theta run the same way. The kernel is
-constant for a run and is printed in the startup banner instead, before any coil
-is energised -- the same rule the [modal] banner follows.
+which is the power that claimant is removing. In a steady state the power removed
+equals the power injected, and the injected power is a property of the ROOM, not
+of the gain: doubling K halves <qdot^2> and the product stands still. So need
+answers "how hard is this part of the system being driven", which is the question,
+rather than "how quiet is it", which is the one that feeds back.
 
-HYBRID, and this is the safety argument: colocated velocity feedback is
-unconditionally dissipative whatever the mode shapes are, so the total power is
-the sum of two non-positive terms and the hybrid is dissipative if each part is.
-That holds provided the diagonal term on channel j feeds back channel j's OWN
-velocity with the correct sign, which is what the diagonal law already does.
-c_j is that channel's MEASURED coherent fraction: dissipation is linear in gain
-and noise injection quadratic, so a noisy channel is gain-capped, not
-disqualified, and c_j is the Wiener-optimal cap. See HYBRID_COHERENT.
+THE RESIDUAL DEPENDENCE IS BOUNDED, and the bound comes off measured decay rates.
+The cancellation is exact only if the loop is the only dissipation. The plant's own
+is 0.0072 /s (tau > 138 s, analysis/ringdown.md) against the modal loop's 0.1393 /s
+(CLAUDE.md), so the loop retains 0.1321/0.1393 = 94.8 % of the injected power at
+w = 1, 82.1 % at the w = 0.25 floor and 97.9 % at w = 2.5 -- the statistic moves at
+most 1.19x from the WEIGHT itself across the whole clip range, against `ratio`'s
+measured 13x between laws. Simulated end to end in the selftest: over a 10x range of
+loop gain, rms motion moves 2.90x while need moves 1.24x. THAT SIMULATION IS A
+MODEL, and the 1.19x is an argument from two measured rates, not a measurement.
 
-WHY IT EXISTS: the pure modal law drove 4 coils of 8. Measured over 28775 modal
-DAMPING samples, data/20260817_193855_fast_lock.csv: |out-bias| rms 0.027/0.033/
-0.026/0.082 V on a0-a3 and exactly 0.000 on a4-a7, while a4/a6/a7 carried 43.4/
-61.3/32.6 counts rms of residual motion that nothing observed and nothing damped.
-About half of a4's and a7's in-band motion, and a quarter of a6's, IS the optic.
+WHAT BREAKS IT, and none of these is hypothetical.
+  * A NARROWBAND DISTURBANCE ON A MODE. The invariance needs a disturbance whose
+    spectrum is smooth across the mode's linewidth. At Q > 433 that half-width is
+    under 0.00083 Hz, so a machinery or mains line would have to sit within a
+    milliHertz of a mode -- but if one did, the injected power itself would depend
+    on the gain and the statistic would follow the loop again.
+  * TRANSIENTS. Dissipation lags injection, so a kick biases the allocation toward
+    whichever mode it excited. Over BUDGET_TAU_S = 20 s against a measured re-quiet
+    of 5.3 s (modal) / 17.4 s (diagonal) that is partly averaged and not removed.
+  * ZERO GAIN. In CALIBRATING and FAULT every need is 0 by construction. That is
+    the freeze failure in a new dress, and it is handled by not latching: see below.
+  * PER-MODE INTRINSIC DAMPING is unmeasured -- analysis/ringdown.md gives ONE
+    number for the plant -- so the retained fraction differs per mode by an amount
+    nothing here knows, and that biases the shares.
+  * qdot IS AN ESTIMATE. A wrong Phi row leaks one mode's motion into another's
+    need. chi2/dof is the detector and it is logged and acted on by nothing.
 
-Phi COMES FROM GEOMETRY, and that is what removes the worst failure mode here.
-Phi and A are each determined only up to a shared per-mode sign, so a measured
-pair has a gauge that can be got wrong -- and getting it wrong PUMPS. It did, on
-hardware 2026-08-17: an A whose per-mode signs were chosen by maximising
-colocation consistency took the median channel ratio from 1.5 under the diagonal
-law to 2.3 under modal. Nothing offline catches that, because a wrong-signed A is
-still exactly inverted by the allocator -- the demanded modal force is realised
-perfectly in the model and backwards in the plant. The gauge freedom exists ONLY
-because Phi is measured. Taken from geometry Phi has no free sign, so A's sign
-follows from the driven measurement with nothing left to guess, and the measured
-Phi becomes a CHECK: |cos| against geometry per mode, 0.971 / 0.978 / 0.963
-today, warned under 0.90. See PHI_GEOM.
+IT CANNOT LATCH, and that is a design constraint rather than a hope. When the
+statistic is unavailable -- not DAMPING, modal refused, gains at zero, or motion at
+or under the actuator's own floor -- the allocator does not freeze where it was: it
+RAMPS BACK TO FLAT at the same time constant. Flat is eta's split, the only split
+that has ever been on this rig. A statistic that stops arriving therefore returns
+the loop to the configuration with measurements behind it, and the held time is
+counted and printed.
+
+SLOW, AND HOW SLOW IS DERIVED. The slowest mode is 0.72194 Hz, a 1.385 s period, so
+CLAUDE.md Sec 17 asks for a reallocation time constant of order 10 s or more.
+BUDGET_TAU_S = 20 s is 14.4 periods of that mode and twice that floor, and the
+weights are additionally slew-limited to 1/BUDGET_TAU_S = 0.05 per second, so a
+weight moves at most 0.069 -- 6.9 % of nominal -- in one mode-A period. The
+modulation corner 1/(2 pi tau) = 0.0080 Hz is 1.1 % of the slowest mode frequency
+and about 9.5 half-widths off resonance at Q > 433, so the sidebands a time-varying
+gain produces sit outside the resonance rather than inside it. THAT LAST NUMBER IS
+ARITHMETIC ON A MEASURED Q, not a measurement of anything this loop does.
+
+DISSIPATIVITY OF A TIME-VARYING BLEND: PARTLY SETTLED, AND THE REST IS OPEN.
+CLAUDE.md Sec 17 lists it as an open question and it stays open, but part of it can
+be closed by writing it down. The modal energy sum_m (qdot_m^2 + w_m^2 q_m^2)/2
+does not contain the weights, and each term's power is -w_k K_k qdot^2 <= 0
+POINTWISE for any w_k >= 0, so a non-negative time-varying reweighting of two
+pointwise-dissipative laws is pointwise dissipative -- no rate bound needed, and no
+cross term appears. WHAT IS STILL OPEN is the part that argument assumes away: the
+loop acts on an ESTIMATED velocity, and modulating the gain moves the product to
+frequencies where the estimator's phase error is different. Nothing here bounds
+that, which is the real reason for the slow ramp and the reason the default is
+pinned. Every weight is clipped non-negative and floored at BUDGET_SHARE_FLOOR, so
+the sign half of the argument holds unconditionally.
+
+WHAT THE TALMUD ANALOGY GIVES AND WHAT IT DOES NOT. The shape is taken from it --
+one declared pot, division by need, nobody hoarding what they are not using, so a
+quiet mode does not sit on authority a ringing one needs. The FORMULA is not:
+Aumann and Maschler's contested-garment rule divides a FIXED estate among claims
+that are known and static, and here the estate's usable size depends on what is
+already being demanded, the claims are noisy real-time estimates, and paying one
+claimant changes every other claimant's future claim. That is a feedback loop, not
+a division problem. PROPORTIONAL DIVISION WITH A FLOOR IS THEREFORE A CHOICE, and
+it is justified only by two properties: at equal need it reduces EXACTLY to today's
+flat split, which the equivalence constraint requires anyway, and it is closed form
+with no iteration inside a 10 ms control step.
+
+THE OLD GAIN SCHEDULE IS INERT, AND THETA DEPENDS ON THAT. CAPTURE_GAIN and
+STEADY_GAIN are identical vectors, so the capture/steady interpolation runs every
+step between two equal endpoints and changes nothing -- SCHEDULE_INERT asserts it.
+That schedule was the previous attempt at allocation and it had three defects this
+one must not reproduce: it REDUCED gain as the plate quietened, so the loop
+withdrew authority exactly as it started succeeding; it was keyed on `ratio`, the
+zero-gain-referenced statistic above; and it was a per-channel scalar, which cannot
+express "mode B needs more than mode A". Two allocators keyed on different
+references would fight, so there is only one live allocator here. If anyone makes
+the endpoints differ again, arming the budget is REFUSED at construction with the
+reason -- proof by refusal rather than by comment.
 
 WHAT IS MEASURED AND WHAT IS NOT.
-  * modes 0.72194 / 0.99193 / 1.65607 Hz, empty room, 840 s, spread 0.00000
-    across four sensors -- within 0.001 Hz of the 17:21 values (versions.md).
-  * Q > 433 (1 sigma), tau > 138 s (analysis/ringdown.md): undamped on a 2.9-4.7 s
-    closed loop, which is what lets the filter treat the modes as free oscillators.
-  * the modal law measured median ratio 0.08 against diagonal's 1.58 on ZETA
-    (signtest.py, 70 s per law, one trial each). eta changes the estimator, so
-    that is the number to reproduce, not one it inherits. A repeat and a kick test
-    come before it is quoted: `ratio` is an amplitude, so holding the optic and
-    damping it look identical in it.
-  * chi2 per dof is LOGGED and NOT acted on -- its distribution on this rig has
-    never been measured, so a threshold would be a guess (mimo_closed.md 4.5).
-    THE THREE-MODE MODEL IS INCOMPLETE and that is the leading explanation for the
-    residual, ahead of sensor disagreement: the 300 s ambient record shows the
-    in-plane sensors resonating at NINE frequencies -- 0.715, 0.992, 1.431, 1.661,
-    1.984, 2.354, 2.400, 3.138, 3.415 Hz. READING 1.43 Hz AS A FOURTH MODE IS
-    WITHDRAWN: the "1123-1947x" behind it was against a running-median floor in a
-    power spectrum, a flattering statistic, and measured instead as a lock-in
-    against neighbouring frequencies its warp SNR is 4.4, with 2.40 Hz at 1.6.
-    Do NOT add a fourth mode: it would also make Phi square on four determined
-    rows and delete the null space the graceful degradation needs.
-  * per-mode Kp ships FLAT. Measured modal velocity rms was A 0.64, B 2.61,
-    C 3.15 over 28775 samples, so B and C are 4-5x worse damped than A -- the
-    retune is a bench job, not a desk one.
+  * every number the allocator would act on is UNMEASURED on this rig: the
+    distribution of need across the three modes has never been recorded, and
+    whether the ramp should point toward modal or away from it at low disturbance
+    is the RIG OWNER'S CLAIM and not a result. The per-mode residual data compares
+    two laws at ONE ambient level; nothing compares them at two levels. So
+    BUDGET_TILT ships at 0 and this file is eta until somebody measures that.
+  * the per-channel block has NEVER RUN: |gain| was exactly 0.0000 on ch4, ch6 and
+    ch7 for 100 % of DAMPING samples across both 2026-08-18 runs, demoted at engage
+    by `inband-floor`. Its need is therefore 0 today whatever the room is doing,
+    and it can only give budget up, never take it (BUDGET_W_DIAG_MAX).
+  * modes 0.72194 / 0.99193 / 1.65607 Hz, empty room, 840 s, spread 0.00000 Hz.
+  * Q > 433 (1 sigma), tau > 138 s (analysis/ringdown.md).
+  * chi2 per dof is LOGGED and NOT acted on. It was considered as the need
+    statistic and refused: its median is 0.14 with the modal law engaged and fitting
+    against 18-21 with the gains off (n = 9914 and 35848, data/20260818_002229_fast_lock.csv)
+    -- law-dependent by 130x, worse than `ratio` -- and it spikes to 888.74 at the
+    instant of a hand kick, so it is a model-misfit statistic and not a disturbance
+    one.
+  * the kernel phase sweep above IS measured, and it is why that layer is gone.
 """
 
 import json
@@ -169,8 +207,9 @@ KIND = "controller"
 # It closes its own loop and declares its own gain vectors, so bench.py prints the
 # numbers that will be applied out of THIS file -- the check `stdlib.py` was
 # allowed to survive by holding no constants. Named explicitly all the same,
-# because the LAW here is eta's and a reader is entitled to know that the gains
-# below are eta's numbers copied, not new ones.
+# because the LAW here is eta's, and a reader is entitled to know that the gains
+# below are copied, not new ones. NOT ONE GAIN IN THIS FILE DIFFERS FROM eta's;
+# what differs is who gets to spend them.
 GAIN_SOURCE = "osem.theta.py"
 LAW_SOURCE = "osem.eta.py"
 
@@ -189,7 +228,7 @@ FIXES = ("saturation-latch", "rail-threshold", "runaway-baseline", "auto-disable
          "modal-law", "modal-refuse", "modal-colocation", "modal-residual",
          "modal-kalman", "modal-chi2", "dead-pin",
          "inband-floor", "hybrid-diagonal", "fault-clear-live", "per-mode-gain",
-         "modal-kernel")
+         "budget-ramp")
 
 # ---------------------------------------------------------------------------
 # channels and gains  (bench.py reads these five vectors out of this module)
@@ -216,6 +255,28 @@ KD_GAIN = np.array([-0.00045, -0.00045, +0.00045, -0.00045,
                     +0.00000, +0.00000, +0.00000, +0.00000])
 
 CAPTURE_HIGH_FRAC, CAPTURE_LOW_FRAC = 0.6, 0.2
+# THE CAPTURE/STEADY SCHEDULE IS INERT, AND THE BUDGET ALLOCATOR DEPENDS ON IT.
+# The two vectors above are IDENTICAL, so `steady + frac * (capture - steady)` in
+# `_damping` interpolates between two equal endpoints: the machinery runs on every
+# control step and changes nothing. It is left in place rather than deleted for the
+# reason every rung on this ladder keeps its predecessor's code -- the default must
+# stay bit-for-bit eta, and removing a live code path is not the way to prove that
+# -- but it is NOT a second allocator, and two allocators keyed on different
+# references would fight.
+#
+# WHAT IT WAS AND WHY IT IS NOT THE MODEL FOR THIS ONE. When the endpoints differed
+# it was capture-aggressive -> steady-gentle keyed on `ratio`. Three defects:
+#   1. SELF-DEFEATING. It reduced gain as the plate quietened, so the loop withdrew
+#      authority exactly as it began to succeed.
+#   2. WRONG ANCHOR. `ratio` is amplitude over a baseline measured at ZERO GAIN.
+#      Measured 2026-08-18, the same physical quiet reads 0.117 under the modal law
+#      and 1.449-1.832 under the diagonal law -- a factor of 13.
+#   3. WRONG GRANULARITY. A per-channel scalar cannot express "mode B needs more
+#      than mode A", which is what the per-mode residual data says.
+# Arming the budget allocator while this schedule is live is REFUSED in
+# `Controller.__init__`, with that reason. The refusal is the proof; a comment is
+# not one.
+SCHEDULE_INERT = bool(np.array_equal(STEADY_GAIN, CAPTURE_GAIN))
 SCHEDULE_WINDOW_S, GAIN_SLEW_PER_S = 1.0, 0.02
 D_SMOOTH_HZ, I_CLAMP_V, TRACK_TC_S = 2.0, 0.15, 0.5
 
@@ -302,11 +363,6 @@ RUNAWAY_TREND_LAG_S, RUNAWAY_GROWTH_FRAC = 10.0, 1.02
 SAT_SUSTAIN_S, SAT_FRACTION = 1.30, 0.80
 SAT_DECAY_FRAC = 0.98
 
-BREAKER_REF_FLOOR_FRAC = 0.10   # of the median driven reference. Same number and
-                                # same argument as BASELINE_FLOOR_FRAC below: a
-                                # channel whose own reference is a small fraction
-                                # of what everything else reads cannot have a
-                                # meaningful RATIO against it.
 BASELINE_FLOOR_FRAC = 0.10     # of the median IN-BAND amplitude across enabled
 
 RAIL_LOW_COUNTS, RAIL_HIGH_COUNTS = 12, 1011
@@ -471,9 +527,9 @@ LOCK_COHERENT_MIN = 0.75
 # axes -- so they fail it BY CONSTRUCTION and not because they are blind (measured
 # coherence with the optic 0.46 / 0.26 / 0.50). The fix belongs in the floor check
 # and is being made in eta. NOTHING IN THIS FILE ASSUMES THOSE THREE ARE DEAD OR
-# ABSENT: the kernel acts on the MODAL path, which is coils 0-3 through the
-# allocator, and the hybrid diagonal term is summed after it exactly as in eta, so
-# whatever the floor fix does to their gain it does the same thing here.
+# ABSENT: the allocator acts on the MODAL path, which is coils 0-3, and the hybrid
+# diagonal term is summed after it exactly as in eta, so whatever the floor fix
+# does to their gain it does the same thing here.
 
 # ---------------------------------------------------------------------------
 # the sensor -> mode matrix, FROM GEOMETRY
@@ -579,204 +635,322 @@ def _modal(path, phi=PHI_GEOM, basis=PHI_BASIS, a=A_DC, a_coils=A_DC_COILS,
                     a_coils=a_coils, a_provisional=True,
                     a_provenance=A_DC_PROVENANCE)
 
+
 # ---------------------------------------------------------------------------
-# the convolution kernel bank -- the only thing in this file that is not eta
+# THE ACTUATOR BUDGET -- one declared number, divided among claimants by NEED
 # ---------------------------------------------------------------------------
-# PER-MODE PHASE, degrees, POSITIVE IS A LAG (the loop acts on that mode later).
-# ZERO IS eta, exactly, and zero is what ships.
+# ONE NUMBER. Every cap in this file is quoted against it and nothing else here
+# invents one. It is the demand about bias a single coil may carry, and it is
+# eta's existing cap under a name:
 #
-# THIS DEFAULT IS NOT CAUTION, IT IS THE ONLY DEFENSIBLE VALUE. A phase here
-# cancels a phase in the plant, and no measurement of the plant's phase exists:
-# A's magnitudes are NOT established (CLAUDE.md Sec 3 -- the driven pass in
-# data/modal.json is off-quadrature 0.624 / 0.749 / 1.196 where resonance wants
-# ~0, and the two DC passes reproduce individual entries only to a factor
-# 0.23-1.8). A's SIGNS are settled, 12 of 12 across three independent
-# determinations, and that is the half of A this file's DEFAULT depends on --
-# because at zero phase the kernel is the identity and the law is eta's, which
-# needs only what eta needs. THE MOMENT THIS IS NON-ZERO IT DEPENDS ON THE
-# MAGNITUDES TOO, and they are the thing Sec 16 says blocks this work.
+#     BUDGET_V = MODAL_TOTAL_HEADROOM * BIAS_SWING = 0.900 * 0.250 = 0.225 V
 #
-# The knob is here so that when a clean A does exist, the change is a number in
-# this vector and not a new control law written under bench pressure.
-KERNEL_PHASE_DEG = np.zeros(NMODE)
+# THE LEDGER, so the whole set is in one place:
+#     BIAS_SWING             0.2500 V  the half-window (VMIN/VMAX). There is NO
+#                                      recorded justification for it anywhere and
+#                                      the coil driver is not in this repo -- do
+#                                      not raise it here (CLAUDE.md Sec 11).
+#     BUDGET_V               0.2250 V  90 % of it, on the TOTAL output, SOLVED by
+#                                      `sl.cap_scale` rather than estimated.
+#     MODAL_DEMAND_CAP_V     0.2000 V  a per-vector cap inside `Modal.allocate`,
+#                                      i.e. 89 % of the budget, uniform so the
+#                                      allocation direction is preserved.
+#     BUDGET_MOTION_FLOOR_V  0.0089 V  the bottom of the ramp: the actuator's own
+#                                      residual, 0.5 mV deadband plus the 10 ms
+#                                      throttle (0.0089 / 0.0087 / 0.0094 V at
+#                                      20 / 5 / 0 mV of injected sensor noise --
+#                                      SIMULATOR numbers, CLAUDE.md). Motion under
+#                                      it is not something any allocation reaches,
+#                                      so the allocator holds there.
+# MEASURED against that ledger and NOT respected before theta: coil 3 ran max
+# 0.4229 V -- 169 % of the 0.250 V half-window -- because the derivative term was
+# added after the modal cap (CLAUDE.md Sec 2).
+BUDGET_V = MODAL_TOTAL_HEADROOM * BIAS_SWING
 
-# Derived, not chosen. On a tone at f_m a lag psi is identically
-# cos(psi) qdot + sin(psi) omega q, and <q qdot> = 0 over a cycle, so the
-# cycle-averaged modal power is -K cos(psi) <qdot^2>: at |psi| = 90 deg the modal
-# term dissipates NOTHING and past it the sign flips and it PUMPS. Asserted
-# numerically in the selftest, both the cos(psi) law and the refusal.
-KERNEL_PHASE_HARD_CAP_DEG = 90.0
+# Claimants: one per mode, plus the per-channel (hybrid diagonal) block as one.
+BUDGET_CLAIMS = NMODE + 1
 
-# 140 taps = 1.40 s at CONTROL_HZ. Set by the SLOWEST mode: 0.72194 Hz is a
-# 1.385 s period = 138.5 control samples, and a causal filter reaches a phase
-# LEAD only as a lag of one period minus it, so any phase in [0, 360) on mode A
-# needs a full period of history plus the interpolation tap. Only two taps per
-# mode are ever non-zero; the length is what the ring has to hold.
-KERNEL_TAPS = int(np.ceil(1.0 / (float(F_MODE_HZ.min()) * CONTROL_PERIOD_S))) + 1
-KERNEL_LEN_S = KERNEL_TAPS * CONTROL_PERIOD_S
+# HOW FAR THE DIVISION IS ALLOWED TO DEPART FROM FLAT. 0 = flat, i.e. eta.
+# 1 = fully need-proportional.  ZERO IS WHAT SHIPS, AND IT IS NOT CAUTION.
+# Nothing on this rig has ever measured the distribution of need across the three
+# modes, and WHICH WAY the allocation should move at low disturbance is the rig
+# owner's claim rather than a result: the per-mode residual data compares two laws
+# at ONE ambient level (CLAUDE.md, per-mode residual) and nothing compares either
+# law at two levels. At tilt = 0 every weight is EXACTLY 1.0 for every possible
+# need vector -- nans and infinities included -- so this file is eta until
+# somebody measures that, and the knob is here so the change is a number rather
+# than a new control law written under bench pressure.
+BUDGET_TILT = 0.0
+BUDGET_TILT_HARD_CAP = 1.0     # past this a claimant's weight could go negative,
+                               # which is not a reallocation, it is a sign flip
+
+# THE RAMP TIME CONSTANT, and it is derived. The slowest mode is 0.72194 Hz, a
+# 1.385 s period, and CLAUDE.md Sec 17 asks for "order 10 s or more" because
+# anything faster modulates the loop gain inside the control band and is itself a
+# disturbance source. 20 s is 14.4 periods of that mode and 2x that floor. The
+# modulation corner 1/(2 pi tau) = 0.0080 Hz is 1.1 % of the slowest mode
+# frequency, and at Q > 433 the mode half-width is 0.72194/(2 x 433) = 0.00083 Hz,
+# so the sidebands a time-varying gain produces sit about 9.5 half-widths OFF
+# resonance rather than on it. That is arithmetic on a measured Q, not a
+# measurement of this loop.
+BUDGET_TAU_S = 20.0
+# Belt and braces on top of the lag: no weight may move faster than this. A unit
+# change therefore takes at least BUDGET_TAU_S, and a weight moves at most
+# 0.05 x 1.385 = 0.069 -- 6.9 % of nominal -- in one period of the slowest mode.
+BUDGET_W_SLEW_PER_S = 1.0 / BUDGET_TAU_S
+# Nobody is starved. Shares are mixed with the flat share before they become
+# weights, so a claimant keeps at least this fraction of an equal share whatever
+# the need says. A mode at zero gain is a mode back at the plant's own 0.0072 /s,
+# tau > 138 s (analysis/ringdown.md), and no measurement says that is ever right.
+# At tilt = 1 and 4 claimants this bounds the weights to [0.25, 3.25].
+BUDGET_SHARE_FLOOR = 0.25
+# The per-channel block may GIVE budget up and may not take any. Its gain is
+# HYBRID_KP x SLOPE_SIGN x the MEASURED coherent fraction, which is the
+# Wiener-optimal cap on a noisy channel (see HYBRID_COHERENT); scaling it past 1
+# would spend budget on a number nothing justifies. The surplus goes back into the
+# pot and is redivided among the modes, so the pot is still conserved.
+BUDGET_W_DIAG_MAX = 1.0
+# Below this the allocation cannot matter: it is the actuator's own floor, not the
+# sensing floor. SIMULATOR number.
+BUDGET_MOTION_FLOOR_V = 0.0089
+# Held this long with no usable statistic and the run says so once. Held time is
+# not a fault -- flat is a valid configuration, it is eta's -- but a run that
+# spent most of itself held measured nothing about the allocator.
+BUDGET_HOLD_SAY_S = 60.0
 
 
-def _parse_kernel_phase(spec):
-    """OSEM_KERNEL_PHASE_DEG=a,b,c -> an array of NMODE degrees, or None.
+def _parse_budget_tilt(spec):
+    """OSEM_BUDGET_TILT=x -> a float in [0, cap], or None.
 
-    ATTENDED ONLY, and refused past the cap. Same pattern as OSEM_GAIN_RAMP: the
-    bench can reach it without a diff, and it cannot reach a value the derivation
-    above says pumps.
+    ATTENDED ONLY, same pattern as OSEM_GAIN_RAMP: the
+    bench can reach it without a diff, and it cannot reach a value that would take
+    a claimant's weight negative.
     """
     if not spec:
         return None
-    parts = [p for p in spec.replace(",", " ").split() if p]
-    if len(parts) == 1:
-        parts = parts * NMODE
-    if len(parts) != NMODE:
-        raise ValueError("OSEM_KERNEL_PHASE_DEG wants %d values (or one for all "
-                         "modes), got %r" % (NMODE, spec))
-    psi = np.array([float(p) for p in parts])
-    worst = float(np.max(np.abs(psi)))
-    if worst >= KERNEL_PHASE_HARD_CAP_DEG:
+    tilt = float(spec)
+    if not 0.0 <= tilt <= BUDGET_TILT_HARD_CAP:
         raise ValueError(
-            "OSEM_KERNEL_PHASE_DEG %r asks for %.1f deg. The cycle-averaged modal "
-            "dissipation goes as cos(psi), so at %.0f deg it is zero and past it the "
-            "term PUMPS. This cap is a derivation, not a preference: if you mean to "
-            "cross it, change the law, not the number."
-            % (spec, worst, KERNEL_PHASE_HARD_CAP_DEG))
-    return psi
+            "OSEM_BUDGET_TILT %r wants 0 <= tilt <= %.1f. Past the cap a claimant's "
+            "weight can go negative, which is not a reallocation -- it is a sign "
+            "flip, and a wrong-signed term PUMPS (CLAUDE.md, the sign of A)."
+            % (spec, BUDGET_TILT_HARD_CAP))
+    return tilt
 
 
-class ModalKernel:
-    """One causal FIR per mode, on the PROJECTED modal velocity.
+class BudgetAllocator:
+    """One declared budget, divided among claimants by NEED, ramped slowly.
 
-        f_m = -K_m * sum_k g_m[k] * (Proj qdot)_m(t - k dt)
+        need_k   the power claimant k is REMOVING:  K qdot^2 per mode,
+                 sum_j |g_j| vel_j^2 for the per-channel block
+        share_k  need_k / sum(need), one-poled at BUDGET_TAU_S
+        w_k      1 + tilt * (K share'_k - 1),  sum_k w_k = K  (the pot is conserved)
 
-    g_m is the two-tap kernel with EXACTLY unit magnitude and EXACTLY phase
-    -psi_m at f_m: with omega = 2 pi f_m dt, D = psi/omega, k1 = floor(D) and
-    k2 = k1 + 1,
+    AT tilt = 0 EVERY WEIGHT IS EXACTLY 1.0. Not approximately: the tilt term is
+    forced finite before it is multiplied, so `1.0 + 0.0 * finite` is the identity
+    for every need vector this can be handed, including all-zero, all-nan and one
+    infinity. That is why the shipped file is eta bit for bit, and the selftest
+    asserts it with `==` over pathological inputs rather than with a tolerance.
 
-        g[k1] = sin(omega k2 - psi) / sin(omega)
-        g[k2] = sin(psi - omega k1) / sin(omega)
+    WHY NEED IS A DISSIPATION RATE AND NOT AN AMPLITUDE -- the whole reason this
+    rung is not dangerous. `ratio` is amplitude over a ZERO-GAIN baseline, so it
+    measures the loop's own success: measured 2026-08-18 the same physical quiet
+    reads 0.117 under the modal law and 1.449-1.832 under the diagonal one, 13x for
+    the same plate. An allocator keyed on it hands budget to whoever is already
+    winning, which is positive feedback through the measurement. A dissipation rate
+    is the power leaving the mode, and in a steady state that equals the power the
+    ROOM is injecting, which no gain of ours changes. The cancellation is not exact
+    -- the plant takes its own 0.0072 /s share -- and the residual is bounded:
+    across the full [0.25, 2.5] weight range the retained fraction runs 82.1 % to
+    97.9 %, so the statistic moves at most 1.19x from the weight itself against
+    `ratio`'s 13x. Simulated end to end in the selftest: 2.90x in rms motion
+    against 1.24x in need, over a 10x range of loop gain.
 
-    Two taps are enough because the target is a phase at ONE frequency, and the
-    result is exact there rather than approximate: the design is solved, not
-    windowed. At psi = 0 the first tap is sin(omega)/sin(omega) -- the same
-    floating-point value divided by itself, so exactly 1.0 -- and the second is
-    sin(0)/sin(omega), exactly 0.0. THAT IS WHY THE DEFAULT IS BIT-FOR-BIT eta
-    and not merely close, and the selftest asserts it as an identity rather than
-    with a tolerance.
+    IT CANNOT LATCH. When the statistic is not available -- not DAMPING, the modal
+    law not engaged, every gain at zero, need not finite, or motion at or under
+    BUDGET_MOTION_FLOOR_V -- the shares are ramped BACK TOWARD FLAT at the same
+    time constant instead of frozen where they were. Flat is eta's split, the only
+    one with any measurement behind it, so a statistic that stops arriving returns
+    the loop to the known configuration rather than pinning it wherever the last
+    good sample left it. CLAUDE.md Sec 1 is the reason that is a requirement and not
+    a nicety: `ratio` froze at 3.59 for 1085 s on 2026-08-17, and a ramp keyed on a
+    statistic that can freeze is a ramp that can latch.
 
-    WHY THE KERNEL SEES THE PROJECTED VELOCITY. `Modal.project` returns
-    Proj qdot, and `Modal.allocate` applies Proj again; at the shipped rank 3 Proj
-    is the identity and the order is moot, but under rank reduction filtering
-    inside the reachable subspace and re-projecting after is the conservative
-    order -- it cannot move demand into a direction the coils cannot reach.
-
-    WHAT THIS DOES NOT INHERIT. eta's dissipation argument is that
-    -Proj K Proj qdot is symmetric PSD. A NON-ZERO PHASE VOIDS THAT: the kernel
-    is not a positive scalar, the retained dissipation is cos(psi) of it, and the
-    remainder is a stiffness term that moves the mode instead of damping it. At
-    psi = 0 the argument is untouched because the kernel is the identity.
+    DIVISION BY PROPORTION IS A CHOICE. The shape is the rig owner's Talmud
+    reading -- one declared pot, division by need, nobody sitting on authority they
+    are not using. The formula is not: the contested-garment rule divides a FIXED
+    estate among STATIC known claims, and here the estate's usable size depends on
+    what is already being demanded, the claims are noisy real-time estimates, and
+    paying one claimant changes every other claim. Proportional-with-a-floor is
+    justified only by reducing EXACTLY to the flat split at equal need and by being
+    closed form inside a 10 ms step.
     """
 
-    def __init__(self, f_hz, phase_deg, taps, dt):
-        self.f = np.asarray(f_hz, float)
-        self.nm = len(self.f)
-        self.dt = float(dt)
-        self.taps = int(taps)
-        self.psi = np.asarray(phase_deg, float) * (np.pi / 180.0)
-        self.w = 2.0 * np.pi * self.f * self.dt
-        self.g = np.zeros((self.nm, self.taps))
-        for m in range(self.nm):
-            self.g[m] = self.build(self.w[m], self.psi[m], self.taps)
-        self.hist = np.zeros((self.nm, self.taps))
-        self.n_nonfinite = 0
+    def __init__(self, k, tilt, tau_s, floor, w_diag_max, slew_per_s,
+                 motion_floor_v):
+        self.k = int(k)
+        self.tilt = float(tilt)
+        self.tau = float(tau_s)
+        self.floor = float(floor)
+        self.w_diag_max = float(w_diag_max)
+        self.slew = float(slew_per_s)
+        self.motion_floor = float(motion_floor_v)
+        self.flat_share = np.full(self.k, 1.0 / self.k)
+        self.share = self.flat_share.copy()
+        self.w = np.ones(self.k)
+        # The division BEFORE the slew limiter. sum(w_target) == k exactly; the
+        # slew limiter is what makes the applied `w` lag it, so the pot is
+        # conserved in the division and only transiently mis-served on the way
+        # there -- bounded by the slew cap and asserted in the selftest.
+        self.w_target = np.ones(self.k)
+        self.held_s = self.live_s = 0.0
+        self.hold_why = "not started"
+        self.holding = True
+        self.wsum, self.wn = np.zeros(self.k), 0
+        self.wmin, self.wmax = np.ones(self.k), np.ones(self.k)
+        self.spent_peak = 0.0          # realised |out - bias|, V, over driven coils
+        self.spent_over = 0            # control steps at or past the budget
 
-    @staticmethod
-    def build(w, psi, taps):
-        """The two-tap kernel, exact at omega = w. psi wraps into [0, 2 pi)."""
-        g = np.zeros(int(taps))
-        psi = float(np.mod(psi, 2.0 * np.pi))
-        k1 = int(np.floor(psi / w))
-        k2 = k1 + 1
-        if k2 >= taps:
-            raise ValueError("a phase of %.4f rad at omega %.6f rad/sample needs "
-                             "%d taps and there are %d. KERNEL_TAPS is set by the "
-                             "SLOWEST mode; this one is faster and should fit."
-                             % (psi, w, k2 + 1, taps))
-        s = np.sin(w)
-        g[k1] = np.sin(w * k2 - psi) / s
-        g[k2] = np.sin(psi - w * k1) / s
-        return g
+    # -- what the loop reads ------------------------------------------------
+    @property
+    def armed(self):
+        return self.tilt != 0.0
 
     @property
-    def identity(self):
-        """True when every kernel is the unit impulse, i.e. this IS eta."""
-        return bool(np.all(self.g[:, 0] == 1.0) and not np.any(self.g[:, 1:]))
+    def flat(self):
+        """True when every weight is EXACTLY 1.0 -- i.e. this IS eta's split."""
+        return bool(np.all(self.w == 1.0))
 
-    def response(self, m, f_hz=None):
-        """The kernel's complex response at f_hz (its own mode by default)."""
-        f = self.f[m] if f_hz is None else float(f_hz)
-        k = np.arange(self.taps)
-        return complex(np.sum(self.g[m] * np.exp(-1j * 2.0 * np.pi * f * self.dt * k)))
+    def weights(self):
+        """(per-mode weights, per-channel-block weight)."""
+        return self.w[:self.k - 1], float(self.w[self.k - 1])
 
-    def reset(self):
-        self.hist[:] = 0.0
+    # -- one control step ---------------------------------------------------
+    def update(self, dt, need, motion_v, usable, why=""):
+        """Advance the allocation one control step. Never raises, never nans.
 
-    def push(self, qd):
-        """Advance one control step and return the filtered modal velocity.
-
-        A non-finite input resets the ring and passes through: a nan in the modal
-        velocity is already terminal for the estimator upstream, and there is no
-        reason for the kernel to remember it 1.4 s longer than eta would.
+        `usable` is the caller's statement that the statistic means something this
+        step. False does NOT freeze: it ramps back toward flat.
         """
-        qd = np.asarray(qd, float)
-        if not np.isfinite(qd).all():
-            self.n_nonfinite += 1
-            self.reset()
-            return qd
-        self.hist[:, 1:] = self.hist[:, :-1]
-        self.hist[:, 0] = qd
-        return np.einsum("mk,mk->m", self.g, self.hist)
+        dt = float(dt)
+        need = np.asarray(need, float)
+        good = (bool(usable) and need.shape == (self.k,) and np.isfinite(need).all()
+                and float(need.min()) >= 0.0 and float(need.sum()) > 0.0
+                and np.isfinite(motion_v) and float(motion_v) > self.motion_floor)
+        if good:
+            target = need / float(need.sum())
+            self.holding, self.hold_why = False, ""
+            self.live_s += dt
+        else:
+            target = self.flat_share
+            self.holding = True
+            self.held_s += dt
+            if not why:
+                why = ("no usable need: motion %.4f V against the %.4f V actuator "
+                       "floor" % (motion_v, self.motion_floor))
+            self.hold_why = why
+        # ONE POLE at BUDGET_TAU_S. This is the ramp; everything else is a bound.
+        a = dt / (self.tau + dt) if self.tau > 0.0 else 1.0
+        self.share = self.share + a * (target - self.share)
+        self._weights(dt)
+        self.wsum += self.w
+        self.wn += 1
+        self.wmin = np.minimum(self.wmin, self.w)
+        self.wmax = np.maximum(self.wmax, self.w)
+        return self.holding
 
+    def _weights(self, dt):
+        # Floor first, so no claimant can be starved and no weight can go negative.
+        s = (1.0 - self.floor) * self.share + self.floor / self.k
+        tilt_term = self.k * s - 1.0
+        # FORCED FINITE BEFORE THE MULTIPLY. `0.0 * nan` is nan, and one nan in a
+        # gain vector is the end of the run; `0.0 * finite` is exactly 0.0, which is
+        # what makes tilt = 0 the identity rather than nearly it.
+        tilt_term = np.where(np.isfinite(tilt_term), tilt_term, 0.0)
+        w = 1.0 + self.tilt * tilt_term
+        # The per-channel block gives and does not take (BUDGET_W_DIAG_MAX). The
+        # surplus is redivided among the modes in proportion, so sum(w) = k stands.
+        if w[self.k - 1] > self.w_diag_max:
+            surplus = w[self.k - 1] - self.w_diag_max
+            w[self.k - 1] = self.w_diag_max
+            tot = float(w[:self.k - 1].sum())
+            if tot > 0.0:
+                w[:self.k - 1] = w[:self.k - 1] + surplus * w[:self.k - 1] / tot
+        self.w_target = w
+        cap = self.slew * dt
+        self.w = self.w + np.clip(w - self.w, -cap, cap)
+
+    def spend(self, demand_v):
+        """Record what was actually spent. Observation only; changes nothing."""
+        if demand_v.size:
+            peak = float(np.abs(demand_v).max())
+            self.spent_peak = max(self.spent_peak, peak)
+            if peak >= BUDGET_V:
+                self.spent_over += 1
+
+    # -- reporting ----------------------------------------------------------
     def report(self):
-        deg = self.psi * (180.0 / np.pi)
-        out = ["[kernel] %d taps = %.2f s of modal-velocity history at %.0f Hz; "
-               "2 taps non-zero per mode"
-               % (self.taps, self.taps * self.dt, 1.0 / self.dt)]
-        if self.identity:
-            out.append("[kernel] per-mode phase %s deg -- IDENTITY. Every g_m is the "
-                       "unit impulse, so this run is %s's law, numerically."
-                       % (" / ".join("%.1f" % d for d in deg), LAW_SOURCE))
-            out.append("[kernel] the extra freedom is present and ZEROED: there is no "
-                       "measurement of the plant phase to cancel (CLAUDE.md Sec 3, "
-                       "A's magnitudes).")
+        out = ["[budget] ONE declared budget %.4f V per coil about bias (%.0f %% of "
+               "the %.3f V half-window), solved on the TOTAL output"
+               % (BUDGET_V, 100.0 * MODAL_TOTAL_HEADROOM, BIAS_SWING),
+               "[budget] %d claimants: %d modes + the per-channel block; division is "
+               "need-proportional with a %.0f %% floor, one-poled at %.0f s"
+               % (self.k, self.k - 1, 100.0 * self.floor, self.tau)]
+        if not self.armed:
+            out.append("[budget] tilt %.2f -- FLAT. Every weight is exactly 1.0 for "
+                       "every possible need, so this run is %s's split, numerically."
+                       % (self.tilt, LAW_SOURCE))
+            out.append("[budget] the allocator is present, in the path on every "
+                       "control step, and NOT ARMED: nothing on this rig has "
+                       "measured the distribution of need across the modes, and "
+                       "which way the ramp should point is a claim, not a result.")
             return out
-        out.append("[kernel] !! PER-MODE PHASE IS NON-ZERO: %s deg. THIS IS NOT eta'S "
-                   "LAW and nothing offline catches a wrong kernel -- the 2026-08-17 "
-                   "sign-of-A failure passed every offline check and PUMPED. ATTENDED "
-                   "ONLY." % " / ".join("%+.1f" % d for d in deg))
-        out.append("[kernel] cycle-averaged dissipation retained per mode: %s of the "
-                   "psi = 0 value. The remainder is a STIFFNESS term -- it moves the "
-                   "mode, it does not damp it."
-                   % " / ".join("%.3f" % c for c in np.cos(self.psi)))
-        for m in range(self.nm):
-            k = np.nonzero(self.g[m])[0]
-            h = self.response(m)
-            out.append("[kernel]   mode %d  %.5f Hz  psi %+7.2f deg  taps %s  "
-                       "|H| %.6f  arg H %+7.2f deg  group delay %.3f s"
-                       % (m, self.f[m], deg[m],
-                          " ".join("%d:%+.4f" % (int(i), self.g[m][i]) for i in k),
-                          abs(h), np.degrees(np.angle(h)),
-                          float(k.max()) * self.dt))
-        out.append("[kernel] a LAG is a real time delay, so a transient on that mode "
-                   "is acted on that late. A lead is realised as one period minus it, "
-                   "which is the longest delay of all.")
+        out.append("[budget] !! TILT IS NON-ZERO: %.2f. THIS IS NOT %s'S SPLIT. "
+                   "Weights are bounded to [%.2f, %.2f], slew %.3f /s (a unit move "
+                   "takes >= %.0f s), and nothing offline catches a wrong "
+                   "allocation. ATTENDED ONLY."
+                   % (self.tilt, LAW_SOURCE,
+                      1.0 - self.tilt * (1.0 - self.floor),
+                      1.0 + self.tilt * (self.k - 1) * (1.0 - self.floor),
+                      self.slew, 1.0 / self.slew))
+        out.append("[budget] need is the loop's own DISSIPATION RATE per claimant, "
+                   "NOT `ratio`: `ratio` is referenced to a zero-gain baseline and "
+                   "reads 13x apart for the same plate under the two laws "
+                   "(2026-08-18). With no usable need the shares ramp BACK TO FLAT "
+                   "rather than freezing, so this cannot latch.")
         return out
 
+    def summary(self):
+        if self.wn == 0:
+            return "\n  BUDGET: no control step ran."
+        mean = self.wsum / self.wn
+        out = ["", "=" * 68, "  ACTUATOR BUDGET -- %.4f V per coil, divided by need"
+               % BUDGET_V, "=" * 68,
+               "  claimant      mean w    min w    max w",
+               ]
+        for m in range(self.k - 1):
+            out.append("  mode %d %7.5f Hz  %6.3f   %6.3f   %6.3f"
+                       % (m, F_MODE_HZ[m], mean[m], self.wmin[m], self.wmax[m]))
+        j = self.k - 1
+        out.append("  per-channel        %6.3f   %6.3f   %6.3f"
+                   % (mean[j], self.wmin[j], self.wmax[j]))
+        out += ["",
+                "  allocation live %.1f s, held at flat %.1f s (%s)"
+                % (self.live_s, self.held_s, self.hold_why or "-"),
+                "  peak realised demand about bias %.4f V against the %.4f V budget"
+                % (self.spent_peak, BUDGET_V)
+                + ("" if self.spent_over == 0 else
+                   "  <-- AT OR OVER on %d control step(s)" % self.spent_over)]
+        if not self.armed:
+            out.append("  tilt 0: this is %s's flat split and the table above is a "
+                       "constant by construction." % LAW_SOURCE)
+        out.append("")
+        return "\n".join(out)
 
-# Resolved once, at import, so `bench.py` and the banner see the same vector the
-# loop will use. Unset -> KERNEL_PHASE_DEG -> zeros -> eta.
-KERNEL_PHASE = _parse_kernel_phase(os.environ.get("OSEM_KERNEL_PHASE_DEG", "").strip())
-if KERNEL_PHASE is None:
-    KERNEL_PHASE = KERNEL_PHASE_DEG
+
+BUDGET_TILT_LIVE = _parse_budget_tilt(os.environ.get("OSEM_BUDGET_TILT", "").strip())
+if BUDGET_TILT_LIVE is None:
+    BUDGET_TILT_LIVE = BUDGET_TILT
 
 
 # ---------------------------------------------------------------------------
@@ -811,7 +985,24 @@ def kick_cue(phrase=KICK_CUE_PHRASE):
         pass
 
 
-GAIN_RAMP_HARD_CAP = 0.060      # refuses to parse past this, whatever is asked
+GAIN_RAMP_HARD_CAP = 0.075      # RAISED 0.060 -> 0.075 on 2026-08-18, deliberately
+                                # and with a measurement, which is what the
+                                # parser demands. Two ramps that evening walked
+                                # |Kp| from 0.030 to 0.050 in 0.005 and 0.002
+                                # steps and NOTHING RAILED at any level -- 0.0%
+                                # pinned samples throughout -- while peak demand
+                                # never exceeded 0.089 V against the 0.25 V
+                                # half-window, i.e. 36% of the actuator range.
+                                # The documented "-0.040 rail onset"
+                                # (analysis/kp040.md, one unreproduced run of
+                                # 2026-07-15) DID NOT REPRODUCE.
+                                # 0.050 is where the sweep STOPPED, not where
+                                # anything broke, so the upper limit is
+                                # UNEXPLORED rather than known. Extrapolating
+                                # demand linearly the window would not bind
+                                # until about 0.14. 0.075 is the next step, not
+                                # a verdict; raise it again the same way if it
+                                # too comes back clean. STILL ATTENDED ONLY.
 GAIN_RAMP_SETTLE_FRAC = 0.40    # of each dwell, discarded: the slew limit is live
 GAIN_RAMP_RISE_TRIPS = 2        # consecutive rises in `ratio` that end the ramp
 GAIN_RAMP_RAIL_FRAC = 0.02      # of a level's samples pinned, on any driven channel
@@ -949,6 +1140,16 @@ def csv_cols():
     cols += [(f"mres{m}", ".5f") for m in range(NMODE)]
     cols += [("chi2", ".5f"), ("ndof", None)]
     cols += [(f"qls{m}", ".6f") for m in range(NMODE)]
+    # THE ALLOCATION IS LOGGED, and that is not taste: the declared budget is
+    # constant for a run and goes in the banner, while the weights MOVE during a
+    # run and are the only record of what was actually applied. "Always stream the
+    # raw data to disk" is a standing practice here, and a ramp nobody can
+    # reconstruct afterwards measured nothing. Appended at the END of the modal
+    # block, so every column eta writes keeps its name and its meaning and
+    # analysis/ reads a run of either rung the same way. At the shipped tilt these
+    # five are constants: bw* = 1, bhold = 1.
+    cols += [(f"bw{m}", ".5f") for m in range(NMODE)]
+    cols += [("bwd", ".5f"), ("bhold", None)]
     for i in range(N):
         cols += [(f"ch{i}_counts", None), (f"ch{i}_V", ".4f")]
         cols += [(f"ch{i}_{k}", f) for k, f in _LOG]
@@ -1040,12 +1241,32 @@ class Controller(sl.Loop):
                     if self.modal.ok else None)
         self.chi2_log = {s: sl.Chi2Log(MODAL_CHI2_LEVELS)
                          for s in ("CALIBRATING", "DAMPING", "FAULT")}
-        # The kernel bank. At KERNEL_PHASE = 0 every g_m is the unit impulse and
-        # this object returns its input unchanged, exactly -- it is still in the
-        # path on every control step, so the machinery is exercised by every run
-        # and by every check in the suite rather than only when it is armed.
-        self.kernel = ModalKernel(F_MODE_HZ, KERNEL_PHASE, KERNEL_TAPS,
-                                  CONTROL_PERIOD_S)
+        # The budget allocator. At BUDGET_TILT_LIVE = 0 every weight it returns is
+        # exactly 1.0, so the gain lines below multiply by 1.0 and this file is
+        # eta -- and it is still called on every control step in every state, so
+        # the machinery is exercised by every run and by every check in the suite
+        # rather than only when it is armed.
+        self.budget = BudgetAllocator(BUDGET_CLAIMS, BUDGET_TILT_LIVE, BUDGET_TAU_S,
+                                      BUDGET_SHARE_FLOOR, BUDGET_W_DIAG_MAX,
+                                      BUDGET_W_SLEW_PER_S, BUDGET_MOTION_FLOOR_V)
+        self._budget_hold_said = False
+        # PROOF BY REFUSAL. The capture/steady schedule is the older allocator and
+        # it is keyed on `ratio`, the zero-gain-referenced statistic this rung
+        # exists to stop using. It is inert only because its two endpoints are
+        # equal. If anyone makes them differ, two allocators are live at once on
+        # two different references and they will fight -- so arming the budget is
+        # refused rather than allowed to be discovered on the bench.
+        if self.budget.armed and not np.array_equal(self.steady, self.capture):
+            raise ValueError(
+                "OSEM_BUDGET_TILT is armed (%.3f) while CAPTURE_GAIN and "
+                "STEADY_GAIN differ, so the capture/steady schedule is LIVE. That "
+                "schedule reduces gain as `ratio` falls -- it withdraws authority "
+                "as the loop succeeds, and `ratio` is referenced to a ZERO-GAIN "
+                "baseline (13x apart between the two laws, 2026-08-18). Two "
+                "allocators on two references fight. Retire one before arming the "
+                "other.\n  steady  %s\n  capture %s"
+                % (self.budget.tilt, np.round(self.steady, 5).tolist(),
+                   np.round(self.capture, 5).tolist()))
 
         self.qdot = np.zeros(self.nmode)          # modal velocity, V/s
         self.qls = np.zeros(self.nmode)           # per-mode LS estimate, logged only
@@ -1169,28 +1390,7 @@ class Controller(sl.Loop):
         only mean anything against the zero-gain window -- see `_damping`.
         """
         q = self.quiet.level()
-        ref = self.baseline if q is None else np.maximum(self.baseline, q)
-        # AND FLOORED ACROSS CHANNELS. A relative excursion only means something
-        # against a reference that itself means something. Measured on the rig
-        # 2026-08-18 02:31: ch4's baseline came out 0.0038 V against ch0's
-        # 0.2141 V and a driven median near 0.28 V -- 56x smaller, because a4
-        # senses an axis ORTHOGONAL to the three damped modes, so its in-band
-        # level is small by construction rather than because it is quiet. Any
-        # motion at all is then a huge ratio, and `!! ch4 runaway` faulted the
-        # run twice within 25 s.
-        #
-        # This is NOT the same as dropping low-baseline channels from the
-        # evidence set, which `_driven` explains costs a real detection: a
-        # genuinely pumped resonance still crosses a floored reference, because
-        # the floor is a fraction of what the loud channels are doing. It only
-        # stops a channel whose reference is an artefact from voting on a ratio
-        # against that artefact.
-        drv = self._driven()
-        if drv.any():
-            med = float(np.median(ref[drv]))
-            if med > 0:
-                ref = np.maximum(ref, BREAKER_REF_FLOOR_FRAC * med)
-        return ref
+        return self.baseline if q is None else np.maximum(self.baseline, q)
 
     # -- faults -------------------------------------------------------------
     def _fault(self, t, msg, railed=False, amp=False):
@@ -1271,12 +1471,23 @@ class Controller(sl.Loop):
             self.qls, self.modal_res, _ = self.modal.sense(
                 self.kf.modal_velocity(), sense_ok)
 
+        was = self.state
         if self.state == "CALIBRATING":
             self._calibrating(t, volts)
         elif self.state == "DAMPING":
             self._damping(t, dt)
         elif self.state == "FAULT":
             self._faulted(t)
+        if was != "DAMPING":
+            # NOT a freeze. Every gain is zero here, so every need is zero by
+            # construction -- the same shape as the `ratio` that sat at 3.59 for
+            # 1085 s (CLAUDE.md Sec 1). The allocator ramps BACK TO FLAT instead of
+            # latching wherever the last good sample left it, and flat is the split
+            # that has actually been on this rig.
+            self.budget.update(dt, np.zeros(self.budget.k), 0.0, usable=False,
+                               why="state is %s -- the gains are at zero, so the "
+                                   "loop dissipates nothing and there is nothing to "
+                                   "measure a need with" % was)
         self._actuate(t, dt)
         return self.state
 
@@ -1468,6 +1679,36 @@ class Controller(sl.Loop):
             self.say(f"[ch{i} back] rail clear {REARM_SUSTAIN_S:.0f}s -- re-engaging "
                      f"on its pre-event baseline {self.baseline[i]:.4f}V, "
                      f"{n}/{n_conf} damping.")
+        # THE BUDGET, sampled before anything spends it. Need is the power each
+        # claimant is REMOVING, not the motion it has left: `ratio` reads 13x apart
+        # for the same plate under the two laws because its reference is a
+        # zero-gain window, so an allocation keyed on it would feed back through
+        # its own success. See BudgetAllocator.
+        # `modal_on` and `diag_on` are last step's -- `_actuate` sets them after
+        # this -- which is one control step of lag on a 20 s ramp.
+        need = np.zeros(self.budget.k)
+        need[:self.nmode] = self.mode_gain * self.qdot ** 2
+        dmask = self.diag_on & live
+        need[self.nmode] = (float(np.sum(np.abs(self.gain[dmask])
+                                         * self.vel[dmask] ** 2))
+                            if dmask.any() else 0.0)
+        seen = live & self._driven()
+        motion = (float(np.sqrt(np.mean(self.bp[seen] ** 2))) if seen.any() else 0.0)
+        self.budget.update(
+            dt, need, motion,
+            usable=bool(self.modal_on and float(need[:self.nmode].sum()) > 0.0),
+            why=("" if self.modal_on else
+                 "the modal law is not engaged, so there is one term and nothing "
+                 "to divide"))
+        if (self.budget.armed and not self._budget_hold_said
+                and self.budget.held_s >= BUDGET_HOLD_SAY_S):
+            self._budget_hold_said = True
+            self.say(f"[budget] held at the FLAT split for "
+                     f"{self.budget.held_s:.0f}s -- {self.budget.hold_why}. Flat is "
+                     f"{LAW_SOURCE}'s split, so this is safe; it is also the "
+                     f"allocator measuring nothing.")
+        w_mode, w_diag = self.budget.weights()
+
         if n_conf and n < MIN_HEALTHY_CHANNELS:
             return self._fault(t, f"quorum lost -- {n}/{n_conf} healthy, need "
                                   f"{MIN_HEALTHY_CHANNELS}. Freezing everything.",
@@ -1492,11 +1733,16 @@ class Controller(sl.Loop):
         want, cap = self.steady + frac * (self.capture - self.steady), GAIN_SLEW_PER_S * dt
         # The hybrid channels take their gain from the same schedule and the same
         # slew limit, at HYBRID_KP scaled by their measured coherent fraction.
-        want = np.where(self._hyb_arm(), self.hybrid_gain, want)
+        # The per-channel block's share of the budget. At w_diag = 1.0 this is
+        # HYBRID_GAIN unchanged, exactly.
+        want = np.where(self._hyb_arm(), self.hybrid_gain * w_diag, want)
         self.gain = np.where(live, self.gain + np.clip(want - self.gain, -cap, cap), 0.0)
         # Per mode, slewed like the diagonal gains so nothing steps.
+        # PER MODE, weighted by that mode's share of the one budget, then slewed
+        # like the diagonal gains so nothing steps. At w_mode = 1.0 this is
+        # MODAL_KP * MODAL_GAIN_SCALE unchanged, exactly -- x * 1.0 is x.
         self.mode_gain = (self.mode_gain + np.clip(
-            MODAL_KP * MODAL_GAIN_SCALE - self.mode_gain,
+            MODAL_KP * MODAL_GAIN_SCALE * w_mode - self.mode_gain,
             -GAIN_SLEW_PER_S * dt, GAIN_SLEW_PER_S * dt)
             if self.modal.ok else np.zeros(self.nmode))
 
@@ -1513,26 +1759,8 @@ class Controller(sl.Loop):
         # and narrowing the evidence set loses that detection outright (simulator,
         # peak ch2 ratio 2.58 against the 1.8 line, 0 faults). The breaker keeps
         # every driven channel as evidence.
-        # RUNAWAY VOTERS ARE THE Phi ROWS ONLY, and this is a hardware verdict
-        # over a simulator one. `_driven` keeps every driven channel as evidence
-        # because a small baseline crosses first, which is what catches a pumped
-        # resonance in the simulator. On the rig it does the opposite: measured
-        # 2026-08-18, a4's reference came out 0.0038 V against ch0's 0.2141 V --
-        # 56x smaller, because a4 senses an axis ORTHOGONAL to the three damped
-        # modes, so its in-band level is small by construction while its actual
-        # motion is not. `!! ch4 runaway` then ended three consecutive runs
-        # within 40 s of engaging, every time on a deliberate hand kick.
-        #
-        # Flooring the reference was tried first and is NOT enough (the floor
-        # that keeps a4 quiet is far below what a kick moves it). A channel can
-        # only vote on a RATIO if the denominator means something, and for a
-        # Phi-less axis it does not. They stay driven, watched, railed-checked
-        # and demotable -- they simply do not get to fault the rig.
-        vote = self._driven() & self.modal.rowok.any(axis=1) \
-            if self.modal.ok else self._driven()
-        if not vote.any():
-            vote = self._driven()
-        got = self.brk.sample(t, self.bp, self.healthy, vote, ref, self.sat)
+        got = self.brk.sample(t, self.bp, self.healthy, self._driven(),
+                              ref, self.sat)
         # Fed ONLY here, so the window holds closed-loop time and a FAULT freezes
         # it rather than filling it with the open-loop plant.
         self.quiet.add(t, got["env"], live)
@@ -1823,11 +2051,11 @@ class Controller(sl.Loop):
             drive_ok = live & ~self.floor_bad
             enough = self.mode_seen >= MODAL_MIN_SENSORS
             qd, self.modal_rank = self.modal.project(self.qdot, drive_ok)
-            # THE KERNEL. One control step of history per call, so it must be
-            # called exactly once per step and only where `qd` is defined -- which
-            # is here. At KERNEL_PHASE = 0 this returns `qd` itself, so the line
-            # below is eta's `f = -mode_gain * qd` unchanged.
-            f = np.where(enough, -self.mode_gain * self.kernel.push(qd), 0.0)
+            # eta's law, written out: the modal force is the per-mode gain on the
+            # projected modal velocity and nothing else. `mode_gain` already
+            # carries the allocator's weight, which is exactly 1.0 at the shipped
+            # tilt.
+            f = np.where(enough, -self.mode_gain * qd, 0.0)
             u, self.modal_mask, cols, ok = self.modal.allocate(f, drive_ok)
             if ok and enough.any():
                 self.modal_on, self.modal_u, self.modal_cols = True, u, cols
@@ -1841,13 +2069,6 @@ class Controller(sl.Loop):
                        if not ok else
                        "no mode has %d determined sensors" % MODAL_MIN_SENSORS))
                 self.say(self.modal_says)
-        else:
-            # No modal step this control period -- refused data, or not DAMPING.
-            # Drop the history rather than leave a gap in it: with a non-zero
-            # phase the kernel reads a sample up to 1.4 s old, and a sample from
-            # before a fault is not that sample. At zero phase only tap 0 is used
-            # and this changes nothing.
-            self.kernel.reset()
 
         p, _, _ = self.pid.terms(self.vel, self.gain, dt)
         if self.modal_on:
@@ -1888,7 +2109,8 @@ class Controller(sl.Loop):
             # the coil is not in this repo, and 0.25 V may encode a real current
             # limit. Capping the total costs authority; guessing the window costs
             # hardware.
-            cap = MODAL_TOTAL_HEADROOM * BIAS_SWING
+            # THE DECLARED BUDGET. One number, quoted from one place.
+            cap = BUDGET_V
             self.modal_scaled = sl.cap_scale(self.modal_u, self.pid.i + self.pid.d,
                                              cap, self.modal_cols)
             if self.modal_scaled < 1.0:
@@ -1897,6 +2119,10 @@ class Controller(sl.Loop):
                 raw = self.bias + self.pid.p + self.pid.i + self.pid.d
 
         out = self.pid.drive(raw, self.bias, self.vmin, self.vmax, live, dt)
+        # What was actually spent, against what was declared. Observation only --
+        # it reads `out` after every decision is made and changes nothing.
+        self.budget.spend((out - self.bias)[live] if live.any()
+                          else np.zeros(0))
         pinned = (out <= self.vmin + 1e-6) | (out >= self.vmax - 1e-6)
         self.health.sats(pinned, t)
         self.act.send(out)
@@ -1921,7 +2147,7 @@ class Controller(sl.Loop):
         bad = f" bad{self.bad_samples}" if self.bad_samples else ""
         if self.modal.ok:
             mode = ("MIMO" if self.modal_on else "diag") + (
-                "" if self.kernel.identity else "+ker") + (
+                "" if self.budget.flat else "+bud") + (
                 " q=" + "/".join(f"{x:+.3f}" for x in self.qdot)
                 + " res=" + "/".join(f"{x:.2f}" for x in self.modal_res)
                 + f" chi2/dof={self.chi2:.2f}({self.chi2_dof:d})")
@@ -1937,6 +2163,9 @@ class Controller(sl.Loop):
                str(self.modal_rank), str(int(sl.Modal.mask_of(self.diag_on)))]
         row += list(self.qdot) + list(self.mode_gain) + list(self.modal_res)
         row += [self.chi2, str(int(self.chi2_dof))] + list(self.qls)
+        row += list(self.budget.w[:self.nmode])
+        row += [float(self.budget.w[self.budget.k - 1]),
+                "1" if self.budget.holding else "0"]
         for i in range(N):
             row += [str(int(counts[i])), counts[i] * (A_VCC / ADC_MAX_COUNTS)]
             row += [getattr(self, k)[i] for k, _ in _LOG]
@@ -1956,9 +2185,9 @@ sl.share(Controller, "brk", "excess_since")
 def _fingerprint(bias, enable=None, steady=None, capture=None, ki=None, kd=None):
     """Anything that changes what a baseline MEANS goes in here.
 
-    KERNEL_PHASE is deliberately NOT in it, and that is not an oversight: the
-    baseline is measured with every gain at zero, so no control law -- kernel or
-    not -- can reach it. A floor written by eta is therefore valid for this file
+    BUDGET_TILT_LIVE is deliberately NOT in it, and that is not
+    an oversight: the baseline is measured with every gain at zero, so no control
+    law -- allocation or none -- can reach it. A floor written by eta is therefore valid for this file
     and the other way round, which is what the equivalence is worth in practice.
     """
     g = lambda v, d: [float(x) for x in (d if v is None else v)]
@@ -2147,7 +2376,7 @@ def _selftest():
     with open(tmp, "w") as fh:
         json.dump(d, fh)
 
-    print("\n  === osem.eta.py selftest ===\n")
+    print("\n  === osem.theta.py selftest ===\n")
 
     # ---- Phi from GEOMETRY, and the measured Phi as a check on it -----------
     P4, W4 = PHI_GEOM[:4], PHI_WARP[:4]
@@ -2816,17 +3045,14 @@ def _selftest():
     def kick_run(quiet_ratio, peak_ratio, decay, seconds=90.0, wire_hz=400.0,
                  t_kick=30.0):
         rg = np.random.default_rng(4711)
-        # Mid-scale, because the modal excursion is 40x: off-centre resting points
-        # would rail at the peak and the rail interlock, not the breaker, would
-        # answer. a5 stays at ground -- it is a dead pin and must stay demoted.
-        base_c = np.array([511.5] * 5 + [0.0] + [511.5] * 2)
+        base_c = np.array([600.0, 620.0, 640.0, 660.0, 580.0, 0.0, 590.0, 570.0])
         c, dt = Controller(_NoDac()), 1.0 / wire_hz
         # The EXCURSION is what the breaker sees, and it is the measured quantity:
         # 0.117 -> 4.73 is 40.4x under the modal law, 1.240 -> 4.73 is 3.8x under
         # the diagonal. Stepping the amplitude at engage instead would model the
         # loop changing the motion instantly, which it does not, and the step
         # itself reads as sustained growth.
-        a_cal, states, ex = 10.0, set(), peak_ratio / quiet_ratio
+        a_cal, states, ex = 20.0, set(), peak_ratio / quiet_ratio
         for k in range(int(seconds * wire_hz)):
             t = k * dt
             if t < t_kick:
@@ -2843,19 +3069,13 @@ def _selftest():
                 amp *= 1.0 + 0.10 * np.sin(2 * np.pi * 0.26999 * s)
             cts, band = base_c.copy(), amp * np.sin(2.0 * np.pi * F_MODE_HZ[1] * t)
             cts[:4] += band + 1.0 * rg.normal(size=4)
-            # The kick goes to the sensors that CARRY the modes, which is where
-            # both measured trips happened (ch0/ch2 modal, ch3 diagonal). The
-            # orthogonal axes carry their own broadband motion so they survive the
-            # floor and are driven, but no in-band content -- this check is about
-            # the breaker, not about them.
-            # A RISK THIS EXPOSES AND DOES NOT COVER: with in-band content added to
-            # a4/a6/a7 as well, ch6 trips the breaker about 1 s after the kick, and
-            # its latch starts BEFORE the kick -- its `bp` is still converging
-            # because KALMAN_K's row 6 is fitted to a6's own (tiny) measured noise.
-            # Keeping those channels healthy is new, so nothing on the bench has
-            # ever exercised it. Watch for a ch4/ch6/ch7 runaway on the next run.
+            # The orthogonal axes see only their MEASURED coherent fraction of the
+            # band (a4 0.46, a6 0.26, a7 0.50), on top of their own broadband
+            # motion. Giving them the whole kick is what a4 does not do, and a
+            # synthetic that does it trips the breaker on a channel the rig would
+            # not have tripped.
             for j in (4, 6, 7):
-                cts[j] += 5.0 * rg.normal()
+                cts[j] += HYBRID_COHERENT[j] * band + 5.0 * rg.normal()
             c.step(np.clip(cts, 0, ADC_MAX_COUNTS),
                    np.clip(cts, 0, ADC_MAX_COUNTS) * (A_VCC / ADC_MAX_COUNTS), t, dt)
             if t > t_kick:
@@ -3040,7 +3260,7 @@ def _selftest():
           "raw std %.2f/%.2f/%.2f counts, under the %.2f-count dead-pin line"
           % (dead_c.health.rail_std[4], dead_c.health.rail_std[6],
              dead_c.health.rail_std[7], DEAD_PIN_STD_COUNTS))
-    dith_c = floor_run(1.5)       # dither only: over the pin line, far under a0-a3
+    dith_c = floor_run(2.0)       # dither only: over the pin line, far under a0-a3
     check("...and so is one that returns only DITHER -- an absolute line misses it",
           dith_c.floor_bad[4] and dith_c.floor_bad[6] and dith_c.floor_bad[7],
           "raw std %.2f counts, over the %.2f-count pin line but under %.0f%% of "
@@ -3052,95 +3272,191 @@ def _selftest():
           not live_c.floor_bad[:4].any(),
           "the exemption is scoped to rows Phi does not span")
 
-    # ---- the kernel bank: the machinery, and that it is ZEROED ---------------
-    print("\n  -- the convolution kernel bank --\n")
-    dtc = CONTROL_PERIOD_S
-    ker = ModalKernel(F_MODE_HZ, KERNEL_PHASE, KERNEL_TAPS, dtc)
-    check("KERNEL_PHASE ships at zero -- the freedom exists and is not armed",
-          bool(np.all(KERNEL_PHASE_DEG == 0.0)) and bool(np.all(KERNEL_PHASE == 0.0)),
-          "%s deg" % KERNEL_PHASE.tolist())
-    check("...so every g_m is EXACTLY the unit impulse, not approximately",
-          bool(np.all(ker.g[:, 0] == 1.0)) and not bool(np.any(ker.g[:, 1:]))
-          and ker.identity,
-          "g[:,0] %s, |g[:,1:]| max %.1e"
-          % (ker.g[:, 0].tolist(), float(np.abs(ker.g[:, 1:]).max())))
-    rgk = np.random.default_rng(20260818)
-    ident = True
-    for _ in range(500):
-        v = rgk.normal(size=NMODE) * 10.0 ** rgk.integers(-6, 3)
-        ident = ident and bool(np.array_equal(ker.push(v), v))
-    check("...and the kernel is the IDENTITY on the modal velocity, bit for bit",
-          ident, "500 random vectors over 9 decades, `==` not `allclose`")
-    per = 1.0 / float(F_MODE_HZ.min())
-    check("KERNEL_TAPS holds one full period of the SLOWEST mode",
-          (KERNEL_TAPS - 1) * dtc >= per and KERNEL_TAPS < per / dtc + 3,
-          "%d taps = %.3f s against a %.3f s period at %.5f Hz"
-          % (KERNEL_TAPS, KERNEL_LEN_S, per, F_MODE_HZ.min()))
+    # ---- the actuator budget: the ledger, the division, and that it is FLAT --
+    print("\n  -- the actuator budget --\n")
+    dtb = CONTROL_PERIOD_S
 
-    # The design is solved, not windowed, so it is exact rather than close.
-    worst_mag, worst_ph = 0.0, 0.0
-    for psi_deg in (-80.0, -45.0, -12.5, 0.0, 12.5, 45.0, 80.0):
-        k2 = ModalKernel(F_MODE_HZ, np.full(NMODE, psi_deg), KERNEL_TAPS, dtc)
-        for m in range(NMODE):
-            h = k2.response(m)
-            worst_mag = max(worst_mag, abs(abs(h) - 1.0))
-            worst_ph = max(worst_ph, abs((np.degrees(np.angle(h)) + psi_deg + 180.0)
-                                         % 360.0 - 180.0))
-    check("a built kernel has unit magnitude and the REQUESTED phase at f_m",
-          worst_mag < 1e-12 and worst_ph < 1e-9,
-          "worst ||H|-1| %.1e, worst phase error %.1e deg" % (worst_mag, worst_ph))
+    def alloc(tilt=BUDGET_TILT_LIVE):
+        return BudgetAllocator(BUDGET_CLAIMS, tilt, BUDGET_TAU_S,
+                               BUDGET_SHARE_FLOOR, BUDGET_W_DIAG_MAX,
+                               BUDGET_W_SLEW_PER_S, BUDGET_MOTION_FLOOR_V)
 
-    # The derivation the 90 deg cap rests on, measured on a tone.
-    dis, want = [], []
-    for psi_deg in (0.0, 30.0, 60.0, 85.0):
-        k3 = ModalKernel(F_MODE_HZ, np.full(NMODE, psi_deg), KERNEL_TAPS, dtc)
-        k3.reset()
-        f0, cyc = float(F_MODE_HZ[0]), 12
-        nstep = int(round(cyc / (f0 * dtc)))
-        num = den = 0.0
-        for kk in range(nstep + KERNEL_TAPS):
-            qdot = np.zeros(NMODE)
-            qdot[0] = np.cos(2.0 * np.pi * f0 * kk * dtc)
-            fm = -k3.push(qdot)[0]                    # unit gain: -1 x kernel(qdot)
-            if kk >= KERNEL_TAPS:                     # after the ring has filled
-                num += fm * qdot[0]
-                den += qdot[0] ** 2
-        dis.append(num / den)
-        want.append(-np.cos(np.radians(psi_deg)))
-    check("cycle-averaged modal dissipation goes as -cos(psi): the cap's derivation",
-          float(np.abs(np.array(dis) - np.array(want)).max()) < 5e-3,
-          "psi 0/30/60/85 deg -> %s against -cos(psi) %s"
-          % (" ".join("%+.4f" % d for d in dis), " ".join("%+.4f" % w for w in want)))
+    check("ONE declared budget, and it is eta's cap under a name",
+          BUDGET_V == MODAL_TOTAL_HEADROOM * BIAS_SWING
+          and BUDGET_V < BIAS_SWING and MODAL_DEMAND_CAP_V < BUDGET_V
+          and BUDGET_MOTION_FLOOR_V < MODAL_DEMAND_CAP_V,
+          "%.4f V, %.0f%% of the %.3f V half-window; allocator cap %.3f V is %.0f%% "
+          "of it; floor %.4f V"
+          % (BUDGET_V, 100 * BUDGET_V / BIAS_SWING, BIAS_SWING, MODAL_DEMAND_CAP_V,
+             100 * MODAL_DEMAND_CAP_V / BUDGET_V, BUDGET_MOTION_FLOOR_V))
+    check("the capture/steady schedule is INERT -- one live allocator, not two",
+          SCHEDULE_INERT and bool(np.array_equal(STEADY_GAIN, CAPTURE_GAIN)),
+          "endpoints equal, so steady + frac*(capture - steady) cannot move")
+
+    # tilt = 0 is the identity for EVERY need vector, not merely for sensible ones.
+    a0 = alloc(0.0)
+    ident_w = True
+    for need in ([0.0] * BUDGET_CLAIMS, [np.nan] * BUDGET_CLAIMS,
+                 [np.inf] + [1.0] * (BUDGET_CLAIMS - 1),
+                 [1e30] + [1e-30] * (BUDGET_CLAIMS - 1),
+                 [-1.0] + [1.0] * (BUDGET_CLAIMS - 1),
+                 list(np.random.default_rng(4).random(BUDGET_CLAIMS))):
+        for _ in range(400):
+            a0.update(dtb, np.array(need, float), 1.0, usable=True)
+        ident_w = ident_w and bool(np.all(a0.w == 1.0)) and a0.flat
+    check("BUDGET_TILT ships at zero -- the freedom exists and is not armed",
+          BUDGET_TILT == 0.0 and BUDGET_TILT_LIVE == 0.0 and not a0.armed,
+          "tilt %.3f" % BUDGET_TILT_LIVE)
+    check("...so every weight is EXACTLY 1.0, for every possible need vector",
+          ident_w,
+          "zeros, nans, an infinity, 60 decades apart, a negative and a random "
+          "vector, 2400 steps, `==` not `allclose`")
+
+    # At equal need the division IS the flat split -- required by the equivalence
+    # constraint, and the only property that justifies proportional division here.
+    eq_exact, cons, lag, bounds = True, 0.0, 0.0, (np.inf, -np.inf)
+    for tilt in (0.0, 0.25, 0.5, 1.0):
+        ae = alloc(tilt)
+        for _ in range(4000):
+            ae.update(dtb, np.ones(BUDGET_CLAIMS), 1.0, usable=True)
+        eq_exact = eq_exact and bool(np.all(ae.w == 1.0))
+        askew = alloc(tilt)
+        for _ in range(20000):
+            askew.update(dtb, np.array([9.0, 1.0, 0.05] + [0.0] * (BUDGET_CLAIMS - 3)),
+                         1.0, usable=True)
+            cons = max(cons, abs(float(askew.w_target.sum()) - BUDGET_CLAIMS))
+            lag = max(lag, abs(float(askew.w.sum()) - BUDGET_CLAIMS))
+            bounds = (min(bounds[0], float(askew.w.min())),
+                      max(bounds[1], float(askew.w.max())))
+    check("at EQUAL need the division is the flat split, at any tilt",
+          eq_exact, "tilt 0 / 0.25 / 0.5 / 1.0, all weights == 1.0 exactly")
+    check("the pot is conserved: the division sums to the claimant count",
+          cons < 1e-9,
+          "worst |sum(w_target) - %d| = %.1e over 80000 steps at four tilts"
+          % (BUDGET_CLAIMS, cons))
+    # The slew limiter is the ONLY thing that breaks it, and only on the way to a
+    # new division: it moves every weight at the same capped rate, so while a
+    # reallocation is in flight the pot is transiently under- or over-served. That
+    # is a bounded lag and not a leak -- it is zero in the steady state.
+    check("...and the slew limiter's transient shortfall is bounded, not a leak",
+          lag < BUDGET_CLAIMS * BUDGET_TILT_HARD_CAP * (1.0 - BUDGET_SHARE_FLOOR)
+          and lag > 0.0,
+          "worst |sum(w) - %d| = %.3f in flight, and 0 once the ramp has arrived"
+          % (BUDGET_CLAIMS, lag))
+    lo = 1.0 - BUDGET_TILT_HARD_CAP * (1.0 - BUDGET_SHARE_FLOOR)
+    hi = 1.0 + BUDGET_TILT_HARD_CAP * (BUDGET_CLAIMS - 1) * (1.0 - BUDGET_SHARE_FLOOR)
+    check("nobody is starved and nobody goes negative: the share floor bounds w",
+          bounds[0] >= lo - 1e-12 and bounds[1] <= hi + 1e-12 and lo > 0.0,
+          "w in [%.3f, %.3f] against the derived [%.2f, %.2f] at tilt 1"
+          % (bounds[0], bounds[1], lo, hi))
+
+    # The ramp is SLOW, and the bound is on the weight itself rather than on the
+    # filter alone -- the filter sets the shape, the slew cap sets the worst case.
+    asl = alloc(1.0)
+    worst_step, t_half = 0.0, None
+    hard = np.array([1.0] + [0.0] * (BUDGET_CLAIMS - 1))
+    for kstep in range(int(120.0 / dtb)):
+        prev = asl.w.copy()
+        asl.update(dtb, hard, 1.0, usable=True)
+        worst_step = max(worst_step, float(np.abs(asl.w - prev).max()))
+        if t_half is None and asl.w[0] >= 1.0 + 0.5 * (hi - 1.0):
+            t_half = kstep * dtb
+    per_a = worst_step / dtb / float(F_MODE_HZ.min())
+    check("the ramp is slow against the slowest mode -- %.0f s, %.5f Hz"
+          % (BUDGET_TAU_S, F_MODE_HZ.min()),
+          worst_step <= BUDGET_W_SLEW_PER_S * dtb + 1e-12
+          and t_half is not None and t_half >= BUDGET_TAU_S
+          and BUDGET_TAU_S >= 10.0,
+          "<= %.4f of a weight per step, %.3f per %.3f s mode-A period; half the "
+          "excursion took %.1f s" % (worst_step, per_a, 1.0 / F_MODE_HZ.min(),
+                                     t_half if t_half is not None else float("nan")))
+
+    # IT CANNOT LATCH. CLAUDE.md Sec 1: `ratio` froze at 3.59 for 1085 s. A ramp on
+    # a statistic that can freeze is a ramp that can latch -- unless losing the
+    # statistic drives it home rather than pinning it.
+    ah = alloc(1.0)
+    for _ in range(int(200.0 / dtb)):
+        ah.update(dtb, hard, 1.0, usable=True)
+    skewed = float(ah.w.max())
+    for _ in range(int(200.0 / dtb)):
+        ah.update(dtb, np.zeros(BUDGET_CLAIMS), 0.0, usable=False)
+    check("losing the statistic ramps BACK TO FLAT -- it cannot latch",
+          skewed > 1.5 and float(np.abs(ah.w - 1.0).max()) < 1e-3
+          and ah.holding and ah.held_s >= 199.0,
+          "w drifted to %.3f, then 200 s with no usable need returned it to %.5f"
+          % (skewed, float(ah.w.max())))
+    check("...and a motion at the actuator's own floor is not a need either",
+          alloc(1.0).update(dtb, hard, BUDGET_MOTION_FLOOR_V * 0.5, usable=True),
+          "under %.4f V nothing an allocation does can matter (SIMULATOR number)"
+          % BUDGET_MOTION_FLOOR_V)
+
+    # The per-channel block gives and does not take: its gain is already at a
+    # measured Wiener cap.
+    ad = alloc(1.0)
+    for _ in range(int(300.0 / dtb)):
+        ad.update(dtb, np.array([0.0] * (BUDGET_CLAIMS - 1) + [1.0]), 1.0,
+                  usable=True)
+    check("the per-channel block may GIVE budget up and may not take any",
+          float(ad.w[BUDGET_CLAIMS - 1]) <= BUDGET_W_DIAG_MAX + 1e-12,
+          "claiming the whole pot leaves it at w %.3f and the surplus went back to "
+          "the modes (%s)" % (ad.w[BUDGET_CLAIMS - 1],
+                              " ".join("%.3f" % x for x in ad.w[:BUDGET_CLAIMS - 1])))
+
+    # ---- and the part that makes the statistic safe -------------------------
+    # `ratio` is amplitude over a ZERO-GAIN baseline, so it reads the loop's own
+    # success: 0.117 modal against 1.449-1.832 diagonal for the same plate, 13x
+    # (2026-08-18). Need is a DISSIPATION RATE, and in a steady state that is the
+    # power the ROOM injects. THIS IS A MODEL, not a measurement of this rig: one
+    # mode, white force, the same forcing realisation at every gain.
+    def onemode(gam_loop, gam0=0.0072, T=2000.0, dt=0.01, seed=7, scale=20.0):
+        g0, gl = gam0 * scale, gam_loop * scale
+        w0, c = 2.0 * np.pi * float(F_MODE_HZ[0]), 2.0 * (gam0 + gam_loop) * scale
+        rng = np.random.default_rng(seed)
+        nstep = int(T / dt)
+        force = rng.normal(size=nstep) / np.sqrt(dt)
+        q = v = sq = sv = 0.0
+        m, burn = 0, int(nstep * 0.2)
+        for kk in range(nstep):
+            v += (-w0 * w0 * q - c * v + force[kk]) * dt
+            q += v * dt
+            if kk >= burn:
+                sq += q * q
+                sv += v * v
+                m += 1
+        return np.sqrt(sq / m), (2.0 * gl) * (sv / m)
+
+    gl0 = 0.1393 - 0.0072            # the MEASURED modal decay less the plant's own
+    (rq_lo, nd_lo) = onemode(gl0 * BUDGET_SHARE_FLOOR)
+    (rq_hi, nd_hi) = onemode(gl0 * 2.5)
+    mv_amp, mv_need = rq_lo / rq_hi, nd_hi / nd_lo
+    check("need is a DISSIPATION rate, so the loop's own authority barely moves it",
+          mv_amp > 2.3 and mv_need < 1.5,
+          "over a 10x range of loop gain: rms motion moves %.2fx, need moves %.2fx "
+          "(argued bound 1.19x from 0.0072 vs 0.1393 /s); `ratio` moves 13x between "
+          "the two LAWS on hardware" % (mv_amp, mv_need))
+
+    # Arming while the old schedule is live is REFUSED, not warned about.
+    _saved_tilt = globals()["BUDGET_TILT_LIVE"]
     try:
-        _parse_kernel_phase("0,0,%.1f" % KERNEL_PHASE_HARD_CAP_DEG)
-        capped = False
-    except ValueError:
-        capped = True
-    check("a phase at or past the %.0f deg cap is REFUSED, not clipped"
-          % KERNEL_PHASE_HARD_CAP_DEG,
-          capped and _parse_kernel_phase("12") is not None
-          and np.allclose(_parse_kernel_phase("12"), 12.0),
-          "one value fills every mode; past the cap it raises")
+        globals()["BUDGET_TILT_LIVE"] = 0.5
+        try:
+            Controller(_NoDac(), capture=(np.asarray(CAPTURE_GAIN) * 0.5).tolist())
+            refused = False
+        except ValueError:
+            refused = True
+        try:
+            Controller(_NoDac())
+            armed_ok = True
+        except ValueError:
+            armed_ok = False
+    finally:
+        globals()["BUDGET_TILT_LIVE"] = _saved_tilt
+    check("arming the budget while capture/steady is LIVE is REFUSED",
+          refused and armed_ok,
+          "two allocators on two references would fight, and the older one is "
+          "anchored to `ratio`")
 
-    # ---- equivalence 1: against an explicit u = A_C+ (-K Proj qdot) ----------
-    mref = _modal(None, allow=True)
-    drv = np.zeros(N, bool)
-    drv[A_DC_COILS] = True
-    Kref = MODAL_KP * MODAL_GAIN_SCALE
-    kref = ModalKernel(F_MODE_HZ, KERNEL_PHASE, KERNEL_TAPS, dtc)
-    rgr = np.random.default_rng(902)
-    duw = 0.0
-    for _ in range(300):
-        qdot = rgr.normal(size=NMODE)
-        qd_r, _ = mref.project(qdot, drv)
-        u_ref = mref.allocate(-Kref * qd_r, drv)[0]              # eta's law, written out
-        u_ker = mref.allocate(-Kref * kref.push(qd_r), drv)[0]   # theta's path
-        duw = max(duw, float(np.abs(u_ker - u_ref).max()))
-    check("the kernel path IS u = A_C+ (-K Proj qdot), to the last bit",
-          duw == 0.0 and mref.ok,
-          "max |du| %.1e V over 300 allocations" % duw)
-
-    # ---- equivalence 2: against osem.eta.py itself, on one sensor history ----
+    # ---- equivalence: against osem.eta.py itself, on one sensor history -----
     def _load_law(fname):
         import importlib.util
         p = os.path.join(HERE, fname)
@@ -3189,12 +3505,12 @@ def _selftest():
                 c[0] = 1018.0 + 3.0 * np.sin(2.0 * np.pi * 1.3 * t)   # over RAIL_HIGH
             yield c, c * (A_VCC / ADC_MAX_COUNTS), t, dt
 
-    eta_mod, why_eta = _load_law(LAW_SOURCE)
-    if eta_mod is None:
-        check("%s is here to be compared against" % LAW_SOURCE, False, why_eta)
+    ref_mod, why_ref = _load_law(LAW_SOURCE)
+    if ref_mod is None:
+        check("%s is here to be compared against" % LAW_SOURCE, False, why_ref)
     else:
         ct = Controller(_NoDac(), modal_path=twin)
-        ce = eta_mod.Controller(_NoDac(), modal_path=twin)
+        ce = ref_mod.Controller(_NoDac(), modal_path=twin)
         dv, nstep, nmodal, states = 0.0, 0, 0, set()
         lockstep = True
         for c, v, tt, dd in twin_stream():
@@ -3224,6 +3540,11 @@ def _selftest():
               lockstep,
               "final state %s/%s, modal %s/%s over %d samples"
               % (ct.state, ce.state, ct.modal_on, ce.modal_on, nstep))
+        check("...and the allocation stayed EXACTLY flat for all of it",
+              ct.budget.flat and bool(np.all(ct.budget.wmin == 1.0))
+              and bool(np.all(ct.budget.wmax == 1.0)),
+              "min/max weight over %d control steps: %s / %s"
+              % (ct.budget.wn, ct.budget.wmin.tolist(), ct.budget.wmax.tolist()))
 
     print("\n  %s\n" % (
         "ALL PASS -- Phi comes from GEOMETRY: its columns are orthogonal, warp is in\n"
@@ -3237,19 +3558,33 @@ def _selftest():
         "  channel that total amplitude threw away, a frozen fault clears on decaying\n"
         "  motion and holds on persistent motion, and a channel with no vote can no\n"
         "  longer veto LOCKED.\n"
-        "  AND THE KERNEL BANK IS PRESENT, EXERCISED AND ZEROED: every g_m is exactly\n"
-        "  the unit impulse, the kernel is the identity on the modal velocity bit for\n"
-        "  bit, the path IS u = A_C+ (-K Proj qdot) to the last bit, and driven with\n"
-        "  the same synthetic sensor history this file and osem.eta.py command the\n"
-        "  SAME VOLTAGES on all eight channels at every sample. The freedom is real --\n"
-        "  a built kernel hits the requested phase exactly at f_m and its dissipation\n"
-        "  follows -cos(psi) -- and it is not armed.\n"
+        "  AND THE ACTUATOR BUDGET IS ONE DECLARED NUMBER, 0.225 V per coil about\n"
+        "  bias, divided among four claimants -- three modes and the per-channel\n"
+        "  block -- in proportion to each one's own DISSIPATION RATE, one-poled at\n"
+        "  20 s and slew-capped so a weight moves under 7 % of nominal in a period of\n"
+        "  the slowest mode. Need is not `ratio`: `ratio` is referenced to a zero-gain\n"
+        "  baseline and reads 13x apart for the same plate under the two laws, while a\n"
+        "  dissipation rate is the power the ROOM injects and moves 1.2x over a 10x\n"
+        "  range of loop gain. Losing the statistic ramps the split BACK TO FLAT\n"
+        "  instead of latching, the pot is conserved, no claimant is starved, and the\n"
+        "  older capture/steady schedule is proved inert rather than left to fight it.\n"
+        "  IT IS NOT ARMED: BUDGET_TILT is 0, at which every weight is exactly 1.0 for\n"
+        "  every possible need vector, so driven with the same synthetic sensor history\n"
+        "  this file and osem.eta.py command the SAME VOLTAGES on all eight channels at\n"
+        "  every sample.\n"
+        "  THE CONVOLUTION KERNEL LAYER IS GONE and is not tested here because it no\n"
+        "  longer exists: swept on the rig 2026-08-17, median channel `ratio` 0.155 at\n"
+        "  0 deg against 0.862 at -30, 0.790 at +30 and 1.867 at -60, so zero phase --\n"
+        "  the identity, i.e. eta -- is the measured OPTIMUM and the freedom bought\n"
+        "  nothing. git history has the machinery.\n"
         "  NOT tested here, and only the bench can: whether it damps the optic, what\n"
         "  chi2/dof distributes as on this rig, which sign pattern A needs, and\n"
         "  whether the hybrid improves the measured DECAY RATE -- jerk.py is that\n"
-        "  test, and `ratio` is not. NOR IS ANY NON-ZERO PHASE tested anywhere: the\n"
-        "  checks above prove the kernel realises the phase it is asked for, not that\n"
-        "  any phase is the right one. That needs A's magnitudes (CLAUDE.md Sec 3)."
+        "  test, and `ratio` is not. NOR IS ANY NON-ZERO TILT tested anywhere: the\n"
+        "  checks above prove the allocator divides what it is given and cannot latch,\n"
+        "  NOT that reallocating helps. Whether a time-varying blend of two dissipative\n"
+        "  laws is dissipative through the ESTIMATOR is OPEN, and which way the ramp\n"
+        "  should point at low disturbance is the rig owner's claim, not a result."
         if ok else
         "FAILURES ABOVE -- do not run this on the bench."))
     return 0 if ok else 1
@@ -3284,12 +3619,18 @@ def main(argv=None):
     pre = _modal(MODAL_PATH)
     for line in pre.report(MODAL_KP, MODAL_GAIN_SCALE):
         print(line)
-    # Before any coil is energised, the same rule the [modal] banner follows: the
-    # kernel is constant for a run and is not in the CSV, so this line is the only
-    # record of which law actually ran.
-    for line in ModalKernel(F_MODE_HZ, KERNEL_PHASE, KERNEL_TAPS,
-                            CONTROL_PERIOD_S).report():
+    # The same rule the [modal] banner follows: the budget is declared before any
+    # coil is energised, so the log records which allocation actually ran.
+    for line in BudgetAllocator(BUDGET_CLAIMS, BUDGET_TILT_LIVE, BUDGET_TAU_S,
+                                BUDGET_SHARE_FLOOR, BUDGET_W_DIAG_MAX,
+                                BUDGET_W_SLEW_PER_S,
+                                BUDGET_MOTION_FLOOR_V).report():
         print(line)
+    if not SCHEDULE_INERT:
+        print("[budget] !! CAPTURE_GAIN and STEADY_GAIN DIFFER, so the old "
+              "capture/steady schedule is LIVE alongside this allocator and they "
+              "are keyed on different references. Arming the budget is refused "
+              "while that is true.")
     if pre.ok:
         for line in sl.ModalKalman(pre.phi, pre.rowok, KALMAN_R, KALMAN_Q,
                                    KALMAN_Q_DC, F_MODE_HZ, CONTROL_PERIOD_S, N,
@@ -3407,6 +3748,7 @@ def main(argv=None):
               f"wire {ctl.wire_hz:.0f} Hz.")
         if ctl.ramp is not None:
             print(ctl.ramp.summary())
+        print(ctl.budget.summary())
         if ctl.mkf is not None:
             print("\n" + "=" * 68)
             print("  chi2 PER DEGREE OF FREEDOM -- the out-of-mode check, calibrated")

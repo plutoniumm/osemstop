@@ -515,7 +515,24 @@ def kick_cue(phrase=KICK_CUE_PHRASE):
         pass
 
 
-GAIN_RAMP_HARD_CAP = 0.060      # refuses to parse past this, whatever is asked
+GAIN_RAMP_HARD_CAP = 0.075      # RAISED 0.060 -> 0.075 on 2026-08-18, deliberately
+                                # and with a measurement, which is what the
+                                # parser demands. Two ramps that evening walked
+                                # |Kp| from 0.030 to 0.050 in 0.005 and 0.002
+                                # steps and NOTHING RAILED at any level -- 0.0%
+                                # pinned samples throughout -- while peak demand
+                                # never exceeded 0.089 V against the 0.25 V
+                                # half-window, i.e. 36% of the actuator range.
+                                # The documented "-0.040 rail onset"
+                                # (analysis/kp040.md, one unreproduced run of
+                                # 2026-07-15) DID NOT REPRODUCE.
+                                # 0.050 is where the sweep STOPPED, not where
+                                # anything broke, so the upper limit is
+                                # UNEXPLORED rather than known. Extrapolating
+                                # demand linearly the window would not bind
+                                # until about 0.14. 0.075 is the next step, not
+                                # a verdict; raise it again the same way if it
+                                # too comes back clean. STILL ATTENDED ONLY.
 GAIN_RAMP_SETTLE_FRAC = 0.40    # of each dwell, discarded: the slew limit is live
 GAIN_RAMP_RISE_TRIPS = 2        # consecutive rises in `ratio` that end the ramp
 GAIN_RAMP_RAIL_FRAC = 0.02      # of a level's samples pinned, on any driven channel
@@ -638,6 +655,385 @@ class GainRamp:
 GAIN_RAMP = _parse_gain_ramp(os.environ.get("OSEM_GAIN_RAMP", "").strip())
 
 # ---------------------------------------------------------------------------
+# the commanded self-kick
+# ---------------------------------------------------------------------------
+# WHY IT EXISTS. Every decay rate in this repo was measured off a HAND kick: a
+# person shoves the table when jerk.py asks. Three kicks per law, one session,
+# and the two sets are comparable only because their peaks happened to overlap --
+# modal 3.96-4.70 against diagonal 3.66-4.44 (CLAUDE.md). A commanded burst is
+# the SAME excitation every time and costs nobody's attention, which is what makes
+# an unattended sweep -- five configurations x three kicks -- possible at all.
+#
+# OFF BY DEFAULT, armed only by OSEM_SELF_KICK, the same pattern as
+# OSEM_GAIN_RAMP and OSEM_MODAL_PROVISIONAL. Unset -> `SELF_KICK` is None ->
+# `Controller.kick` is None -> not one line of this executes and a `make run` is
+# bit-identical to what shipped. Asserted in the selftest.
+#
+#     OSEM_SELF_KICK=3                    3 bursts, everything else default
+#     OSEM_SELF_KICK=3:2:10:0.05          3 bursts, mode C, 10 cycles, 0.05 V
+#
+# AMPLITUDE. 0.028 V peak on one coil. PROVENANCE: the 2026-08-17 19:47 coil pass
+# drove coil 0 at 0.02796 V and coil 1 at 0.02743 V at mode A
+# (data/20260817_194726_status_coils.csv, `phase` = drive, column `amp_v`), and
+# status.py derived those rather than typing them -- amp = TARGET_SWING_COUNTS /
+# (g * pi * f * DWELL_S) is the constant-amplitude drive that reaches 200 counts
+# peak-to-peak on the loudest sensor after DWELL_S = 30 s on resonance.
+# SO THIS IS NOT A HAND KICK AND MUST NOT BE READ AS ONE. On resonance a
+# constant-amplitude drive builds LINEARLY, swing_pp(T) = 2 g amp pi f T, so at
+# coil 1's measured mode-A authority of +28.62 counts/V (A_DC_COUNTS_PER_V) the
+# default 0.028 V buys 3.6 counts p2p per second -- about 30 counts over a 6-cycle
+# 8.3 s burst, against the 868 counts p2p five sensors saw from ONE hand kick
+# (CLAUDE.md REQUEST 1). Closed loop it is smaller again: the amplitude tops out
+# at rate/decay, 26 counts p2p against the measured modal 0.1393 /s.
+# WHAT A BURST ACTUALLY REACHES ON THIS RIG IS NOT ESTABLISHED. `banner()` prints
+# that arithmetic before the run and `summary()` prints the peak envelope each
+# burst really produced, so the next session raises `cycles` or `amp_v` against a
+# measurement instead of a guess.
+SELF_KICK_AMP_V = 0.028
+# HARD CAP, refused past it whatever is asked. status.py's own AMP_MAX -- the
+# largest coil drive this repo has commanded on this rig in a measured pass -- and
+# it sits inside the 0.25 V half-window. Raising it is CLAUDE.md 11 and is not
+# free: the coil driver between the DAC and the coil is not in this repo and
+# 0.25 V may encode a real current limit.
+SELF_KICK_AMP_CAP_V = 0.20
+# COIL 1. Measured mode-A authority +28.62 counts/V, 2 % under the best of the
+# four (coil 2, +29.35), and it is neither coil with a recorded problem: coil 0 is
+# 3x weaker than 1/2/3 on |rigid| (9.92 against 28.93-34.28) and is the one that
+# saturated, and coil 3 reached 0.4229 V against the 0.250 V half-window and
+# clipped (CLAUDE.md 2).
+SELF_KICK_COIL = 1
+# MODE A, 0.72194 Hz: where the 0.028 V provenance above was measured. It is also
+# the BEST-damped mode -- modal velocity rms A 0.64 against B 2.61 and C 3.15 over
+# 28775 samples -- so a decay measured here is the easy case, which is exactly why
+# the mode is a spec field.
+SELF_KICK_MODE = 0
+# WHOLE CYCLES, so the burst starts and ends at exactly zero volts: no step at
+# either edge, only a slope, and 2 pi f amp = 0.13 V/s against the actuator's
+# 2.0 V/s slew limit.
+SELF_KICK_CYCLES = 6
+# THE FIRE GATE, and every number in it is one this file already uses.
+#   * state DAMPING. Never CALIBRATING -- that window measures the floor at zero
+#     gain and a commanded burst inside it would BE the floor -- and never FAULT.
+#   * the loop's OWN running quiet must exist. `QuietLevel.level()` is None until
+#     80 % of its 30 s window is closed-loop time, and reads 0.0 for a channel
+#     without its own evidence, so those are excluded rather than treated as quiet.
+#   * the envelope must be under SELF_KICK_QUIET_MULTIPLE of that level on every
+#     channel allowed to vote on a runaway, held for SELF_KICK_QUIET_SUSTAIN_S.
+# 1.4 is FAULT_CLEAR_RATIO's number and its argument -- the line this repo already
+# uses for "the amplitude has come down", on the same envelope statistic -- and
+# 5.0 s is FAULT_CLEAR_SUSTAIN_S, the hold that gate already requires. NO NEW
+# THRESHOLD. (jerk.py reads its pre-kick level as a median over 5.0 s ending 1.0 s
+# before the crossing, so this hold covers all but the last second of that window;
+# that second is the burst's own first second, and `ratio` is a 1.0 s sliding RMS
+# which has not risen yet.)
+SELF_KICK_QUIET_MULTIPLE = FAULT_CLEAR_RATIO
+SELF_KICK_QUIET_SUSTAIN_S = FAULT_CLEAR_SUSTAIN_S
+# HOW LONG THE RUNAWAY TEST MAY STAY BLIND after the burst ends.
+# FAULT_CLEAR_MAX_HOLD_S's number and its derivation: 1.7x the slowest re-quiet
+# this rig has measured (17.4 s under the diagonal law), far under the 138 s
+# intrinsic ringdown. Reaching it means the ringdown did NOT come back, and that
+# stops the schedule -- do not keep exciting a rig that is not recovering.
+SELF_KICK_BLIND_MAX_S = FAULT_CLEAR_MAX_HOLD_S
+# Say out loud, once, if the gate has not opened after a full quiet window of
+# DAMPING. A schedule that silently never fires is CLAUDE.md's dead-stream lesson.
+SELF_KICK_WAIT_NOTE_S = QUIET_WINDOW_S
+SELF_KICK_MAX_KICKS = 20        # parse ceiling; three per configuration is the use
+
+
+def _parse_self_kick(spec):
+    """OSEM_SELF_KICK=n[:mode:cycles:amp_v] -> constructor kwargs, or None."""
+    if not spec:
+        return None
+    parts = spec.split(":")
+    if len(parts) not in (1, 4):
+        raise ValueError("OSEM_SELF_KICK wants n_kicks, or "
+                         "n_kicks:mode:cycles:amp_v, got %r" % spec)
+    n = int(parts[0])
+    mode = int(parts[1]) if len(parts) == 4 else SELF_KICK_MODE
+    cycles = int(parts[2]) if len(parts) == 4 else SELF_KICK_CYCLES
+    amp = float(parts[3]) if len(parts) == 4 else SELF_KICK_AMP_V
+    if not 1 <= n <= SELF_KICK_MAX_KICKS:
+        raise ValueError("OSEM_SELF_KICK wants 1..%d bursts, got %d"
+                         % (SELF_KICK_MAX_KICKS, n))
+    if not 0 <= mode < NMODE:
+        raise ValueError("OSEM_SELF_KICK mode must be 0..%d (%s Hz), got %d"
+                         % (NMODE - 1, np.round(F_MODE_HZ, 5).tolist(), mode))
+    if cycles < 1:
+        raise ValueError("OSEM_SELF_KICK wants at least one WHOLE cycle so the "
+                         "burst starts and ends at zero volts, got %r" % (parts[2],))
+    if not 0.0 < amp <= SELF_KICK_AMP_CAP_V:
+        raise ValueError("OSEM_SELF_KICK amp %r V is outside (0, %.3f]. That cap is "
+                         "status.py's AMP_MAX, the largest coil drive ever commanded "
+                         "on this rig in a measured pass; raise SELF_KICK_AMP_CAP_V "
+                         "deliberately, in a diff, with a reason."
+                         % (amp, SELF_KICK_AMP_CAP_V))
+    return dict(n_kicks=n, mode=mode, cycles=cycles, amp_v=amp)
+
+
+class SelfKick:
+    """A commanded, repeatable excitation: one coil, one mode, N bursts.
+
+    THE POINT IS REPEATABILITY, NOT SIZE. A hand kick is whatever the person at
+    the table did; this is the same voltage into the same coil at the same
+    frequency for the same whole number of cycles every time, so two
+    configurations can be compared without waiting for their peaks to match. It is
+    NOT a substitute for a hand kick's energy -- see SELF_KICK_AMP_V, where the
+    arithmetic says 30 counts p2p against a hand kick's 868.
+
+    THE RUNAWAY BREAKER IS BLIND TO THE WINDOW THIS OPENS, AND ONLY TO IT. The
+    breaker exists to catch the LOOP adding energy on its own; a disturbance the
+    controller commanded is by definition not that, and the controller is the one
+    thing on the rig that knows it caused it. So from the first sample of the
+    burst until the envelope is back under the quiet line -- or
+    SELF_KICK_BLIND_MAX_S after the burst ends, whichever is first -- the breaker's
+    `judge` mask is empty and `run_trip` cannot fire. EVERY OTHER INTERLOCK STAYS
+    LIVE: the rail fault, the saturation trip, the dead-pin demotion, the in-band
+    floor, the healthy quorum and the fault-clear gate are untouched, and a FAULT
+    from any of them stops the schedule.
+
+    WHAT THE SUPPRESSION COSTS, stated rather than hidden. `Breaker.sample` latches
+    `excess_since` through `Health.hold(healthy & judge & ...)`, so an empty judge
+    mask clears that latch to inf every step. A genuine runaway beginning inside
+    the suppressed window therefore needs a fresh RUNAWAY_SUSTAIN_S = 4.0 s of
+    `high & growing & not receded` AFTER the breaker re-arms before it trips: 4 s
+    of extra latency on the one fault this window makes more likely. That is why
+    the window is bounded at both ends, why reaching the bound stops the schedule
+    instead of kicking again, and why the re-arm is announced with its time.
+
+    NOT ESTABLISHED, and nothing here pretends otherwise: what amplitude a burst
+    reaches on this rig, whether a commanded kick and a hand kick decay the same
+    way, and whether 6 cycles at 0.028 V is enough for jerk.py to grade. The first
+    two are bench questions; the third this class measures and reports.
+    """
+
+    def __init__(self, n_kicks, mode=SELF_KICK_MODE, cycles=SELF_KICK_CYCLES,
+                 amp_v=SELF_KICK_AMP_V, coil=SELF_KICK_COIL, n=N):
+        self.n_kicks, self.mode = int(n_kicks), int(mode)
+        self.f = float(F_MODE_HZ[self.mode])
+        self.cycles = int(cycles)
+        self.burst_s = self.cycles / self.f
+        self.amp, self.coil, self.n = float(amp_v), int(coil), int(n)
+        self.u = np.zeros(self.n)
+        self.phase = "waiting"          # waiting | burst | ringdown | done
+        self.fired = 0
+        self.t0 = self.t1 = self.quiet_since = self.t_damping = None
+        self.quiet_v = None             # the quiet LEVEL this burst fired against
+        self.peak = self.peak_v = 0.0   # x quiet, and volts, since the burst began
+        self.history = []               # (n, t0, t1, t_rearm, how, peak, peak_v)
+        self.stopped = None
+        self._said_wait = self._said_coil = False
+
+    # -- what the rest of the loop asks it ----------------------------------
+    @property
+    def suppressed(self):
+        """True exactly while the runaway TEST is blind: bursting or ringing down."""
+        return self.phase in ("burst", "ringdown")
+
+    @property
+    def code(self):
+        """The `kick` CSV column: 0 nothing, 1 burst driving, 2 suppressed ringdown."""
+        return {"burst": 1, "ringdown": 2}.get(self.phase, 0)
+
+    def command(self, t):
+        """Volts to ADD to the raw demand this control step. Zero unless bursting.
+
+        A whole number of cycles of a sine started at zero, so the command leaves
+        and returns to exactly 0.000 V with no step at either edge.
+        """
+        self.u[:] = 0.0
+        if self.phase == "burst" and self.t0 is not None:
+            s = t - self.t0
+            if 0.0 <= s <= self.burst_s:
+                self.u[self.coil] = self.amp * np.sin(2.0 * np.pi * self.f * s)
+        return self.u
+
+    # -- the schedule -------------------------------------------------------
+    def on_engage(self, t):
+        """A new engagement: the quiet window was reset with it, so re-gate."""
+        self.quiet_since, self.t_damping = None, t
+        if self.phase == "burst":
+            self.t1 = t
+            self.phase = "ringdown"
+
+    def stop(self, why):
+        if self.phase == "done":
+            return None
+        self.phase, self.stopped = "done", why
+        return ("[self-kick] STOPPED after %d of %d burst(s): %s. No further "
+                "excitation will be commanded this run." % (self.fired, self.n_kicks, why))
+
+    def abort(self, t, why):
+        """A FAULT. Kill the drive; stop the schedule only if a burst was in flight."""
+        if self.phase == "done":
+            return None
+        if not self.suppressed:
+            self.quiet_since = None     # merely waiting: re-gate after recovery
+            return None
+        self.t1 = t if self.t1 is None else self.t1
+        return self.stop("the rig FAULTED with burst %d in flight (%s). A commanded "
+                         "excitation is not a runaway, but a fault during one is a "
+                         "fault, and nothing unattended should answer it by kicking "
+                         "again" % (self.fired, why))
+
+    def _track(self, env, quiet, m):
+        if quiet is None or not m.any():
+            return
+        e, q = np.asarray(env, float)[m], np.asarray(quiet, float)[m]
+        self.peak_v = max(self.peak_v, float(np.max(e)))
+        self.peak = max(self.peak, float(np.max(e / q)))
+
+    def _rearm(self, t, how):
+        self.history.append((self.fired, self.t0, self.t1, t, how,
+                             self.peak, self.peak_v))
+        blind = t - self.t0
+        self.phase, self.quiet_since = "waiting", None
+        return ("[self-kick] runaway trip RE-ARMED at t=%.1fs -- %s. Blind for "
+                "%.1fs (burst %.1fs + ringdown %.1fs). Peak envelope %.2fx the "
+                "loop's own quiet level (%.4f V). The breaker's latch was held "
+                "clear throughout, so it now needs a fresh %.1fs of sustained "
+                "growth to trip."
+                % (t, how, blind, self.burst_s, t - self.t1, self.peak,
+                   self.peak_v, RUNAWAY_SUSTAIN_S))
+
+    def update(self, t, env, quiet, vote, coil_live):
+        """One DAMPING control step, after the breaker. Returns a line, or None."""
+        if self.phase == "done":
+            return None
+        if self.t_damping is None:
+            self.t_damping = t
+        m = np.asarray(vote, bool).copy()
+        if quiet is not None:
+            m &= np.asarray(quiet, float) > 0.0        # 0.0 means "no evidence"
+        under = bool(quiet is not None and m.any()
+                     and (np.asarray(env, float)[m]
+                          <= SELF_KICK_QUIET_MULTIPLE * np.asarray(quiet, float)[m]).all())
+
+        if self.phase == "burst":
+            self._track(env, quiet, m)
+            if t - self.t0 < self.burst_s:
+                return None
+            self.t1, self.phase = t, "ringdown"
+            return None
+        if self.phase == "ringdown":
+            self._track(env, quiet, m)
+            if under:
+                return self._rearm(t, "the envelope came back under the "
+                                      "%.2fx quiet line" % SELF_KICK_QUIET_MULTIPLE)
+            if t - self.t1 >= SELF_KICK_BLIND_MAX_S:
+                msg = self._rearm(t, "the %.0fs CEILING, not the envelope"
+                                     % SELF_KICK_BLIND_MAX_S)
+                return msg + "\n" + self.stop(
+                    "the ringdown from burst %d did not come back under %.2fx the "
+                    "loop's own quiet level within %.0fs of the burst ending (peak "
+                    "%.2fx, still %.2fx at the ceiling). The breaker is armed again "
+                    "and the loop keeps damping; it is the EXCITATION that stops"
+                    % (self.fired, SELF_KICK_QUIET_MULTIPLE, SELF_KICK_BLIND_MAX_S,
+                       self.peak,
+                       (float(np.max(np.asarray(env, float)[m]
+                                     / np.asarray(quiet, float)[m]))
+                        if (quiet is not None and m.any()) else float("nan"))))
+            return None
+
+        # waiting
+        if self.fired >= self.n_kicks:
+            return self.stop("all %d commanded bursts fired" % self.n_kicks)
+        if not coil_live:
+            if not self._said_coil:
+                self._said_coil = True
+                return ("[self-kick] holding: coil %d is not enabled, healthy and "
+                        "un-demoted, so nothing would reach the optic. Waiting for "
+                        "it rather than kicking a coil that is held at bias."
+                        % self.coil)
+            return None
+        if not under:
+            self.quiet_since = None
+        elif self.quiet_since is None:
+            self.quiet_since = t
+        if self.quiet_since is None or t - self.quiet_since < SELF_KICK_QUIET_SUSTAIN_S:
+            if (not self._said_wait and self.fired == 0
+                    and t - self.t_damping >= SELF_KICK_WAIT_NOTE_S):
+                self._said_wait = True
+                return ("[self-kick] %.0fs of DAMPING and the gate has not opened: "
+                        "the loop has not held under %.2fx its own quiet level for "
+                        "%.0fs together%s. Still waiting -- nothing fires until it "
+                        "does." % (t - self.t_damping, SELF_KICK_QUIET_MULTIPLE,
+                                   SELF_KICK_QUIET_SUSTAIN_S,
+                                   " (the running quiet is not measured yet)"
+                                   if quiet is None else ""))
+            return None
+        self.fired += 1
+        self.t0, self.t1 = t, None
+        self.peak = self.peak_v = 0.0
+        self.quiet_v = (float(np.max(np.asarray(quiet, float)[m]))
+                        if (quiet is not None and m.any()) else float("nan"))
+        self.phase = "burst"
+        return ("[self-kick] BURST %d/%d at t=%.1fs -- coil %d, mode %s %.5f Hz, "
+                "%.4f V peak, %d whole cycles (%.2fs).\n"
+                "[self-kick] THE RUNAWAY TRIP IS SUPPRESSED from this sample until "
+                "the envelope is back under %.2fx the loop's own quiet level "
+                "(%.4f V) or %.0fs after the burst ends, whichever is first. The "
+                "loop commanded this disturbance, so it is not the loop running "
+                "away. Rails, saturation, dead-pin, the healthy quorum and the "
+                "fault-clear gate all stay LIVE."
+                % (self.fired, self.n_kicks, t, self.coil, "ABC"[self.mode], self.f,
+                   self.amp, self.cycles, self.burst_s, SELF_KICK_QUIET_MULTIPLE,
+                   self.quiet_v, SELF_KICK_BLIND_MAX_S))
+
+    # -- reporting ----------------------------------------------------------
+    def banner(self):
+        g = float(A_DC_COUNTS_PER_V[self.mode, self.coil])
+        rate = 2.0 * abs(g) * self.amp * np.pi * self.f     # counts p2p per second
+        return [
+            "[self-kick] ARMED: %d burst(s), coil %d, mode %s %.5f Hz, %.4f V peak, "
+            "%d whole cycles = %.2fs each." % (self.n_kicks, self.coil,
+                                               "ABC"[self.mode], self.f, self.amp,
+                                               self.cycles, self.burst_s),
+            "[self-kick] PREDICTED SIZE, from measured numbers and NOT from a bench "
+            "run: coil %d gives %+.2f counts/V into mode %s (A_DC_COUNTS_PER_V), and "
+            "a constant-amplitude resonant drive builds 2 g amp pi f = %.2f counts "
+            "p2p per second, so this burst reaches about %.0f counts p2p OPEN LOOP. "
+            "Closed loop it cannot exceed rate/decay = %.0f counts p2p at the "
+            "measured modal 0.1393 /s. ONE HAND KICK MOVED 868 counts p2p."
+            % (self.coil, g, "ABC"[self.mode], rate, rate * self.burst_s,
+               rate / 0.1393),
+            "[self-kick] THE RUNAWAY TRIP IS SUPPRESSED for the burst and its "
+            "ringdown, and ONLY the runaway trip -- every other interlock stays "
+            "live. Each suppression and each re-arm is printed with its time and "
+            "marked in the CSV (`kick` 1 = burst, 2 = suppressed ringdown; "
+            "`kick_n`, `kick_ch`, `kick_v`).",
+        ]
+
+    def summary(self):
+        out = ["", "=" * 68, "  COMMANDED SELF-KICK", "=" * 68,
+               "  coil %d, mode %s %.5f Hz, %.4f V peak, %d cycles (%.2fs)"
+               % (self.coil, "ABC"[self.mode], self.f, self.amp, self.cycles,
+                  self.burst_s),
+               "   #    t0      burst   ringdown  blind   peak/quiet   peak V   re-armed by"]
+        for (i, t0, t1, tr, how, pk, pv) in self.history:
+            out.append("  %2d  %7.1f  %6.2f   %7.2f  %6.2f   %8.2fx  %8.4f   %s"
+                       % (i, t0, t1 - t0, tr - t1, tr - t0, pk, pv, how))
+        if not self.history:
+            out.append("  no burst completed.")
+        out += ["", "  fired %d of %d." % (self.fired, self.n_kicks)]
+        if self.stopped:
+            out.append("  stopped because: %s" % self.stopped)
+        out += ["",
+                "  `peak/quiet` is the envelope this burst produced against the "
+                "loop's own",
+                "  20th-percentile quiet level -- the first measurement anyone here "
+                "has of",
+                "  what a commanded burst is worth. A hand kick reached 3.7-4.7x "
+                "its own",
+                "  baseline. If these are far under that, raise `cycles` or `amp_v` "
+                "-- the",
+                "  spec is OSEM_SELF_KICK=n:mode:cycles:amp_v and the cap is %.2f V."
+                % SELF_KICK_AMP_CAP_V, ""]
+        return "\n".join(out)
+
+
+SELF_KICK = _parse_self_kick(os.environ.get("OSEM_SELF_KICK", "").strip())
+
+# ---------------------------------------------------------------------------
 # the CSV
 # ---------------------------------------------------------------------------
 _LOG = (("bp", ".5f"), ("vel", ".5f"), ("out", ".4f"), ("gain", ".5f"),
@@ -653,6 +1049,17 @@ def csv_cols():
     cols += [(f"mres{m}", ".5f") for m in range(NMODE)]
     cols += [("chi2", ".5f"), ("ndof", None)]
     cols += [(f"qls{m}", ".6f") for m in range(NMODE)]
+    # THE COMMANDED SELF-KICK, so an offline tool can find the window the
+    # controller itself excited. Kept in the fixed prefix, ahead of the
+    # per-channel block, so the per-channel columns stay contiguous.
+    #   kick     0 nothing, 1 the burst is DRIVING, 2 the burst is over and the
+    #            runaway trip is still suppressed while the ringdown comes down
+    #   kick_n   1-based burst index, 0 before the first
+    #   kick_ch  the coil being driven, -1 when the feature is off
+    #   kick_v   volts added to that coil at the last control step, signed
+    # Present on every run and identically zero when OSEM_SELF_KICK is unset.
+    cols += [("kick", None), ("kick_n", None), ("kick_ch", None),
+             ("kick_v", ".5f")]
     for i in range(N):
         cols += [(f"ch{i}_counts", None), (f"ch{i}_V", ".4f")]
         cols += [(f"ch{i}_{k}", f) for k, f in _LOG]
@@ -697,9 +1104,12 @@ class Controller(sl.Loop):
 
     def __init__(self, dac, dac_channels=None, enable=None, steady=None,
                  capture=None, ki=None, kd=None, bias=None, baseline_file=None,
-                 modal_path=None):
+                 modal_path=None, self_kick=None):
         # modal_path defaults to None so the suite is reproducible; only main()
         # passes the real path.
+        # self_kick: None reads the environment (and is None unless OSEM_SELF_KICK
+        # is set), False forces it off, or pass a SelfKick. The suite constructs
+        # its own; nothing is armed by default.
         sl.Loop.__init__(self)
         f = lambda v, d: np.array(d if v is None else v, dtype=float)
         self.enabled = np.array(ENABLE_CHANNEL if enable is None else enable, bool)
@@ -782,6 +1192,14 @@ class Controller(sl.Loop):
 
         self.ramp = GainRamp(*GAIN_RAMP, nominal=self.steady) if GAIN_RAMP else None
         self.base_steady, self.base_capture = self.steady.copy(), self.capture.copy()
+
+        # The commanded self-kick. None unless OSEM_SELF_KICK is set, and every
+        # line it adds to `_damping` and `_actuate` is behind `is not None`, so an
+        # unarmed run executes exactly what shipped. `kick_v` exists either way
+        # because `csv_row` reads it at the wire rate.
+        self.kick = ((SelfKick(**SELF_KICK) if SELF_KICK else None)
+                     if self_kick is None else (self_kick or None))
+        self.kick_v = np.zeros(N)
 
         self.trim_steps = np.zeros(N, int)
         self.trim_frozen = np.zeros(N, bool)
@@ -893,6 +1311,14 @@ class Controller(sl.Loop):
     # -- faults -------------------------------------------------------------
     def _fault(self, t, msg, railed=False, amp=False):
         self.say("!! " + msg)
+        if self.kick is not None:
+            # A commanded burst is not a runaway, but a rig that faults DURING one
+            # is a rig that faulted, and nothing running unattended should answer
+            # that by kicking again. Only aborts if a burst was actually in
+            # flight; a fault while merely waiting just re-gates.
+            m = self.kick.abort(t, msg)
+            if m:
+                self.say(m)
         if self.trim_pending is not None:
             i, was = self.trim_pending
             self.trim_pending = None
@@ -1030,6 +1456,8 @@ class Controller(sl.Loop):
         self.quiet.reset()
         self._quiet_said = False
         self.locked_announced = False
+        if self.kick is not None:
+            self.kick.on_engage(t)
 
     def _warm_from_file(self, t):
         """Adopt a stored floor only if the first BASELINE_WARMUP_S agree with it."""
@@ -1236,10 +1664,29 @@ class Controller(sl.Loop):
         vote = self._driven() & PHI_GEOM_ROWS
         if not vote.any():
             vote = self._driven()
-        got = self.brk.sample(t, self.bp, self.healthy, vote, ref, self.sat)
+        # THE ONE INTERLOCK A COMMANDED BURST TURNS OFF, AND IT IS THE ONLY ONE.
+        # `judge` names who may TRIP on amplitude; emptying it makes `run_trip`
+        # unreachable and holds `Breaker`'s `excess_since` latch clear, while
+        # `drives` still carries the whole evidence set so the envelope,
+        # `growing`, `high`, `receded` AND the saturation trip are computed
+        # exactly as before. The rail fault, the dead-pin demotion, the in-band
+        # floor, the healthy quorum and the fault-clear gate never see this at
+        # all. The breaker exists to catch the LOOP adding energy on its own, and
+        # the loop KNOWS it commanded this disturbance -- so this is a scope, not
+        # a fudge. It is bounded by SELF_KICK_BLIND_MAX_S, announced at both
+        # edges, and it costs a fresh RUNAWAY_SUSTAIN_S of evidence after the
+        # re-arm because the latch was held clear. See SelfKick.
+        judge = vote
+        if self.kick is not None and self.kick.suppressed:
+            judge = np.zeros(N, bool)
+        got = self.brk.sample(t, self.bp, self.healthy, vote, ref, self.sat,
+                              judge=judge)
         # Fed ONLY here, so the window holds closed-loop time and a FAULT freezes
-        # it rather than filling it with the open-loop plant.
-        self.quiet.add(t, got["env"], live)
+        # it rather than filling it with the open-loop plant. A commanded burst is
+        # frozen out for the same reason: this number is where the LOOP lives, and
+        # a disturbance the controller ordered is not that.
+        if self.kick is None or not self.kick.suppressed:
+            self.quiet.add(t, got["env"], live)
         if self.quiet.ready() and not self._quiet_said:
             self._quiet_said = True
             q = self.quiet.level()
@@ -1260,6 +1707,17 @@ class Controller(sl.Loop):
             return self._fault(t, f"{self._who(got['sat_trip'])} pinned against the "
                                   f"rail, still demanding more, and not winning -- "
                                   f"freezing all channels, entering FAULT.")
+
+        # The self-kick schedule, after both trips so a fault this step ends it
+        # rather than being kicked into. It fires only from DAMPING, only once the
+        # loop has held under its own running quiet level, and it is the thing
+        # that sets `suppressed` for the NEXT step -- so no sample is ever driven
+        # with the runaway trip still armed.
+        if self.kick is not None:
+            msg = self.kick.update(t, got["env"], self.quiet.level(), vote,
+                                   bool(live[self.kick.coil]))
+            if msg:
+                self.say(msg)
 
         # AGAINST THE ZERO-GAIN BASELINE, ON PURPOSE, and it is the one place in
         # this file where that is the right reference. LOCKED is the deliverable
@@ -1520,6 +1978,14 @@ class Controller(sl.Loop):
         self.modal_cols[:] = False
         self.diag_on[:] = False
 
+        # THE COMMANDED SELF-KICK, computed here so the modal cap below can see it
+        # and yield to it rather than the two of them overrunning the window
+        # together. DAMPING only: a fault zeroes the drive on the same control
+        # step, without waiting for the schedule to notice.
+        if self.kick is not None:
+            self.kick_v[:] = (self.kick.command(t) if self.state == "DAMPING"
+                              else 0.0)
+
         if self.modal.ok and self.state == "DAMPING":
             # SENSE_OK is "this sensor's opinion counts"; DRIVE_OK is "this coil is
             # driven". They differ, and a5 -- live sensor, dead coil -- is the case
@@ -1582,12 +2048,31 @@ class Controller(sl.Loop):
             # limit. Capping the total costs authority; guessing the window costs
             # hardware.
             cap = MODAL_TOTAL_HEADROOM * BIAS_SWING
-            self.modal_scaled = sl.cap_scale(self.modal_u, self.pid.i + self.pid.d,
+            # The burst counts as fixed demand here for the same reason the D
+            # term does: it is added after the allocation, and CLAUDE.md 2 is what
+            # happens when the cap is measured on the allocation alone.
+            fixed = self.pid.i + self.pid.d
+            if self.kick is not None and self.kick_v.any():
+                fixed = fixed + self.kick_v
+            self.modal_scaled = sl.cap_scale(self.modal_u, fixed,
                                              cap, self.modal_cols)
             if self.modal_scaled < 1.0:
                 self.modal_u = self.modal_u * self.modal_scaled
                 self.pid.p = np.where(self.modal_cols, self.modal_u, self.pid.p)
                 raw = self.bias + self.pid.p + self.pid.i + self.pid.d
+
+        if self.kick is not None and self.kick_v.any():
+            # Added to the RAW demand, so it goes through the same clip, the same
+            # slew limit and the same saturation accounting as every other volt
+            # this loop commands -- and the total on the kicked coil is held
+            # inside MODAL_TOTAL_HEADROOM x BIAS_SWING, the cap the modal
+            # allocation already respects. A commanded excitation must not be the
+            # thing that takes a coil past the window.
+            raw = raw + self.kick_v
+            j = self.kick.coil
+            room = MODAL_TOTAL_HEADROOM * BIAS_SWING
+            raw[j] = self.bias[j] + float(np.clip(raw[j] - self.bias[j],
+                                                  -room, room))
 
         out = self.pid.drive(raw, self.bias, self.vmin, self.vmax, live, dt)
         pinned = (out <= self.vmin + 1e-6) | (out >= self.vmax - 1e-6)
@@ -1612,6 +2097,10 @@ class Controller(sl.Loop):
         rate = (f"{self.wire_hz:.0f}/{CONTROL_HZ:.0f}Hz avg{self.n_avg:d}"
                 if self.wire_hz == self.wire_hz else f"--/{CONTROL_HZ:.0f}Hz")
         bad = f" bad{self.bad_samples}" if self.bad_samples else ""
+        if self.kick is not None and self.kick.code:
+            bad += (" KICK%d %s RUNAWAY-TRIP-SUPPRESSED"
+                    % (self.kick.fired,
+                       "driving" if self.kick.code == 1 else "ringdown"))
         if self.modal.ok:
             mode = ("MIMO" if self.modal_on else "diag") + (
                 " q=" + "/".join(f"{x:+.3f}" for x in self.qdot)
@@ -1629,6 +2118,11 @@ class Controller(sl.Loop):
                str(self.modal_rank), str(int(sl.Modal.mask_of(self.diag_on)))]
         row += list(self.qdot) + list(self.mode_gain) + list(self.modal_res)
         row += [self.chi2, str(int(self.chi2_dof))] + list(self.qls)
+        k = self.kick
+        row += [str(0 if k is None else k.code),
+                str(0 if k is None else k.fired),
+                str(-1 if k is None else k.coil),
+                0.0 if k is None else float(self.kick_v[k.coil])]
         for i in range(N):
             row += [str(int(counts[i])), counts[i] * (A_VCC / ADC_MAX_COUNTS)]
             row += [getattr(self, k)[i] for k, _ in _LOG]
@@ -2829,6 +3323,15 @@ def main(argv=None):
     if KICK_CUE_S > 0:
         print(f"[kick-cue] speaking \"{KICK_CUE_PHRASE}\" every {KICK_CUE_S:.0f}s once "
               f"damping starts. Unset OSEM_KICK_CUE to silence it.\n")
+    if ctl.kick is not None:
+        for _line in ctl.kick.banner():
+            print(_line)
+        print("[self-kick] ATTENDED OR NOT, THIS DRIVES THE OPTIC ON PURPOSE. It "
+              "fires only from DAMPING and only\n"
+              "[self-kick] once the loop has held under its own quiet level; it "
+              "stops on any FAULT and on a\n"
+              "[self-kick] ringdown that does not come back. Unset OSEM_SELF_KICK "
+              "to disable.\n")
     if GAIN_RAMP:
         lv, dw = GAIN_RAMP
         print(f"[gain-ramp] {len(lv)} levels, |Kp| {lv[0]:.4f} -> {lv[-1]:.4f}, "
@@ -2905,6 +3408,8 @@ def main(argv=None):
               f"wire {ctl.wire_hz:.0f} Hz.")
         if ctl.ramp is not None:
             print(ctl.ramp.summary())
+        if ctl.kick is not None:
+            print(ctl.kick.summary())
         if ctl.mkf is not None:
             print("\n" + "=" * 68)
             print("  chi2 PER DEGREE OF FREEDOM -- the out-of-mode check, calibrated")

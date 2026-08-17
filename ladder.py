@@ -38,20 +38,25 @@ have -- v7 was a branch off v5, not a successor to it. Names force the question
              rung. The cost is that Phi is now inside the estimator, so a wrong
              Phi gives a wrong velocity; zeta's refusal ladder is kept whole and
              chi2 is what detects it. Written 2026-08-17, not yet on the bench.
-    theta    the same modal law written as a bank of causal FIR KERNELS instead
-             of a matrix and a gain -- `u_i(t) = sum_j h_ij * y_j`, which is the
-             general LTI MIMO controller and contains every rung above it as a
-             special case. What it adds is the only per-mode freedom the matrix
-             form cannot express: PHASE. Velocity feedback is a 90 degree shift
-             on displacement, and only exact quadrature dissipates -- anything
-             else is partly a spring. `KERNEL_PHASE_DEG` defaults to [0, 0, 0],
-             at which the taps reduce to the unit impulse EXACTLY and theta is
-             bit-identical to eta: measured max |du| = 0.000e+00 V over 30 000
-             samples across 8 channels. So it changes nothing until somebody
-             sets a phase, which is deliberate -- a kernel has 140 taps per pair
-             against three measured numbers, and a wrong one does not under-damp,
-             it PUMPS. Blocked on A's MAGNITUDES, which are not established.
-             Written 2026-08-18, not yet on the bench.
+    theta    eta's law under ONE DECLARED ACTUATOR BUDGET, divided by NEED.
+             `BUDGET_V = 0.225 V` is the demand about bias a single coil may
+             carry -- eta's cap, but declared once and solved on the TOTAL
+             output rather than on the allocation alone, which is how coil 3
+             reached 0.4229 V against a 0.250 V half-window and clipped. Four
+             claimants -- the three modes and the per-channel block -- share it
+             in proportion to each one's own DISSIPATION RATE, not to `ratio`:
+             `ratio` is referenced to a zero-gain baseline and reads 13x apart
+             for the same plate under the two laws. The split is one-poled at
+             `BUDGET_TAU_S = 20 s`, slew-capped, floored, and RAMPS BACK TO FLAT
+             when the statistic is unavailable rather than latching. `BUDGET_TILT`
+             defaults to 0.0, at which every weight is EXACTLY 1.0 for every
+             possible need vector and theta is bit-identical to eta -- the
+             selftest drives both on one sensor history and compares commanded
+             voltages sample by sample. An earlier draft of this rung also
+             carried a per-mode FIR kernel bank; that layer was REMOVED after
+             the phase was swept on the rig 2026-08-17 and zero came out the
+             optimum (median `ratio` 0.155 at 0 deg against 0.862 / 0.790 /
+             1.867 at -30 / +30 / -60). Written 2026-08-18, not yet on the bench.
 
 Alphabetical order is NOT ladder order -- eta is the newest rung and sorts before
 zeta. That is the whole reason this is an explicit tuple rather than a sort key.
