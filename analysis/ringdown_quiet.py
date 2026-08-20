@@ -45,7 +45,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ringdown import (acf_unbiased, fit_damped, modes_of, score,  # noqa: E402
+from ringdown import (acf_unbiased, modes_of, score,  # noqa: E402
                       seed, writecsv, hdr)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

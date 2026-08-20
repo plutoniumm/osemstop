@@ -8,7 +8,7 @@
 PY ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 FQBN ?= arduino:avr:mega        # CS on pin 53 is Mega/Due specific
 
-.PHONY: run status replay arduino ports test check scope list help
+.PHONY: run status replay arduino ports check scope list help
 .DEFAULT_GOAL := help
 
 help:                ## show this
@@ -32,9 +32,6 @@ arduino:             ## ON HARDWARE: compile arduino.ino and upload it (make ard
 
 ports:               ## which serial port is the board on
 	@$(PY) bench.py --ports
-
-test:                ## interactive runner: pick a version, watch it damp, press x to kick
-	@$(PY) test/tui.py
 
 check:               ## the same suite headless across every version (CI form)
 	@$(PY) harness.py --test all

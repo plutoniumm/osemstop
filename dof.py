@@ -21,19 +21,26 @@ honest check on the rigid-body assumption. The pairs give two more each:
     X     = (a4+a5)/2   ROLLX = (a4-a5)/2
     Y     = (a6+a7)/2   ROLLY = (a6-a7)/2
 
-Which physical DOF each measured mode IS has never been established, and this
-answers it: project the record onto these coordinates and see where each mode's
-power lands. The corner ASSIGNMENT is unknown -- the coordinates first quoted for
-a0-a3 were described afterwards as illustrative -- so T1/T2/WARP are a basis, not
-labelled axes; permuting the sensors permutes which of the three is which but not
-the split between "three rigid-body" and "one warp".
+Project the record onto these coordinates and see where each mode's power lands.
+
+THE CORNER ASSIGNMENT WAS SETTLED BY THIS FILE, 2026-08-17. A rigid plate cannot
+warp, so the pairing that minimises warp is the true one, and it is unambiguous:
+over data/20260817_205211_status_sensors.csv the warp/rigid ratios are
+
+    a0+a1 vs a2+a3   1.566        a0+a2 vs a1+a3   0.277
+    a0+a3 vs a1+a2   0.139   <-   2x better than the next
+
+so a0 is diagonal to a3 and a1 is diagonal to a2, which is what the DOF table
+below encodes. Permuting the sensors permutes which of T1/T2/WARP is which, but
+never the split between "three rigid-body" and "one warp".
 """
 
+import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, "/Users/gojira/Documents/GitHub.nosync/ligo")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import status  # noqa: E402
 
 DOF = {
@@ -84,7 +91,9 @@ def main(path):
 
     print("\n  === WHICH DOF IS EACH MODE? share of that mode's total power ===")
     print("   mode Hz    " + "".join("%12s" % n.split()[0] for n in DOF))
-    for target in (0.72294, 0.99193, 1.43060, 1.65657, 1.9844, 2.3998):
+    # The mode list comes from status.MODES, never a copy of it: these numbers
+    # moved 0.0170 Hz in 11 days and a stale one silently mis-bins the answer.
+    for _name, target in status.MODES:
         k = int(np.argmin(abs(f - target)))
         band = slice(max(k - 2, 0), k + 3)
         tot = sum(P[n][band].max() for n in DOF)
@@ -97,6 +106,9 @@ def main(path):
     print("  Peaks over 6x a running median floor, 0.3-25 Hz, in their own")
     print("  coordinates rather than per sensor -- a rotation cancels in the sum")
     print("  and shows only in the difference, so per-sensor spectra can hide it.")
+    print("  READ THE RATIOS AS A SCREEN, NOT A DETECTION: a running-median floor")
+    print("  is a flattering denominator. The '1.43 Hz fourth mode' was quoted at")
+    print("  119x here and measured 4.4 sigma as a lock-in -- withdrawn 2026-08-17.")
     band = (f > 0.3) & (f < 25.0)
     fb = f[band]
     for name in ("X  ears", "RX ear diff", "Y  top", "RY top diff", "WARP  (!)"):

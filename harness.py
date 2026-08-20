@@ -11,8 +11,17 @@ and a version claiming a fix has to demonstrate it.
     python3 harness.py --test eta
     python3 harness.py --list
 
-No interactive front-end here: `test/tui.py` (`make test`) is the terminal runner,
-`scope.py` plots the real board or a live bench run.
+No interactive front-end here: `scope.py` plots the real board or a live bench
+run.
+
+THE SIMULATOR IS NOT THE RIG, AND MOST OF `make check`'s FAILURES ARE THAT.
+`sim/server.py`'s eight-OSEM body was built from the 2026-08-04/06 sessions: TWO
+modes at 1.046 and 1.657 Hz. The rig has THREE, measured 0.71519 / 0.99231 /
+1.65307 Hz (`status.py` MODES), so eta's and theta's modal path is not reachable
+from here at all and nothing below should be read as evidence about the plant.
+What this suite does test is BEHAVIOUR -- interlocks, demotion, recovery,
+schedule -- against a body that is stable, seeded and reproducible. Refitting the
+body is a bench job, not a harness one.
 
 Version contract. To be runnable here a controller must expose:
     ENABLE_CHANNEL, STEADY_GAIN, CAPTURE_GAIN, KI_GAIN, KD_GAIN,
@@ -25,7 +34,6 @@ Optionally VERSION_TAG and FIXES; absent means "v0-era, nothing fixed".
 
 import argparse
 import contextlib
-import glob
 import io
 import math
 import os
@@ -46,16 +54,10 @@ from sim import server as S           # noqa: E402
 # version discovery
 # --------------------------------------------------------------------------
 def versions():
-    """Every controller here, in ladder order, tools last.
+    """Every controller next to this file, in ladder order, tools last.
 
-    Order comes from `ladder.LADDER`, not the filename, and `bench.py` calls the
-    same helper -- the two used to carry a regex each and the copies drifted."""
-    found = []
-    for path in glob.glob(os.path.join(HERE, ladder.PREFIX + "*" + ladder.SUFFIX)):
-        k = ladder.sort_key(os.path.basename(path))
-        if k is not None:
-            found.append((k, path))
-    return [p for _, p in sorted(found)]
+    `ladder.discover` is the only copy of this scan -- see ladder.py."""
+    return ladder.discover(HERE)
 
 
 def resolve(name):
@@ -155,8 +157,7 @@ def describe(path):
 # --------------------------------------------------------------------------
 _pass = _fail = 0
 
-# test/tui.py drives this same suite through these hooks rather than forking the
-# checks. Left None, everything prints and runs flat out.
+# Left None, everything prints and runs flat out.
 REPORTER = None      # fn(kind, **fields) for "check" | "note" | "phase"
 MONITOR = None       # fn(label, sim) every MONITOR_EVERY simulated samples
 MONITOR_EVERY = 25
@@ -181,6 +182,16 @@ def check(name, ok, detail=""):
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f" -- {detail}" if detail else ""))
 
 
+def median(xs):
+    """Plain median of a sequence. One copy: the baseline-floor section computed
+    it three different ways inline, which is three places for one off-by-one."""
+    v = sorted(xs)
+    if not v:
+        return 0.0
+    k = len(v) // 2
+    return v[k] if len(v) % 2 else 0.5 * (v[k - 1] + v[k])
+
+
 def note(text):
     if _emit("note", text=text):
         print(text)
@@ -195,8 +206,8 @@ def phase(label):
 # driving coils): at 24 Hz the sample-counted MAX_CONSECUTIVE_SATURATED = 30 means
 # 1.2 s rather than 86 ms and twenty checks below invert. `line_scale` pinned --
 # a4/a6/a7's out-of-band interference measured 4-20x louder in one session than
-# the other. `f_drive` comes from S.DRIVE_HZ per body: the tone must sit on the
-# resonance, 1.0 Hz four-OSEM and 1.046 Hz eight-OSEM.
+# the other. `f_drive` comes from S.DRIVE_HZ per body rather than a literal, so
+# the tone always sits on whichever body's first resonance is loaded.
 BASE_PLANT = dict(ack_drain=0.0,
                   drive_amp=0.8, seismic=0.8, Q=50.0, k_act=20.0,
                   meas_noise=20.0, hum_hz=60.0, hum_mv=0.0, hvac_hz=2.5,
@@ -298,7 +309,7 @@ def run(label, seconds, enable, steady, ki=None, kd=None, occlude_at=None,
             sim.occlude[oi] = sim.t >= t_on and (t_off is None or sim.t < t_off)
         while sched and sim.t >= sched[0][0]:
             sim.kick(sched.pop(0)[1])
-        # From the TUI's input thread: applied here, never concurrently with step().
+        # Applied here, never concurrently with step().
         while PENDING_KICKS:
             globals()["KICKS_APPLIED"] += 1
             sim.kick(PENDING_KICKS.pop(0))
@@ -434,7 +445,7 @@ def suite(path):
     # fine, still cannot pass a ratio test against its own floor -- v10 saw this.
     strength = [math.sqrt(sum(v * v for v in S.SHAPE[i])) for i in range(n_ch)]
     sensing = [i for i in range(n_ch) if strength[i] > 0]
-    typical = sorted(strength[i] for i in sensing)[len(sensing) // 2]
+    typical = median(strength[i] for i in sensing)
     weak = [i for i in sensing if strength[i] < 0.5 * typical]
     live = [i for i in on if i in sensing]
     solid = [i for i in live if i not in weak]      # enabled, sensing, full gain
@@ -879,9 +890,7 @@ def suite(path):
                     ki=info["ki"], kd=info["kd"],
                     sensor_gain=[1.0] * (n_ch - 1) + [0.0])
         blind_ch = [n_ch - 1]
-    _b = sorted(nosig["baseline0"][i] for i in on) or sorted(nosig["baseline0"])
-    med = (_b[len(_b) // 2] if len(_b) % 2
-           else 0.5 * (_b[len(_b) // 2 - 1] + _b[len(_b) // 2]))
+    med = median([nosig["baseline0"][i] for i in on] or nosig["baseline0"])
     note(f"  baselines {' '.join(f'ch{i}={b:.4f}V' for i, b in enumerate(nosig['baseline0']))}"
          f"  (median over enabled {med:.4f}V)")
     survivors = [i for i in on if i not in blind_ch]
@@ -928,9 +937,7 @@ def suite(path):
         loud = run("same rig, the 2026-08-04 interference amplitude", 40,
                    ship_en, shipped, ki=info["ki"], kd=info["kd"],
                    plant={"line_scale": 10.0}, until_baseline=True)
-        lb = sorted(loud["baseline0"][i] for i in on)
-        lmed = (lb[len(lb) // 2] if len(lb) % 2
-                else 0.5 * (lb[len(lb) // 2 - 1] + lb[len(lb) // 2]))
+        lmed = median(loud["baseline0"][i] for i in on)
         kept_loud = [i for i in blind_ch
                      if loud["baseline0"][i] >= S.osem.BASELINE_FLOOR_FRAC * lmed]
         check("KNOWN LIMIT baseline-floor: the demotion depends on how loud the "
@@ -1128,12 +1135,13 @@ def suite(path):
     nch_ = len(S.osem.ENABLE_CHANNEL)
     tctl = S.osem.Controller(S.FakeDAC())
     dtw, rest = 1.0 / S.SAMPLE_HZ, 615.0
+    tone = S.MODE_F0[0]          # the loaded body's own first mode, never a copy
 
     def _feed(ctl, t0, secs, torn=None):
         pk, t = 0.0, t0
         for k in range(int(secs * S.SAMPLE_HZ)):
             t = t0 + k * dtw
-            c = [float(round(rest + 40.0 * math.sin(2 * math.pi * 1.046 * t + 0.3 * i)))
+            c = [float(round(rest + 40.0 * math.sin(2 * math.pi * tone * t + 0.3 * i)))
                  for i in range(nch_)]
             if torn is not None and k == 0:
                 c[0] = float(torn)
@@ -1186,7 +1194,7 @@ def suite(path):
         for k in range(int(3.0 * S.SAMPLE_HZ)):
             t = k * dtw
             c = [float(min(1023, max(0, round(rest + 400.0 * math.sin(
-                2 * math.pi * 1.046 * t + 0.3 * i))))) for i in range(nch_)]
+                2 * math.pi * tone * t + 0.3 * i))))) for i in range(nch_)]
             loud.step(c, [x * (S.osem.A_VCC / S.osem.ADC_MAX_COUNTS) for x in c],
                       t, dtw)
         check("FIXED persist-baseline: a stored floor that disagrees with the "

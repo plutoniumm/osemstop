@@ -1,81 +1,80 @@
 """
-pyDAC2 -- a fire-and-forget variant of pyDAC, for system identification.
-========================================================================
-Same board, same wire, same 0..2.5 V limits. One difference, and it is the whole
-reason this file exists:
+pyDAC2 -- the fire-and-forget serial transport for this rig.
 
-    pyDAC.set_voltage()  writes SET, then READS UP TO 50 LINES waiting for the
-                         `OK` ack -- and every one of those lines is a stream
-                         sample that is thrown away.
-
-Measured on the bench, 2026-08-06, eight coils at 100 Hz on the same board and
-the same firmware:
+`set_voltage` writes and returns: no readline, no ack. Its acked predecessor read
+up to 50 lines waiting for `OK`, and every one of those lines was a stream sample
+thrown away. Measured 2026-08-06, eight coils at 100 Hz, same board and firmware:
 
     stream alone, no coils driven .................. 904 rows/s
     eight coils, fire-and-forget (this class) ...... 862 rows/s
-    eight coils, one acked SET each (pyDAC) ........  23 Hz loop,
+    eight coils, one acked SET each ................  23 Hz loop,
                                                      289 samples/s discarded
 
-For a damping controller that is bad. For system identification it is fatal:
-every method here correlates a known excitation against the response, so
-throwing away 37 samples out of 38 destroys both the SNR and the phase.
+For a damping controller that is bad; for system identification it is fatal --
+every method here correlates a known excitation against the response, and
+throwing away 37 samples of 38 destroys both the SNR and the phase.
 
-    FastDAC.set_voltage()  writes and returns. No readline, no print.
+WHAT YOU GIVE UP is the `OK`/`ERR` echo, and since 2026-08-06 this class tells
+the FIRMWARE to stop sending it (`ACK 0`), which is worth more than not reading
+it. That is safe because `ERR` was only ever returned for a malformed command or
+a channel out of range -- both rejected locally before the write -- and the
+firmware clamps voltage to 0..2.5 V itself. A malformed command still gets `ERR`.
 
-WHAT YOU GIVE UP. The `OK`/`ERR` acknowledgement -- and as of 2026-08-06 this
-class tells the FIRMWARE to stop sending it at all (`ACK 0`), which is worth
-more than not reading it. The echo is `OK ch=N v=D.DDDD\r\n`, 19 bytes, and it
-travels on the SAME wire as the sample stream. Eight coils at 100 Hz is 800
-echoes/s = 15.2 kB/s, against a 50 kB/s wire that the stream already wants
-30 kB/s of. Not reading them never stopped them being sent. `ERR` is still
-emitted for a malformed command, so genuine faults are not silenced.
+BANDWIDTH -- CORRECTED 2026-08-20. `SET` does NOT take bandwidth from the stream:
+the UART is FULL DUPLEX, so host->board bytes cost the board CPU time to parse
+and nothing else. That is why turning the echo off is the change that matters and
+compressing the command is not. What binds is the DOWNSTREAM stream. At 115200
+8N1 the wire carries 11.52 kB/s each way, and an ASCII row measured off it,
+`563,632,914,668,670,534,588,586\r\n`, is exactly 32 bytes -- so 352 Hz is
+11.3 kB/s, about 98 % of the link on its own, before a single coil writes. The
+20-byte binary frame below is 7.0 kB/s at the same rate, 61 %.
 
-That trade is acceptable and not a silent one:
+Earlier revisions of this header costed the echo against "a 50 kB/s wire"; that
+was the 500000-baud board and is wrong here. The conclusion is unchanged.
 
-  * `ERR` was only returned for a malformed command or a channel > 7, both of
-    which are argument errors this class already rejects locally before writing;
-  * the firmware clamps voltage to 0..2.5 V itself, so an out-of-range value
-    cannot damage anything even if it got through;
-  * `pyDAC`'s own caller already treats the ack as optional -- the shipping
-    `RateLimitedActuator.send()` catches the RuntimeError raised when no ack
-    arrives and moves on, because "the next sample resends".
-
-BANDWIDTH. `SET` shares one wire with the stream -- but only in the sense that
-the BOARD'S REPLIES do. The UART is full duplex: host->board bytes cost the
-board CPU time to parse, they do not take bandwidth from the sample stream.
-That is why turning the echo off is the change that matters and why compressing
-the command itself is not. See `bench/20260806/firmware_timing.md`.
+Achieved rates, 8 channels at 115200: ASCII 418-435 Hz (2026-08-17), 350-352 Hz
+undriven and 226.5 Hz the instant four coils start writing (2026-08-20,
+data/20260820_171242_fast_lock.csv); binary 581 Hz held through damping
+(data/20260820_180344). See `bench/20260806/firmware_timing.md`.
 """
 
 import time
 
 import serial
 
-BAUD = 500000                            # see pyDAC.BAUD for why it is not 230400
+BAUD = 115200                            # MEASURED on the attached board, not chosen.
+# 2026-08-17, official Mega 2560 R3 at /dev/cu.usbmodem11101 (VID:PID 2341:0042):
+# 115200 returns a clean b'READY\r\n'; 500000 returns framing garbage
+# (b'\x80\x80xx\x00x\x00x\x00x\x80xx\x00\x80x'). This default was 500000 until
+# 2026-08-20, and arduino.ino's BAUD_HZ moved with it. That cost most of an
+# afternoon: at the wrong rate both transports scan 200 lines at a 2 s timeout --
+# up to 400 s of total silence with nothing printed, indistinguishable from a hung
+# program. `probe_baud` is the authority; this is only what is tried first.
+# NOTE: 230400 is a TRAP on a 16 MHz AVR -- -3.55% error, outside the receiver's
+# tolerance. arduino.ino has the divisor table and the 2026-08-06 bench evidence.
 
-# What a board might actually be running at, most likely first. THE RATE IS NOT A
-# PROPERTY OF THIS REPO: arduino.ino boots at BAUD_HZ = 500000 but also carries a
-# `BAUD` command so the ladder can be re-measured without a reflash, so the live
-# rate is a property of what was last done to that board. Measured 2026-08-17 on
-# the Mega 2560 R3 at /dev/cu.usbmodem11101: READY at 115200, framing garbage at
-# 500000, i.e. the flashed sketch is not the arduino.ino in this tree.
+# MOST LIKELY FIRST, because the order is what bounds the worst-case silence.
+# 500000 stays on the list because a DIFFERENT board ran it: 1024-1113 Hz measured
+# 2026-08-06 (versions.md) on the CH340/FTDI-bridge board at
+# /dev/cu.usbserial-1120. THE RATE IS NOT A PROPERTY OF THIS REPO -- arduino.ino
+# boots at BAUD_HZ but also carries a `BAUD` command, so the live rate is a
+# property of what was last done to that board.
 #
 # This list and `probe_baud` live HERE, in the transport that owns BAUD, and not
 # in each tool. bench.py and harness.py once carried a version-discovery regex
 # each, the copies drifted, and `make run` silently could not see osem.v5.5.py --
 # `ladder.py` exists because of it. One owner.
-BAUD_CANDIDATES = (500000, 115200, 230400, 57600, 9600)
+BAUD_CANDIDATES = (115200, 500000, 230400, 57600, 9600)
 
 
 def probe_baud(port, candidates=BAUD_CANDIDATES, seconds=2.0, reset_s=2.2,
                log=print):
     """The baud this board is actually talking at, or None.
 
-    WHY THIS IS NOT OPTIONAL. `FastDAC.__init__` and `DACController` both scan up
-    to 200 lines for READY with a 2 s serial timeout, so at the wrong rate they
-    block for up to 400 SECONDS printing nothing, and the symptom is
-    indistinguishable from a hung program. That cost most of a bench session on
-    2026-08-17. Bounded, and it says what it heard.
+    WHY THIS IS NOT OPTIONAL. `FastDAC.__init__` scans up to 200 lines for READY
+    at a 2 s serial timeout, so at the wrong rate it blocks for up to 400 SECONDS
+    printing nothing -- indistinguishable from a hung program, and that cost most
+    of a bench session on 2026-08-17. Bounded, and it says what it heard.
     """
     for baud in candidates:
         try:
@@ -116,18 +115,15 @@ def resolve_baud(port, log=print):
             "  Try `make arduino`."
             % ", ".join("%d" % b for b in BAUD_CANDIDATES))
     if found != BAUD:
-        log("  NOTE: the sketch is at %d, not the %d this tree declares."
+        log("  NOTE: the sketch is at %d, not the %d this tree declares -- using"
             % (found, BAUD))
-        log("  Using %d. `make arduino` would reflash it to %d and restore the"
-            % (found, BAUD))
-        log("  measured 1024-1113 Hz wire rate; %d gives about 420 Hz on 8"
-            % found)
-        log("  ASCII channels, which is still well above the 100 Hz control clock.")
+        log("  %d. `make arduino` reflashes it to %d." % (found, BAUD))
     BAUD = found
     return found
 
+NCH = 8                                  # arduino.ino's NCH; the board sends all
 SYNC0, SYNC1 = 0xA5, 0xC3                # both have bit 7 set: never in ASCII
-FRAME_LEN = 20                           # sync sync seq + 8*uint16 LE + cksum
+FRAME_LEN = 3 + 2 * NCH + 1              # sync sync seq + NCH*uint16 LE + cksum
 
 
 def drain_input(ser, limit=2.0):
@@ -150,37 +146,28 @@ def drain_input(ser, limit=2.0):
 
 
 class FastDAC:
-    """Transport for the identification runs, and from v11 for the eight-channel
-    controller as well.
+    """Transport for the identification runs and for the eight-channel controller.
 
-    v3..v10.5 ship against `pyDAC.DACController` and are validated with it, and
-    that stays true -- nothing here changes them. What changed on 2026-08-06 is
-    that the ack stopped being an inefficiency and became a stability problem:
-    the measured loop rate falls with the number of coils driven -- 73 Hz on one,
-    23.5 Hz on four, 12.5 Hz on eight (`analysis/out/loop_rate.csv`) -- and at
-    12.5 Hz the phase margin at 3.75 Hz is 45.5 deg against 73.5 deg at four
-    coils (`analysis/out/phase_budget.csv`). An eight-channel loop cannot afford
-    it. See osem.v11.py."""
+    The ack is not merely an inefficiency, it is a stability problem: measured
+    2026-08-06 the loop rate falls with the number of coils driven -- 73 Hz on
+    one, 23.5 Hz on four, 12.5 Hz on eight (`analysis/out/loop_rate.csv`) -- and
+    at 12.5 Hz the phase margin at 3.75 Hz is 45.5 deg against 73.5 deg at four
+    coils (`analysis/out/phase_budget.csv`)."""
 
     VMIN_HW, VMAX_HW = 0.0, 2.5          # what the firmware itself clamps to
 
     def __init__(self, port, baud=None, timeout=2.0, binary=False, ack=False):
-        # baud=None, NOT baud=BAUD. A default argument is evaluated when the
-        # function is DEFINED, so `baud=BAUD` freezes whatever BAUD was at
-        # import and `resolve_baud` setting the module global afterwards would
-        # silently have no effect -- the probe would report 115200 and the open
-        # would still go out at 500000. Read it at call time.
+        # baud=None, NOT baud=BAUD: a default argument is evaluated at DEFINITION,
+        # so `baud=BAUD` would freeze the import-time value and `resolve_baud`
+        # setting the module global afterwards would silently do nothing.
         baud = BAUD if baud is None else baud
         self.ser = serial.Serial(port, baud, timeout=timeout)
-        self.binary = False              # set for real below, after the handshake
         time.sleep(2)                    # the board resets when the port opens
-        # Scan for READY rather than demanding it on line 1 -- the same defect,
-        # and the same fix, that `DACController` already carries. Opening the
-        # port toggles DTR and resets the board, but whatever the board sent
-        # BEFORE that reset is still sitting in the OS buffer and arrives first,
-        # so a board left streaming makes a healthy rig look dead. READY is
-        # emitted after the reset and is therefore always at the END of that
-        # backlog.
+        # SCAN for READY rather than demanding it on line 1. Opening the port
+        # toggles DTR and resets the board, but whatever the board sent BEFORE
+        # that reset is still in the OS buffer and arrives first, so a board left
+        # streaming makes a healthy rig look dead. READY is emitted after the
+        # reset, i.e. always at the END of that backlog.
         for _ in range(200):
             if self.ser.readline().decode(errors="replace").strip() == "READY":
                 break
@@ -189,8 +176,8 @@ class FastDAC:
                 "Arduino never sent READY on %s at %d baud (scanned 200 lines). "
                 "Wrong port, board not flashed, or the sketch is at a different "
                 "baud -- reflash with `make arduino`. Note that 230400 does NOT "
-                "work on a 16 MHz AVR; see pyDAC.BAUD." % (port, baud))
-        # Land in a known state, as DACController does.
+                "work on a 16 MHz AVR; see arduino.ino's divisor table." % (port, baud))
+        # Land in a known state.
         self.ser.write(b"STOP\n")
         time.sleep(0.2)
         drain_input(self.ser)
@@ -217,14 +204,19 @@ class FastDAC:
                  "" if ack else ", ack off"))
 
     # ---- output ----------------------------------------------------------
-    def set_voltage(self, channel, voltage):
-        """Write and return. Validated locally, since nothing checks for us."""
-        if not (0 <= int(channel) <= 7):
-            raise ValueError("Channel must be 0-7")
+    def _cmd(self, channel, voltage):
+        """One SET line, validated locally: with the ack off nothing checks for us."""
+        c = int(channel)
+        if not 0 <= c < NCH:
+            raise ValueError("Channel must be 0-%d" % (NCH - 1))
         v = float(voltage)
         if not (self.VMIN_HW <= v <= self.VMAX_HW):
-            raise ValueError("Voltage must be 0.0-2.5 V, got %.4f" % v)
-        self.ser.write(b"SET %d %.4f\n" % (int(channel), v))
+            raise ValueError("Voltage must be %.1f-%.1f V, got %.4f"
+                             % (self.VMIN_HW, self.VMAX_HW, v))
+        return b"SET %d %.4f\n" % (c, v)
+
+    def set_voltage(self, channel, voltage):
+        self.ser.write(self._cmd(channel, voltage))
         self.writes += 1
 
     def set_many(self, channels, volts):
@@ -232,12 +224,7 @@ class FastDAC:
         syscall and no chance of the stream interleaving mid-command."""
         buf = bytearray()
         for c, v in zip(channels, volts):
-            if not (0 <= int(c) <= 7):
-                raise ValueError("Channel must be 0-7")
-            v = float(v)
-            if not (self.VMIN_HW <= v <= self.VMAX_HW):
-                raise ValueError("Voltage must be 0.0-2.5 V, got %.4f" % v)
-            buf += b"SET %d %.4f\n" % (int(c), v)
+            buf += self._cmd(c, v)
         self.ser.write(bytes(buf))
         self.writes += len(channels)
 
@@ -281,10 +268,8 @@ class FastDAC:
     def read_sample(self, ncols):
         """One row of `ncols` ints, or None.
 
-        Returns None rather than raising for an ack echo, a partial line or a
-        short row -- the caller is in a tight acquisition loop and a dropped row
-        is normal. `OK`/`ERR` lines are the acks nobody is reading any more
-        (and, since 2026-08-06, the acks the board is no longer even sending).
+        None rather than an exception for an ack echo, a partial line or a short
+        row: the caller is in a tight acquisition loop and a dropped row is normal.
         """
         if self.binary:
             return self._read_binary(ncols)
@@ -302,15 +287,13 @@ class FastDAC:
             return None
 
     # -- binary framing ----------------------------------------------------
-    # A5 C3 | seq | a0.lo a0.hi .. a7.lo a7.hi | cksum        -- 20 bytes
-    #
-    # Both sync bytes have bit 7 set, so the sync word can never occur inside
-    # the ASCII replies, which are still ASCII in binary mode. `seq` wraps at
-    # 256 and lets us COUNT losses instead of guessing at them. cksum is
-    # (seq + sum of the 16 payload bytes) & 0xFF; combined with the structural
-    # check that every sample is <= 1023 a false resync is not a practical
-    # worry. Fixed length + sync + checksum is what makes this recoverable:
-    # lose a byte and the reader rescans and is back in step within one frame.
+    # A5 C3 | seq | a0.lo a0.hi .. a7.lo a7.hi | cksum, matching arduino.ino.
+    # Both sync bytes have bit 7 set, so the sync word can never occur inside the
+    # replies, which stay ASCII in binary mode. `seq` wraps at 256 and lets us
+    # COUNT losses rather than guess at them. cksum is (seq + sum of the payload
+    # bytes) & 0xFF; with the structural check that every sample is <= 1023 a
+    # false resync is not a practical worry, and fixed length + sync + checksum
+    # is what makes it recoverable inside one frame.
     def _read_binary(self, ncols):
         k = self.ser.in_waiting
         if k:
@@ -327,11 +310,11 @@ class FastDAC:
                 del b[:i]
                 return None
             fr = bytes(b[i:i + FRAME_LEN])
-            if (fr[2] + sum(fr[3:19])) & 0xFF != fr[19]:
+            if (fr[2] + sum(fr[3:FRAME_LEN - 1])) & 0xFF != fr[FRAME_LEN - 1]:
                 self.badframes += 1
                 del b[:i + 1]            # false sync: step past and rescan
                 continue
-            vals = [fr[3 + 2 * j] | (fr[4 + 2 * j] << 8) for j in range(8)]
+            vals = [fr[3 + 2 * j] | (fr[4 + 2 * j] << 8) for j in range(NCH)]
             if any(v > 1023 for v in vals):
                 self.badframes += 1
                 del b[:i + 1]

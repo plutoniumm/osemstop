@@ -1,21 +1,50 @@
 # OSEM suspension damping
 
 A three-layer control stack that damps a suspended optic using OSEM (Optical Sensor
-and Electro-Magnetic actuator) shadow sensors. Eight OSEMs are connected; as of
-the 2026-08-17 census **five** (a0–a4) carry usable in-band signal, and the four
-coils behind a0–a3 push back. The whole thing is one closed loop split across a
-language boundary:
+and Electro-Magnetic actuator) shadow sensors. Eight OSEMs are connected and all
+eight ADC inputs are live as of 2026-08-20 (a5 recovered that day after months as
+a hard-grounded pin). Four coils, behind a0-a3, do the damping. The whole thing is
+one closed loop split across a language boundary:
 
 ```
 arduino.ino (Arduino firmware)     <-- SPI --> AD5628 octal DAC --> coils
    ^  |                                                              |
-   |  | serial, rate set on the BOARD (115200 on 08-17)              v
+   |  | serial, 115200 8N1, ASCII or 20-byte binary frames           v
    |  v                                                      suspended optic
-pyDAC.py (DACController: transport)                                   |
+pyDAC2.py (FastDAC: transport)                                        |
    ^  |                                                               |
    |  v                                                    OSEMs --> A0..A7
 osem.<name>.py (control law, safety, logging) <-- analogRead ----------'
 ```
+
+## Where it stands, 2026-08-20
+
+**The diagonal law works.** `LOCKED` **12.8 s** after gain, all four Phi channels
+holding **ratio 0.01-0.07** -- 50-100x below the zero-gain baseline, and the best
+result on this rig. Reproduced three times the same evening (12.4 / 12.5 / 12.8 s).
+
+**What had been wrong since the beginning: the gain sign was inverted on every
+driven channel.** Dissipation requires `slope x gain > 0`, because
+`Pid.terms` sets `p = gain x (-vel)` so the power delivered is
+`-slope x gain x vel^2`. The shipped gains carried the negated slope. Measured
+dissipating fraction went **5-23 % -> 90-97 %** once corrected. It survived because
+a0-a3's physical slopes had NEVER been measured -- `slopesign.py` had only ever
+been run on a4-a7, and `SLOPE_SIGN`'s a0-a3 entries were copied from `STEADY_GAIN`
+rather than measured.
+
+**MIMO does not work, and the cause is hardware.** a0 and a1 are **50 % coherent
+at 30-60 Hz**, where the plate does not move, against 0.07-0.09 for every other
+pair. That is a shared electrical line. It leaves the diagonal law untouched --
+`u_j` depends only on `y_j` -- but the modal law inverts Phi ACROSS channels and is
+built entirely from the differences between them. Written up as
+`CLAUDE.md` § *Hardware requests*, REQUEST 2. **`theta` and the budget ramp are
+downstream of MIMO and are blocked behind the same fault.**
+
+**Run `preflight.py` before energising a coil.** It checks the dissipation
+condition, per-mode dissipation of the diagonal law, eta/theta consistency, the
+A_DC-to-Phi pairing, `modal.json`, and the actuator window -- all without opening
+the port. Three runs on 2026-08-20 failed in ways their own first status line
+already showed.
 
 ## What each rung actually measured
 
@@ -49,7 +78,7 @@ damping. Where a rung has no number it says so rather than borrowing one.
 | `epsilon` | + Kalman velocity, Ki = 0 | **not measured** — never on the rig | **not measured** — never on the rig |
 | `zeta` | the modal law, Φ/A from `data/modal.json` | **modal 0.0197 /s**, r² 0.33, 1 kick (`data/20260817_193855`, 0 % FAULT). **Diagonal 0.0253 / 0.1072 / 0.0305 /s**, median **0.0305**, r² 0.57–0.78, 3 kicks (`data/20260817_194128`, 98.7 % DAMPING, **0 % FAULT**). Both sets pass the state check | modal **0.0133** (r² 0.23); diagonal **0.0278 / 0.0305** (r² 0.61 / 0.78) — the same events, found independently |
 | `eta` | modal + one 14-state filter whose state is the modal coordinates | **median 0.1093 /s** of 0.0624 / 0.1093 / 0.1098, r² 0.42–0.92, matched peaks 6.33 / 6.52 / 7.33 — 2026-08-18 02:43, `data/20260818_024240_jerk_eta.log`, **the first complete valid kick set on this rig**: 7 channels live, no faults, one further kick correctly refused. **15x the free plant.** Also **0.1355 /s**, r² 0.944, 1 kick of 4 on `data/20260817_213642` (56 % FAULT). First rung ever to print `LOCKED` (20.7 s, DEGRADED, warm start) | **median 0.0950 /s**, spread 0.0241–0.1609 over **11** transients in 5 runs, median r² 0.83 — much the largest usable population on the rig, and it brackets the commanded number |
-| `theta` | the same law as a bank of causal FIR kernels | **not measured** — never on the rig. At `KERNEL_PHASE_DEG = [0,0,0]` it is bit-identical to `eta`, max \|du\| **0.000e+00 V** over 30 000 samples (simulator) | **not measured** — never on the rig |
+| `theta` | eta's law under ONE declared actuator budget, divided among four claimants by need | **not measured** — never on the rig. At `BUDGET_TILT = 0` it is bit-identical to `eta`, max \|du\| **0.000e+00 V** over 30 000 samples (simulator), states and modal ON/OFF agreeing at every sample. **The budget has never moved** — tilt ships at 0 and nothing has run above it | **not measured** — never on the rig |
 
 **Best measured on this rig is `eta`'s commanded 0.1093 /s, and it is modal.** The
 free plant is 0.0072 /s (τ > 138 s, `analysis/ringdown.md`), so that is **15x**.
@@ -1012,9 +1041,6 @@ checked without hardware.
 ```bash
 make scope            # 8-channel scope: the real board, or a live run's CSV
 make check            # the behavioural suite, headless, every version
-make test             # interactive terminal runner: pick a version, watch it
-                      # damp, press x to kick the optic
-make check            # the behavioural suite, headless, every version
 make list             # what versions exist
 ```
 
@@ -1067,7 +1093,7 @@ neither can the interlocks:
 | `arduino.ino` | Arduino sketch: ADC stream + AD5628 SPI |
 | `bench.py` | the on-hardware entry point: `make run`, `make arduino`, `make ports` |
 | `harness.py` | one entry point for everything off the bench |
-| `sim/`, `test/` | simulated plant + browser UI; interactive runner |
+| `sim/` | simulated plant + browser UI |
 | `bench/`, `data/` | bench-session scripts and console logs; raw CSV/JSON from every run |
 | `versions.md` | what each version changes, the state machine and hazards, and the bench results |
 | `CLAUDE.md` | pending bench work, what is **not** established, and where the constants came from. `provenance.md` and `research.md` were folded into it and deleted 2026-08-17 |

@@ -34,11 +34,33 @@
 // because bench.py's preflight only checks for READY, so it passes, and the
 // controller then sits waiting for a stream that never starts.
 //
-// So: use only rates where the error is 0.00%. BAUD_HZ is one of those, and
-// the `BAUD` command exists so the ladder can be re-measured without a reflash
+// THE DIVISOR TABLE IS NOT THE WHOLE STORY, AND THE BENCH OVERRULED IT.
+// The rule used to read "use only rates where the error is 0.00%", and BAUD_HZ
+// was 500000 on that argument until 2026-08-20. Measured 2026-08-17 on the
+// official Mega 2560 R3 at /dev/cu.usbmodem11101 (VID:PID 2341:0042):
+//
+//      115200   ->  clean `READY\r\n`          (+2.12% by the table above)
+//      500000   ->  framing garbage            (0.00% by the table above)
+//                   b'\x80\x80xx\x00x\x00x\x00x\x80xx\x00\x80x'
+//
+// +2.12% is inside the receiver's tolerance -- by the stop bit the sampling
+// point has walked ~21% of a bit period, against the ~34% that made 230400
+// fail -- so 115200 working is consistent with the table. 500000 failing is
+// NOT, and the cause is not established here: it is upstream of the USART,
+// in the ATmega16U2 bridge or the host driver, neither of which is in this
+// repo. A DIFFERENT board did run it -- 1024-1113 Hz at 500000 on 2026-08-06,
+// on the CH340/FTDI-bridge board at /dev/cu.usbserial-1120 (versions.md).
+//
+// Cost of leaving BAUD_HZ at a rate this board cannot use: `make arduino` would
+// flash a sketch nobody can then talk to at the probed rate. Cost of 115200:
+// 418-435 Hz with 8 ASCII channels against 1024-1113 at 500000 -- still 4.2x
+// the 100 Hz control clock and inside the range `decimate` was validated at
+// (347 Hz), so the throughput is not binding.
+//
+// The `BAUD` command exists so the ladder can be re-measured without a reflash
 // (the board resets when the host opens the port, so a wrong guess self-heals).
 //
-// THE HOST MUST MATCH -- pyDAC.py and pyDAC2.py carry the same default.
+// THE HOST MUST MATCH -- pyDAC2.py carries the same default and probes anyway.
 // Reflash with `make arduino`.
 //
 // ---------------------------------------------------------------------------
@@ -77,7 +99,8 @@
 #define NCH 8
 
 // ---- boot defaults ---------------------------------------------------------
-static const uint32_t BAUD_HZ = 500000UL;   // 0.00% error at 16 MHz; see above
+static const uint32_t BAUD_HZ = 115200UL;   // +2.12% at 16 MHz, and MEASURED to work;
+                                           // 500000 is 0.00% and measured NOT to. See above.
 
 // ADC clock = F_CPU / prescaler. The datasheet specifies 50-200 kHz for full
 // 10-bit accuracy, and Arduino's default of 128 (125 kHz) sits inside that.

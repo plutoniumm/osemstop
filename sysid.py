@@ -1,24 +1,22 @@
 """
-sysid.py -- the measurement engine behind osem.v6*.py.
-======================================================
-These are NOT controllers. They damp nothing. They drive the coils with a known
-excitation and record what the OSEMs do, to recover the **actuation matrix** --
-how much each coil pushes each degree of freedom. `research.md` item 2 (modal /
-MIMO damping) has exactly one unmet prerequisite and this is it.
+sysid.py -- the measurement engine behind osem.sysid.py.
+========================================================
+NOT a controller. It damps nothing. It drives the coils with a known excitation
+and records what the OSEMs do, to recover the **actuation matrix** -- how much
+each coil pushes each degree of freedom. That is `A`, and CLAUDE.md Sec 3 is
+still open on its MAGNITUDES.
 
-WHY THIS IS A SHARED MODULE, against the rest of the repo's convention. Every
-`osem.vN.py` is standalone and imports nothing, because a bench comparison of two
-controllers has to compare two things that both actually ran, byte for byte. That
-argument is about CONTROLLERS. These four front-ends are instruments: they differ
-only in channel count and excitation, and four copies of one lock-in would be
-four places for the same bug. The front-ends stay thin and this holds the maths.
+The front-end (`osem.sysid.py`) stays thin and the maths lives here: the
+front-ends differ only in channel count and excitation, and a copy of the lock-in
+per front-end would be one place per front-end for the same bug. (The rule this
+once broke -- "every controller is standalone" -- was dropped repo-wide on
+2026-08-17; the machinery now lives in `stdlib.py`.)
 
 TWO METHODS
 -----------
 `stepped()`  one coil at a time, one frequency at a time. Nothing to
              disentangle: while coil j is driving, no other coil is. Slow, and
-             completely assumption-free. This is the bench standard and what
-             `research.md` recommends.
+             completely assumption-free. This is the bench standard.
 
 `multisine()` all coils at once, but each coil gets its own INTERLEAVED comb of
              frequency bins -- coil c drives bins c, c+C, c+2C, ... So at any
@@ -52,12 +50,30 @@ from datetime import datetime
 
 import numpy as np
 
+import stdlib
+
 A_VCC, ADC_MAX_COUNTS = 5.02, 1023
-BIAS_V = 0.25                       # coil operating point; see CLAUDE.md item 3
-VMIN, VMAX = 0.0, 0.5               # the controllers' self-imposed window
-RAIL_LOW, RAIL_HIGH = 12, 1011      # raw counts, same as the controllers use
+BIAS_V = 0.25                       # coil operating point; see CLAUDE.md Sec 3
+# THIS TOOL'S OWN WINDOW, and it is deliberately narrower than the ladder's. The
+# rungs opened to VMIN, VMAX = 0.0, 2.5 on 2026-08-20 because a closed loop was
+# clipping; this runs OPEN LOOP with nothing damping, so it stays at the
+# long-standing 0.0-0.5 V until somebody measures what the coil driver tolerates
+# (CLAUDE.md Sec 11 -- that circuit is not in this repo).
+VMIN, VMAX = 0.0, 0.5
+RAIL_LOW, RAIL_HIGH = 12, 1011      # raw counts, same as the ladder uses
 
 COUNTS_TO_V = A_VCC / ADC_MAX_COUNTS
+
+
+def park(dac, chans):
+    """Every named coil back to this module's BIAS_V."""
+    park_at(dac, chans, [BIAS_V] * len(chans))
+
+
+def park_at(dac, chans, volts):
+    """Per-coil park. `stdlib.park` owns the best-effort loop, so a closing port
+    cannot raise out of a `finally` and leave the rest of the coils energised."""
+    stdlib.park(dac, chans, volts)
 
 
 # --------------------------------------------------------------------------
@@ -183,8 +199,8 @@ def lockin(t, y, f):
     Synchronous detection against both quadratures at once: the real and
     imaginary parts ARE the two quadratures, so magnitude and phase both fall
     out and the sign never depends on having guessed a quadrature in advance --
-    which is the specific mistake that produced the wrong actuation matrix last
-    time (`research.md` item 2, cause 1).
+    which is the specific mistake that produced the wrong actuation matrix on the
+    first attempt.
     """
     if len(t) < 8:
         return 0j
@@ -235,7 +251,7 @@ def stepped(dac, ncols, coils, dac_map, freqs, amp, dwell, settle, log=print,
             for i in range(ncols):
                 H[fi, i, cj] = lockin(t, c[:, i] * COUNTS_TO_V, f) / U
             ok[fi, :, cj] = ~bad
-        _park(dac, [dac_map[c] for c in coils])
+        park(dac, [dac_map[c] for c in coils])
     return H, ok
 
 
@@ -289,7 +305,7 @@ def multisine(dac, ncols, coils, dac_map, freqs, amp, duration, update_hz,
             rec.mark("record", -1, -1.0)
         t, counts, u = acquire(dac, ncols, duration, drive, chans, update_hz,
                                rec=rec)
-        _park(dac, chans)
+        park(dac, chans)
         log("    %d samples, %.1f Hz effective"
             % (len(t), len(t) / max(t[-1] if len(t) else 1.0, 1e-9)))
         bad = railed(counts)
@@ -305,11 +321,6 @@ def multisine(dac, ncols, coils, dac_map, freqs, amp, duration, update_hz,
                     H[fi, i, c] = lockin(t, counts[:, i] * COUNTS_TO_V, f) / U
                 ok[fi, :, c] = ~bad
     return H, ok
-
-
-def _park(dac, chans):
-    for ch in chans:
-        dac.set_voltage(ch, BIAS_V)
 
 
 def snap_bins(lo, hi, n, duration):

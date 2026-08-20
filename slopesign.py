@@ -25,7 +25,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import status  # noqa: E402
 
 V_LO, V_HI = 0.10, 0.40        # CLAUDE.md Sec 6's own voltages
-DWELL = 12.0                   # 8.7 periods of the slowest mode (0.722 Hz)
+# Long enough that the ring is zero-mean about the new equilibrium: 8.7 periods
+# of the slowest mode. Derived from status.MODES, not copied -- the modes moved
+# 0.0170 Hz in 11 days and a stale period silently shortens the average.
+DWELL = round(8.7 / min(f for _, f in status.MODES), 1)
 SETTLE = 3.0
 
 
@@ -34,14 +37,14 @@ def main():
     ap.add_argument("--coils", default="4,5,6,7")
     ap.add_argument("--port", default=os.environ.get("PORT"))
     ap.add_argument("--dwell", type=float, default=DWELL)
-    a = ap.parse_args()
+    args = ap.parse_args()
     try:
         sys.stdout.reconfigure(line_buffering=True)
     except Exception:
         pass
-    coils = [int(x) for x in a.coils.split(",") if x.strip() != ""]
+    coils = [int(x) for x in args.coils.split(",") if x.strip() != ""]
 
-    port = status.resolve_port(a.port)
+    port = status.resolve_port(args.port)
     baud = status.probe_baud(port)
     rec = status.Recorder("slopesign")
     dac = None
@@ -53,7 +56,7 @@ def main():
         t, c, _, _ = status.acquire(dac, rdr, rec, 6.0, guard=False)
         print("\n  resting: %s" % " ".join("%6.1f" % v for v in c.mean(axis=0)))
         print("\n  d(counts)/d(bias), %.2f -> %.2f V, one coil at a time, %.0f s each."
-              % (V_LO, V_HI, a.dwell))
+              % (V_LO, V_HI, args.dwell))
         print("        " + "".join("%9s" % ("a%d" % i) for i in range(8)))
         D = np.full((8, 8), np.nan)
         blocks = {}
@@ -62,11 +65,11 @@ def main():
             for v in (V_HI, V_LO):
                 rec.mark("dc", j, -1.0, v - status.BIAS_V)
                 dac.set_voltage(status.DAC_MAP[j], status.clamp(v))
-                t, c, _, _ = status.acquire(dac, rdr, rec, a.dwell, None, j,
+                t, c, _, _ = status.acquire(dac, rdr, rec, args.dwell, None, j,
                                             guard=False, hold_v=v)
                 got.append(c.mean(axis=0) if len(c) else np.full(8, np.nan))
                 if len(c):
-                    n = max(int(len(c) / max(a.dwell, 1)), 1)     # ~1 s blocks
+                    n = max(int(len(c) / max(args.dwell, 1)), 1)  # ~1 s blocks
                     nb = len(c) // n
                     if nb > 1:
                         blocks[(j, "hi" if v > status.BIAS_V else "lo")] = np.array(
@@ -97,11 +100,11 @@ def main():
             mine = [i for i in MEMBERS[g] if np.isfinite(D[i, j])]
             others = [i for i in range(8) if i not in MEMBERS[g]
                       and np.isfinite(D[i, j])]
-            a = float(np.abs(D[mine, j]).sum()) if mine else 0.0
-            b = float(np.abs(D[others, j]).sum()) if others else 0.0
+            own = float(np.abs(D[mine, j]).sum()) if mine else 0.0
+            other = float(np.abs(D[others, j]).sum()) if others else 0.0
             print("    %d    %-17s %12.1f %12.1f   %5.2f%s"
-                  % (j, g, a, b, a / b if b > 0 else np.inf,
-                     "" if a > b else "   <-- leaks OUT of its group"))
+                  % (j, g, own, other, own / other if other > 0 else np.inf,
+                     "" if own > other else "   <-- leaks OUT of its group"))
 
         print("\n  ==> SLOPE_SIGN, own sensor, with the uncertainty OF THE MEAN")
         print("   The shift is a mean over thousands of samples, so what decides")

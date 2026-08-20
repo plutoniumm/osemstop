@@ -57,22 +57,12 @@ LINES = (0.70, 1.00, 1.65)     # in-band lines, located in sec1
 CONTROL_LINE = 6.09            # the known-coherent out-of-band line (positive control)
 NULL_LINE = 2.30               # in-band, no line there (negative control)
 FG = 20.0                      # uniform grid for spectra / canceller, Hz
-FG_HI = 50.0                   # uniform grid when 6.09 / 12.4 Hz is wanted
 MIN_OPEN_S = 15.0              # shortest usable open-loop window
 LAGS = (0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0)
 
 CACHE = os.path.join(tempfile.gettempdir(), "ligo_passive_phase_cache")
 
 # ---------------------------------------------------------------- loading
-
-
-def _awk(path, cols):
-    """Pull a few columns out of a 100 MB csv without parsing all 108 of them."""
-    head = open(path).readline().strip().split(",")
-    idx = [head.index(c) for c in cols]
-    prog = "NR>1{print " + ' " " '.join("$" + str(i + 1) for i in idx) + "}"
-    out = subprocess.run(["awk", "-F,", prog, path], capture_output=True, text=True).stdout
-    return np.fromstring(out, sep=" ").reshape(-1, len(cols))
 
 
 def load(path):

@@ -87,20 +87,21 @@ drives ON a resonance of a Q > 433 plant.
    continuous time base and the point is retried at half amplitude.
 3. EVERY POINT UNWINDS AND IS CHECKED QUIET, or the next point measures the
    previous point's ringing.
-4. Output stays in the controllers' 0.0-0.5 V window around BIAS = 0.25. That
-   window is itself unsourced (`CLAUDE.md`); this tool does not widen it.
-5. Nothing damps while this runs. All eight coils park on exit, Ctrl+C included.
-   A plain SIGTERM does NOT unwind the `finally` -- use Ctrl+C.
+4. Output stays inside VMIN..VMAX around each channel's own BIAS_CH, and
+   `plan` prints AMP_MAX against the narrowest half-window those leave.
+5. Nothing damps while this runs. All eight coils park on exit: Ctrl+C, SIGTERM
+   and SIGHUP all route through the same unwind (see `main`).
 
 THE UNWIND, AND THE TWO BUGS IN IT, both measured 2026-08-17 and both fixed.
     * RETRYING THE UNWIND PUMPS. There is no feedback in it: the same command is
       reissued against a state now near rest, i.e. a fresh excitation. Residuals
-      grew 0.188 -> 0.277 -> 0.422 V against a 0.259 V peak. `UNWIND_EXTRA = 0`;
-      one unwind, then measure and REPORT the residual per point.
+      grew 0.188 -> 0.277 -> 0.422 V against a 0.259 V peak. `_point` now
+      unwinds ONCE, then measures and REPORTS the residual per point.
     * THE COMPARISON WAS BROKEN. `peak` was a lock-in over the WHOLE ramping
       drive, which averages to about half the end-of-drive amplitude, so
-      `resid <= 0.25*peak` was really `<= 0.125*final` and failed points that had
-      cancelled fine. `peak` is now measured over the last QUIET_S of the drive.
+      `resid <= QUIET_FRAC*peak` was really half that and failed points that
+      had cancelled fine. `peak` is now measured over the last QUIET_S of the
+      drive, the same window and estimator as `resid`.
     The next pass ran with ZERO retries.
 
 THE PULSE fires one Hann impulse on one coil, watches the free ring, and reduces
@@ -152,11 +153,9 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Last-resort fallback only. The comment here used to say "bench.py's autodetect
-# overrides this", which was simply false -- bench.py launches CONTROLLERS and
-# never sees this file, so `make status` was pinned to whatever tty the board
-# happened to enumerate as on 2026-08-15. `resolve_port` below fixes that by
-# reusing bench.py's chooser.
+# Last-resort fallback only -- `resolve_port` reuses bench.py's chooser. A
+# hardcoded port pinned `make status` to whatever tty the board enumerated as on
+# 2026-08-15, which was a different board.
 PORT = "/dev/cu.usbserial-1120"
 NCOLS = 8
 
@@ -164,8 +163,83 @@ A_VCC, ADC_MAX_COUNTS = 5.02, 1023
 COUNTS_TO_V = A_VCC / ADC_MAX_COUNTS
 MID_COUNTS = 511.5
 
-BIAS_V = 0.25
-VMIN, VMAX = 0.0, 0.5                    # the controllers' own window
+# The nominal scalar bias, used only where no coil is in scope (a passive
+# segment's recorded `u`, and `slopesign.py`'s hi/lo label). What is APPLIED is
+# BIAS_CH, per channel, defined below.
+#
+# IT IS DERIVED FROM BIAS_CH AND MUST NOT BE A SEPARATE LITERAL. It was 0.25
+# while BIAS_CH held 0.50, so every passive segment logged `u_v = 0.25` against
+# hardware sitting at 0.50 -- a recorded drive column that disagreed with the
+# rig by 2x, silently, in the file the analysis reads back. Found 2026-08-20 by
+# an audit, not by anything failing. Same bug class as the hand-copied mode
+# frequencies in the census headers, which were also wrong.
+# The nominal is the value MOST coils sit at, not the mean: coil 2 is
+# deliberately offset (see BIAS_CH) and must not drag the nominal with it.
+BIAS_V = 0.50
+
+# PER-CHANNEL BIAS, 2026-08-20, after the coils were re-seated. The bias is a
+# static force, so it sets where each flag sits in its OSEM's shadow, and an
+# OSEM is only linear near half-shadow (MID_COUNTS).
+#
+# 0.50 V is `osem.eta.py`'s BIAS: a coil pass measures A at whatever operating
+# point it runs at, so measuring at a bias the controller never uses produces an
+# A the controller cannot use.
+#
+# EXACT CENTRING IS NOT REACHABLE AT ANY VOLTAGE. Solving
+# `min ||M v - (MID_COUNTS - resting)||^2` over the DC matrix M measured by
+# `slopesign.py` (`data/20260820_155638_status_slopesign.csv`) asks for -6.87 to
+# +7.50 V: M has cond 72.2 (singular values 309.1 / 117.6 / 60.4 / 4.3) and the
+# direction that would centre all four is essentially WARP, which no rigid-body
+# motion produces, so it costs ~72x the voltage of the rigid directions. M also
+# does not extrapolate: fitted over 0.10-0.40 V, it ran ~30 counts optimistic at
+# 0.75 V (predicted 764, measured a2 884.0 -> 794.7 counts, railed 40 % -> 0.4 %).
+BIAS_CH = np.full(NCOLS, 0.50)
+
+# COIL 2 SITS HIGHER, and a2 was vetoing the whole measurement without it. a2
+# rests near 860 counts against `in_guard_band`'s 80..943, i.e. ~83 counts of
+# headroom: measured 2026-08-20, a coil pass at 0.50 V tripped the guard at 963
+# and 972 counts and retried the drive down 0.0283 -> 0.0141 -> 0.0071 ->
+# 0.0035 V, an 8x reduction that buries the response in noise.
+# Coil 2 moves a2 at about -205 counts/V -- two closed-loop trims agree (861 ->
+# 810 -> 758 -> 702 counts in 0.25 V steps, `data/20260820_180344_fast_lock.csv`)
+# -- so +0.55 V buys ~113 counts of headroom, taking a2 to roughly 750.
+# An earlier sweep read "a2 is not electrically trimmable"; that is WITHDRAWN. It
+# stepped coils 2 AND 3 together and on a2 they OPPOSE (-204.7 against +50.5
+# counts/V), so the two largely cancelled and a2 sat still.
+# NOTE this is the one channel whose bias differs from the controller's uniform
+# 0.50 V, so coil 2's A is measured at an operating point eta does not run at.
+BIAS_CH[2] = 1.05
+# BIAS_V is the nominal for segments with no coil in scope; it must equal what
+# most coils actually hold, or the recorded `u` column lies about the hardware.
+assert BIAS_V == float(np.bincount(
+    (BIAS_CH * 100).astype(int)).argmax()) / 100.0, (
+    "BIAS_V %.2f is not the value most of BIAS_CH holds (%s)" % (BIAS_V, BIAS_CH))
+
+
+def bias_of(coil):
+    """The bias on one coil, or the nominal scalar when no coil is in scope."""
+    return BIAS_V if coil is None else float(BIAS_CH[coil])
+
+
+VMIN, VMAX = 0.0, 2.5                    # the controllers' own window
+# OPENED 2026-08-20, and the bench forced it rather than suggested it.
+#   The DAC's hard ceiling is 2.5000 V: `arduino.ino` clamps at 25000 units of
+#   100 uV onto the AD5628's 0..4095 codes on its internal reference, and it is
+#   UNIPOLAR -- a negative bias cannot be commanded at any setting.
+#   The old 0.0-0.5 V used 20 % of that with no recorded justification
+#   (CLAUDE.md Sec 11). What made it binding: on the 12:40 run every one of coils
+#   0-3 slammed BOTH rails, spanning 0.000 to 0.500 V with an rms demand of
+#   0.089-0.148 V against a 0.25 V half-window, and the loop PUMPED -- counts std
+#   81.8/86.8/170.4/84.7 at zero gain against 136.6/153.8/273.8/180.7 with the
+#   gain live, a factor 1.61-2.13 steady over twelve 20 s slices. The signs were
+#   re-measured the same session and are NOT the cause (slopesign.py: a0 +70.92,
+#   a1 +67.75, a2 -184.26, a3 +81.08 counts/V). Clipping is: once a coil clips
+#   the realised force is no longer -Kp*v and dissipation is not guaranteed.
+#   HIGHEST VOLTAGE EVER COMMANDED ON THIS HARDWARE WITHOUT INCIDENT IS 1.1 V
+#   (analysis/bias_sweep.py). Above that is unmeasured, and the coil driver
+#   between the DAC and the coil IS NOT IN THIS REPO, so 0.25 V may have encoded
+#   a real current limit. BIAS is the CONTINUOUS one -- it sits on every coil for
+#   the whole run -- so a resistive coil dissipates as BIAS^2.
 
 # Restoring the bias after a board reset is a FORCE STEP unless it is ramped.
 # 15 s is ~10 periods of the slowest mode (0.72194 Hz). See `park_ramped`.
@@ -183,25 +257,30 @@ DAC_MAP = [1, 3, 5, 7, 0, 2, 4, 6]
 RAIL_LOW, RAIL_HIGH = 12, 1011           # hard rails, same as the controllers
 RAIL_GUARD_LOW, RAIL_GUARD_HIGH = 60, 963    # unwind here, ~50 counts of margin
 RAIL_FRAC_REJECT = 0.02                  # >2% of a window pinned -> discard it
+GUARD_MARGIN_COUNTS = 20                 # a sensor resting nearer than this to
+                                         # the guard band's edge cannot be a
+                                         # trip source -- see `in_guard_band`
+FLAT_STD_COUNTS = 0.5                    # under this a channel is not moving
 
 # ---------------------------------------------------------------------------
-# The three modes, to +/-0.0005 Hz.
+# The three modes. MEASURED 2026-08-20 16:25, after the coils were re-seated and
+# the per-channel bias applied: 300 s, 105 013 samples, no drive
+# (`data/20260820_162534_status_sensors.csv`). Consensus over a0-a3, which agree
+# to 0.00050 / 0.00050 / 0.00000 Hz. a5 is excluded on purpose -- it carries mode
+# B at SNR 30.1 but its mode-C peak lands 0.0345 Hz out, 41 half-widths, which is
+# a noise peak.
 #
-# MEASURED 2026-08-17 21:56, `data/20260817_215634_status_sensors.csv`: 840 s,
-# empty room, nothing driven, 0.0116 Hz bins, and the spread across all four
-# in-plane sensors was 0.00000 Hz. Within 0.001 Hz of the 17:21 pass, so the
-# modes are stable on an hours timescale.
-#
-# The values before these were the 2026-08-06 ones -- 0.71544 / 0.99493 /
-# 1.63957 -- i.e. 11 days stale, and the drift was up to 0.0170 Hz = 9
-# half-widths. A stale frequency does not merely attenuate a driven point, it
-# PUMPS: 2 pi Df T over a 60 s drive-plus-unwind is 216-367 degrees, past
-# anti-phase, so the "unwind" re-drives. `sensors` re-measures and prints the
-# peak next to each of these; do that before every driven pass.
+# THIS IS A DEFAULT, NOT A MEASUREMENT: re-measure at the start of every session
+# (`status.py sensors`, 90 s, no drive) and drive with `--freqs`. Against the
+# 2026-08-06 values the shifts are -0.00675 / +0.00038 / -0.00300 Hz, so mode A
+# is 8.1 half-widths off and anything still driving at the 2026-08-17 value of
+# 0.72194 is off resonance. A stale frequency does not merely attenuate a driven
+# point, it PUMPS: 2 pi Df T over a 60 s drive-plus-unwind is 216-367 degrees,
+# past anti-phase, so the "unwind" re-drives.
 # ---------------------------------------------------------------------------
-MODES = (("A", 0.72194),
-         ("B", 0.99193),
-         ("C", 1.65607))
+MODES = (("A", 0.71519),
+         ("B", 0.99231),
+         ("C", 1.65307))
 
 # ---------------------------------------------------------------------------
 # Phi FROM GEOMETRY. Exact, signed, and it costs no bench time.
@@ -215,16 +294,26 @@ MODES = (("A", 0.72194),
 #     T2 = (a0-a1+a2-a3)/4     WARP = (a0-a1-a2+a3)/4
 #
 # THE CORNER ASSIGNMENT IS DETERMINED, not assumed: a rigid plate cannot warp, so
-# the pairing that minimises warp is the true one, and it wins by 2x
-# (`dof.py` on data/20260817_205211: 1.566 / 0.277 / 0.139). a0 is diagonal to a3.
+# the pairing that minimises warp is the true one. a0 is diagonal to a3.
+# RE-CHECKED 2026-08-20 after the coils were re-seated and UNCHANGED -- the three
+# candidate warp vectors come out 48.17 / 20.09 / 12.61 counts rms and
+# [+1,-1,-1,+1] is still the smallest (`dof.py` on data/20260820_162534). It wins
+# by 1.6x now against 2x on 2026-08-17, because WARP GREW: warp/loudest-rigid
+# 0.139 -> 0.262. That growth is a per-sensor gain change -- see SENSOR_H below,
+# which nulls the warp over all eight coils.
 #
-# WHICH MODE IS WHICH DOF is measured too -- 840 s empty room, 0.0116 Hz bins,
-# `data/20260817_215634_status_sensors.csv`, share of each mode's power:
+# WHICH MODE IS WHICH DOF is measured too -- AND MODES A AND C SWAPPED TILTS ON
+# 2026-08-20. 300 s, 0.0427 Hz bins, `data/20260820_162534_status_sensors.csv`,
+# share of each mode's power:
 #
-#     A 0.7219 Hz -> T1  90.3%      B 0.9919 Hz -> Z  88.2%      C 1.6561 Hz -> T2  89.4%
+#     A 0.7264 Hz -> T2  81.6%      B 0.9828 Hz -> Z  73.7%      C 1.6665 Hz -> T1  89.9%
 #
-# and the MEASURED Phi agrees with these columns at |cos| 0.971 / 0.978 / 0.963,
-# from a cross-spectral eigendecomposition that used no geometry at all.
+# against A -> T1 90.3%, B -> Z 88.2%, C -> T2 89.4% on 2026-08-17. The two tilt
+# columns below are therefore EXCHANGED relative to every version before this one.
+# The 2026-08-17 cross-check -- a measured Phi from cross-spectral
+# eigendecomposition agreeing with the geometry at |cos| 0.971 / 0.978 / 0.963,
+# using no geometry as input -- is a property of THAT record and does not transfer
+# across the re-seating. Re-run `status.py phi` to earn it again.
 #
 # WHY THIS MATTERS MORE THAN THE 2% IT COSTS IN ACCURACY. A measured Phi is
 # determined only up to a sign per mode, and A independently so; the pair has to
@@ -240,11 +329,70 @@ MODES = (("A", 0.72194),
 # 0.3-25 Hz. Their coherent content is cross-coupling from these same three modes
 # (CLAUDE.md § 6), so they carry no Phi row and are handled by the hybrid PID.
 # ---------------------------------------------------------------------------
+# PER-SENSOR GAIN CALIBRATION, and it is what finally explains WARP.
+#
+# THE PROBLEM WITH A BARE GEOMETRIC Phi. `[+-1, +-1, +-1, +-1]` is the mode shape
+# in PHYSICAL units and it assumes the four in-plane sensors share a
+# counts-per-metre. They do not: their measured DC slopes are 70.5 / 88.9 / 205.9
+# / 98.8 counts/V, so a2 is 2.9x a0. Projecting raw COUNTS onto a physical mode
+# shape is therefore a unit error, and it skews every modal coordinate, every
+# residual, and the warp channel most of all.
+#
+# THE CONSTRAINT THAT PINS IT DOWN. A rigid plate cannot warp, so for EVERY coil
+# the measured static response expressed in physical units must be warp-free:
+#
+#     sum_i  w_i * (M[i,j] / g_i)  =  0,     w = [+1, -1, -1, +1]
+#
+# one equation per coil. Eight coils, four unknowns: OVER-DETERMINED, so it can
+# fail. CLAUDE.md records an earlier attempt at this same idea and calls it a
+# failure -- but that one used only the three mode shapes, 3 equations in 4
+# unknowns, where a solution always exists and therefore proves nothing. This one
+# is a real fit. Solved as the smallest right singular vector of
+# W[j,i] = w_i * M[i,j], from `data/20260820_155638_status_slopesign.csv`.
+#
+# MEASURED 2026-08-20. Singular values 310.69 / 117.98 / 60.82 / 5.03.
+#     h = 1/g, mean|h| = 1:   [1.6057, 1.0667, 0.4761, 0.8514]
+# Warp residual, rms over the eight coils, against rms |response|:
+#     raw 0.6224  ->  calibrated 0.0322, a 19.3x reduction.
+# Per coil, counts:  -127.90 -> +3.92,  +57.90 -> -5.09,  +141.10 -> +4.11,
+#     -65.10 -> -5.29,  -6.90 -> -3.34,  +14.90 -> -0.22,  -10.20 -> +4.47,
+#     -0.40 -> +0.96.
+#
+# INDEPENDENTLY CONFIRMED, which is why this is not just a curve fit: h correlates
+# +0.960 with 1/|diagonal slope| ([70.50, 88.87, 205.94, 98.79]). h was fitted
+# from the OFF-DIAGONAL warp constraint over all eight coils and never saw the
+# diagonal. Two unrelated routes, the same numbers.
+#
+# CONSEQUENCE FOR CLAUDE.md: "WARP IS REAL AND UNEXPLAINED" is superseded, and so
+# is "do not write down that it is calibration". On this data it IS calibration,
+# and the 0.139 -> 0.262 growth in warp/rigid across the re-seating is a change in
+# the sensor gains, which is what re-seating a coil would do.
+#
+# The full measured slope vector, `slopesign.py` on the same record, counts/V:
+#     [+70.50, +88.87, -205.94, -98.79, +5.06, -0.39, +10.37, +8.07]
+# a3 FLIPPED SIGN in the re-seating (+81.08 -> -98.79), which is why any damping
+# gain has to carry `slope x gain > 0` per channel: the inverted convention
+# dissipated on 5.4 / 11.0 / 22.6 / 12.3 % of steps against 90-97 % once
+# corrected (`osem.eta.py`'s DAMP_SIGN carries the corrected signs).
+#
+# APPLIED AS A NORMALISATION, NEVER BY BENDING Phi -- scaling Phi's rows would
+# destroy the orthogonality of its columns, which is a real property of the mode
+# shapes in physical units. `to_physical` is that normalisation; note that
+# nothing in THIS file projects through it yet, so every modal quantity printed
+# here is still in raw counts.
+SENSOR_H = np.array([1.6057, 1.0667, 0.4761, 0.8514, 1.0, 1.0, 1.0, 1.0])
+
+
+def to_physical(counts):
+    """Counts -> a common physical scale, so the geometric Phi actually applies."""
+    return np.asarray(counts, float) * SENSOR_H
+
+
 GEO_PHI = np.zeros((NCOLS, 3))
-GEO_PHI[:4, 0] = [+1, +1, -1, -1]        # mode A -> T1 tilt
+GEO_PHI[:4, 0] = [+1, -1, +1, -1]        # mode A -> T2 tilt   (was T1 pre-reset)
 GEO_PHI[:4, 1] = [+1, +1, +1, +1]        # mode B -> Z, along the plate normal
-GEO_PHI[:4, 2] = [+1, -1, +1, -1]        # mode C -> T2 tilt
-GEO_DOF = ("T1 tilt", "Z normal", "T2 tilt")
+GEO_PHI[:4, 2] = [+1, +1, -1, -1]        # mode C -> T1 tilt   (was T2 pre-reset)
+GEO_DOF = ("T2 tilt", "Z normal", "T1 tilt")
 GEO_WARP = np.array([+1., -1., -1., +1.])    # what no rigid body produces
 GEO_COS_WARN = 0.90                      # measured Phi below this vs geometry
 
@@ -291,31 +439,24 @@ UNWIND_S = 30.0               # anti-phase, same length: linear ramp reverses
 QUIET_S = 8.0                 # residual check before the next point
 PRE_S = 6.0                   # residual measured BEFORE the drive
 DC_STEP_S = 20.0              # static step per coil, for sign and wiring
-DC_STEP_V = 0.15              # +/- about bias, inside the 0.5 V window
+DC_STEP_V = 0.15              # +/- about bias; the lowest bias is 0.50 V, so the
+                              # step stays well inside VMIN..VMAX
 SETTLE_BETWEEN_COILS_S = 10.0
 
 TARGET_SWING_COUNTS = 200.0   # what the loudest sensor should reach at the end
-AMP_MAX = 0.20                # V peak on the coil; 0.25 is the half-window
+AMP_MAX = 0.20                # V peak on the coil, against the narrowest
+                              # half-window BIAS_CH leaves; `plan` prints it
 AMP_MIN = 0.0005
 AMP_RETRY_SCALE = 0.5         # on a guard trip
 AMP_RETRIES = 2
 QUIET_FRAC = 0.25             # residual must fall below this x the peak
-# ZERO, and the reason is measured. A repeated unwind does not converge, it PUMPS:
-# on 2026-08-17, mode C on coil 0 went residual 0.0781 -> 0.1710 -> 0.3062 V over
-# three attempts against a 0.1416 V peak, and every retried point in that run grew
-# the same way. Unwinding an oscillator that is ALREADY cancelled is just an
-# anti-phase drive applied to a state near rest, i.e. a fresh excitation.
-#
-# The retries were being triggered by a broken comparison rather than by a real
-# residual -- see `_point`, where `peak` was a lock-in over the whole ramping
-# drive and therefore read HALF the true end-of-drive amplitude, making the test
-# twice as strict as intended. That is fixed too, but the retry loop is a bad
-# idea independent of the threshold: there is no feedback in it, so a failed
-# cancellation is retried with exactly the same command that failed.
-#
-# One unwind, then measure and REPORT. The residual is recorded per point so a
-# contaminated point can be identified offline rather than guessed at.
-UNWIND_EXTRA = 0
+# ONE unwind per point, never a retry, and the reason is measured: a repeated
+# unwind does not converge, it PUMPS. 2026-08-17, mode C on coil 0, residual
+# 0.0781 -> 0.1710 -> 0.3062 V over three attempts against a 0.1416 V peak, and
+# every retried point in that run grew the same way -- there is no feedback in an
+# unwind, so a failed cancellation is retried with the command that failed.
+# `_point` measures the residual and REPORTS it instead, per point, so a
+# contaminated point is identifiable offline.
 
 UPDATE_HZ = 50.0              # coil refresh; 30 points/cycle at the fastest mode
 
@@ -324,10 +465,10 @@ UPDATE_HZ = 50.0              # coil refresh; 30 points/cycle at the fastest mod
 # and pyDAC2.resolve_baud, which own that list for every tool in the tree.
 PROGRESS_EVERY_S = 5.0        # live line during any segment longer than this
 PREFLIGHT_S = 2.0             # read this long before occupying the bench
-PREFLIGHT_MIN_HZ = 50.0       # the wire measures 1024-1113 Hz (CLAUDE.md Sec 0),
-                              # so 50 Hz is 5% of the slowest rate ever seen here.
-                              # Above it the stream exists; below it the board is
-                              # not streaming and there is nothing to measure.
+PREFLIGHT_MIN_HZ = 50.0       # the wire measures 418-435 Hz at 115200 baud with
+                              # 8 ASCII channels (CLAUDE.md), so 50 Hz is ~12% of
+                              # the slowest rate seen. Above it the stream exists;
+                              # below it there is nothing to measure.
 
 # ---- the pulse ------------------------------------------------------------
 PULSE_COIL = 0
@@ -345,8 +486,8 @@ PHI_WINDOW_S = 32.0           # passive-Phi averaging window. NOT a free knob:
                               # 0.476 -> 0.0034 between 4 s and 32 s, so 8 s was
                               # simply not resolving mode A. Measured on
                               # data/20260806_192723_quiet_openloop.csv. Longer
-                              # is better and costs only record length, but K
-                              # windows must stay >= 6 for the jackknife.
+                              # is better and costs only record length.
+PHI_MIN_WINDOWS = 6           # fewer than this and the jackknife has no spread
 # Fine-scan half-width for "where is this mode actually?". 0.05 Hz is 26
 # half-widths at Q=433, so it covers a drift far larger than anything that would
 # still be recognisable as the same mode, and at 300 s it is 15 resolution
@@ -359,9 +500,12 @@ MODE_SCAN_N = 201             # 0.0005 Hz steps
 
 ROW_SNR = 3.0                 # |Phi_mi| must exceed this many sigma to count
 RANK1_MIN = 0.80              # a single mode's response matrix must be rank 1
+IMAG_FRAC_MAX = 0.35          # of Phi that no real mode shape explains, or of A
+                              # that is not in quadrature -- above it, provisional
+PHASE_SPREAD_OK_DEG = 20.0    # one mode, one phase up to a sign: scatter above
+                              # this is contamination (73-89 deg on the 23:12 pass)
+PHASE_DIFF_DEG = 5.0          # two estimators closer than this are the same
 MODES_N = len(MODES)
-
-FLUSH_EVERY_N = 500
 
 
 def _git_rev():
@@ -382,13 +526,11 @@ def clamp(v):
 class Ink:
     """ANSI colour, off whenever the output is not a terminal.
 
-    A census gets kept by redirecting it into a file -- every log in `bench/`
-    got there that way -- and a file full of escape codes is a file nobody
-    greps. So: auto by default, `--color always` for `| less -R`, and NO_COLOR
-    (no-color.org) or a non-tty turns it off.
-
-    Colour is never the only carrier. Every coloured cell also says GOOD / OK /
-    DEAD in words, because a red cell in a plain-text paste is just a cell.
+    A census gets kept by redirecting it into a file, and a file full of escape
+    codes is a file nobody greps: auto by default, `--color always` for
+    `| less -R`, NO_COLOR (no-color.org) or a non-tty turns it off. Colour is
+    never the only carrier -- every coloured cell also says GOOD / OK / DEAD in
+    words, because a red cell in a plain-text paste is just a cell.
     """
 
     CODES = dict(green="\033[32m", yellow="\033[33m", red="\033[31m",
@@ -416,8 +558,8 @@ INK = Ink("auto")
 GRADE_COLOUR = {"GOOD": "green", "OK": "yellow", "DEAD": "red", "?": "grey"}
 
 # ---------------------------------------------------------------------------
-# Which DOF each OSEM watches. Reported by the rig owner 2026-08-17; a0-a3 are the
-# four in-plane (XY) corner sensors, a4/a5 the two side sensors, a6/a7 VERTICAL.
+# Which DOF each OSEM watches. Reported by the rig owner 2026-08-17: a0-a3 are
+# the four in-plane corner sensors, a4/a5 the two side sensors, a6/a7 VERTICAL.
 # WHICH CORNER EACH OF a0-a3 OCCUPIES IS NOT ESTABLISHED and is deliberately not
 # encoded -- the coordinates first given were withdrawn as illustrative.
 #
@@ -429,7 +571,6 @@ GRADE_COLOUR = {"GOOD": "green", "OK": "yellow", "DEAD": "red", "?": "grey"}
 # that are DOF-independent: a railed channel is dead whatever it watches, and so
 # is one with no variance at all. The VERTICAL mode frequencies are NOT measured,
 # so these channels cannot be graded at all yet, and saying so is the output.
-HORIZONTAL_CH = (0, 1, 2, 3, 4, 5)
 VERTICAL_CH = (6, 7)
 
 # Power-spectrum bands for "if it is not in the mode band, where is it?". The
@@ -796,8 +937,8 @@ def census_sensors(res, log=print):
            INK("%d OK" % tally["OK"], "yellow"),
            INK("%d DEAD" % tally["DEAD"], "red"),
            INK("%d ungradeable" % tally["?"], "grey")))
-    log("   MIMO needs 4 GOOD (3 modes + one spare row). This record has %d."
-        % tally["GOOD"])
+    log("   MIMO needs %d GOOD (%d modes + one spare row). This record has %d."
+        % (MODES_N + 1, MODES_N, tally["GOOD"]))
     if tally["?"]:
         log("   The ungradeable ones are VERTICAL channels: this census scores the")
         log("   three HORIZONTAL modes, so it cannot pass or fail them. Their mode")
@@ -1066,10 +1207,46 @@ def noise_at(t, y, f, avoid=None):
     return float(np.median(probes) / RAYLEIGH_MEDIAN)
 
 
+def to_volts(counts):
+    """A counts window -> volts about its own per-channel mean."""
+    c = np.asarray(counts, float)
+    return (c - c.mean(axis=0)) * COUNTS_TO_V
+
+
+def response(t, counts, U, f, ramp=True):
+    """(H, sigma) per sensor at `f`, divided by the LOCK-IN OF THE RECORDED
+    DRIVE `U` -- never by the amplitude that was intended. That is the
+    `multisine` defect in `CLAUDE.md` standing practice, and dividing by the
+    recorded drive is what made the in-run and offline answers agree to 2e-4."""
+    v = to_volts(counts)
+    H, S = np.zeros(NCOLS, complex), np.zeros(NCOLS)
+    for i in range(NCOLS):
+        z, sd = lockin_sigma(t, v[:, i], f, ramp=ramp)
+        H[i], S[i] = z / U, sd / abs(U)
+    return H, S
+
+
+def worst_lockin(t, counts, f):
+    """Loudest per-sensor lock-in amplitude in a window, volts; 0 if too short.
+
+    The one estimator behind `pre`, `peak` and `resid`, so they compare
+    like for like -- which they did not before 2026-08-17 (see `_point`).
+    """
+    if len(t) <= 8:
+        return 0.0
+    v = to_volts(counts)
+    return max(abs(lockin(t, v[:, i], f)) for i in range(NCOLS))
+
+
+# Sensors the rail guard may never trip on. See `guard_mask`.
+GUARD_EXCLUDE = (2,)
+
+
 def in_guard_band(mean_counts):
     """Which channels rest inside the rail guard band. One owner for the test."""
     m = np.asarray(mean_counts, float)
-    return (m > RAIL_GUARD_LOW + 20) & (m < RAIL_GUARD_HIGH - 20)
+    return ((m > RAIL_GUARD_LOW + GUARD_MARGIN_COUNTS)
+            & (m < RAIL_GUARD_HIGH - GUARD_MARGIN_COUNTS))
 
 
 def railed_frac(counts, rest=None):
@@ -1131,8 +1308,8 @@ def acquire(dac, rdr, rec, seconds, drive=None, coil=None, t0=None,
 
     `guard` is a boolean mask over sensors, or None for no guard. It is a MASK
     and not a flag because a sensor already resting outside the guard band --
-    a6 sits at 860.6 counts -- would otherwise trip it on the first sample of
-    every point, forever.
+    a2 near 860 counts on 2026-08-20 -- would otherwise trip it on the first
+    sample of every point, forever. `guard_mask` builds it.
 
     `hold_v` is the volts the coil is ALREADY held at when `drive` is None. It
     only affects what gets recorded, and it has to be right: the DC pass holds
@@ -1140,17 +1317,14 @@ def acquire(dac, rdr, rec, seconds, drive=None, coil=None, t0=None,
     put a step into the file that the hardware never saw.
 
     Returns (t, counts, u, tripped) with `u` the volts ACTUALLY commanded at
-    each sample, less bias -- everything downstream divides by the lock-in of
-    THIS, not by the amplitude it intended. That is the `multisine` defect from
-    `CLAUDE.md` standing practice, and dividing by the recorded drive is what
-    made the in-run and offline answers agree to 2e-4.
+    each sample, less bias -- which is what `response` divides by.
     """
     origin = time.time() if t0 is None else t0
     start = time.time() - origin
     base = start if t_ref is None else t_ref
     ch = None if coil is None else DAC_MAP[coil]
     nxt = start
-    held = BIAS_V if hold_v is None else clamp(hold_v)
+    held = bias_of(coil) if hold_v is None else clamp(hold_v)
     ts, rows, us = [], [], []
     tripped = False
     last_prog = start
@@ -1174,7 +1348,7 @@ def acquire(dac, rdr, rec, seconds, drive=None, coil=None, t0=None,
                   flush=True)
         if drive is not None and now >= nxt:
             nxt = now + 1.0 / UPDATE_HZ
-            held = clamp(BIAS_V + drive(now - base))
+            held = clamp(bias_of(coil) + drive(now - base))
             dac.set_voltage(ch, held)
         s = rdr.read()
         if s is None:
@@ -1192,7 +1366,8 @@ def acquire(dac, rdr, rec, seconds, drive=None, coil=None, t0=None,
                 if on_guard is not None:
                     on_guard(t, s)
                 break
-    out = (np.asarray(ts), np.asarray(rows, float), np.asarray(us, float) - BIAS_V)
+    out = (np.asarray(ts), np.asarray(rows, float),
+           np.asarray(us, float) - bias_of(coil))
     return out + (tripped,)
 
 
@@ -1202,10 +1377,20 @@ def guard_mask(counts, log=print):
     A sensor outside it is either genuinely pinned or simply parked high, and
     either way it cannot be a trip source. Reported, not silently dropped.
     """
-    if len(counts) == 0:
-        return np.ones(NCOLS, bool)
-    m = counts.mean(axis=0)
+    m = counts.mean(axis=0) if len(counts) else np.full(NCOLS, MID_COUNTS)
     keep = in_guard_band(m)
+    # A SENSOR PARKED TOO CLOSE TO ITS RAIL CANNOT BE ALLOWED TO VETO THE WHOLE
+    # MEASUREMENT. Measured 2026-08-20: a2 rests near 860 counts against a guard
+    # band of 80..943, so it has ~83 counts of headroom, and a coil pass tripped
+    # the guard at 963 and 972 and retried the drive down 0.0283 -> 0.0141 ->
+    # 0.0071 -> 0.0035 V. An 8x reduction buries the response in noise, so a2 was
+    # costing the pass every point it was supposed to measure.
+    # Phi is 4x3 and a0/a1/a3 alone span all three modes, so dropping a2 from the
+    # GUARD still leaves a determined measurement -- it is a trip source that is
+    # removed, not a row. Its own response is still recorded and still exported;
+    # what is given up is a2's protection, which for a sensor already sitting
+    # 350 counts off mid-scale is protection against nothing.
+    keep[list(GUARD_EXCLUDE)] = False
     if not keep.all():
         log("      guard watches %s; %s rest outside the guard band and cannot"
             " be a trip source"
@@ -1217,12 +1402,12 @@ def guard_mask(counts, log=print):
 def park(dac, coils=range(NCOLS)):
     for c in coils:
         try:
-            dac.set_voltage(DAC_MAP[c], BIAS_V)
+            dac.set_voltage(DAC_MAP[c], clamp(BIAS_CH[c]))
         except Exception:
             pass
 
 
-def park_ramped(dac, coils=range(NCOLS), seconds=BIAS_RAMP_S, log=print):
+def park_ramped(dac, coils=range(NCOLS), seconds=BIAS_RAMP_S):
     """Bring the coils to bias SLOWLY. A bias step is a force step.
 
     MEASURED 2026-08-18, and it is why this exists. The board zeroes every coil
@@ -1242,10 +1427,9 @@ def park_ramped(dac, coils=range(NCOLS), seconds=BIAS_RAMP_S, log=print):
     """
     n = max(int(seconds * BIAS_RAMP_HZ), 1)
     for k in range(1, n + 1):
-        v = BIAS_V * k / float(n)
         for c in coils:
             try:
-                dac.set_voltage(DAC_MAP[c], clamp(v))
+                dac.set_voltage(DAC_MAP[c], clamp(BIAS_CH[c] * k / float(n)))
             except Exception:
                 pass
         time.sleep(1.0 / BIAS_RAMP_HZ)
@@ -1312,18 +1496,20 @@ def sensors_analyse(t, counts, log=print):
                 phase_deg=float(np.degrees(np.angle(z))))
         best = max(row["modes"].values(), key=lambda m: m["snr"])
         row["best_snr"] = best["snr"]
-        row["verdict"] = ("LIVE" if best["snr"] >= 8.0 else
-                          "WEAK" if best["snr"] >= 3.0 else "BLIND")
+        row["verdict"] = ("LIVE" if best["snr"] >= MIMO_SNR else
+                          "WEAK" if best["snr"] >= ROW_SNR else "BLIND")
         if row["railed"] > RAIL_FRAC_REJECT:
             row["verdict"] = "RAILED"
-        if row["std"] < 0.5:
+        if row["std"] < FLAT_STD_COUNTS:
             row["verdict"] = "FLAT"
         res.append(row)
 
     log("\n  === SENSORS: %d samples, %.1f s, %.0f Hz ===\n"
         % (len(t), span, len(t) / span if span > 0 else 0))
-    log("   ch   rest    std   headroom      railed   floor    A@0.715   B@0.995   C@1.640   verdict")
-    log("      counts counts  up/down          frac      V      SNR       SNR       SNR")
+    log("   ch   rest    std   headroom      railed   floor  %s   verdict"
+        % "".join("  %s@%.4f" % (n, f) for n, f in MODES))
+    log("      counts counts  up/down          frac      V      SNR       SNR"
+        "       SNR")
     for r in res:
         log("   a%d  %6.1f %6.2f  %4.0f/%-4.0f   %6.4f  %6.4f  %7.1f   %7.1f   %7.1f   %s"
             % (r["ch"], r["mean"], r["std"], r["up"], r["down"], r["railed"],
@@ -1331,7 +1517,7 @@ def sensors_analyse(t, counts, log=print):
                r["modes"]["C"]["snr"], r["verdict"]))
 
     log("\n  in-band amplitude at each mode, volts rms-equivalent (+/- 1 sigma):")
-    log("   ch        A 0.7154           B 0.9949           C 1.6396")
+    log("   ch   " + (" " * 10).join("%s %.4f" % (n, f) for n, f in MODES))
     for r in res:
         log("   a%d  %8.5f+-%-7.5f %8.5f+-%-7.5f %8.5f+-%-7.5f"
             % (r["ch"],
@@ -1339,9 +1525,9 @@ def sensors_analyse(t, counts, log=print):
                r["modes"]["B"]["amp_v"], r["modes"]["B"]["sigma_v"],
                r["modes"]["C"]["amp_v"], r["modes"]["C"]["sigma_v"]))
 
-    log("\n  peak location, +/-%.3f Hz around the 2026-08-06 values. A shift here"
+    log("\n  peak location, +/-%.3f Hz around the MODES above. A shift here"
         % MODE_SCAN_HZ)
-    log("  invalidates every frequency in this file and in osem.epsilon.py:")
+    log("  invalidates every frequency in this file and in the controllers:")
     log("   ch      A found      B found      C found")
     for r in res:
         log("   a%d   %10.5f   %10.5f   %10.5f"
@@ -1360,7 +1546,7 @@ def sensors_analyse(t, counts, log=print):
     else:
         log("  consensus over the %d sensors above SNR %.0f: %s"
             % (len(seeing), MIMO_SNR, ",".join("a%d" % r["ch"] for r in seeing)))
-        log("   mode      2026-08-06        now        shift    half-widths   spread")
+        log("   mode        MODES           now        shift    half-widths   spread")
         for name, f in MODES:
             fs = np.array([r["modes"][name]["f_peak"] for r in seeing])
             fp = float(np.median(fs))
@@ -1379,8 +1565,9 @@ def sensors_analyse(t, counts, log=print):
 
     live = [r["ch"] for r in res if r["verdict"] == "LIVE"]
     weak = [r["ch"] for r in res if r["verdict"] == "WEAK"]
-    log("\n  LIVE  (SNR >= 8 at some mode): %s" % (live or "none"))
-    log("  WEAK  (3 <= SNR < 8):          %s" % (weak or "none"))
+    log("\n  LIVE  (SNR >= %.0f at some mode): %s" % (MIMO_SNR, live or "none"))
+    log("  WEAK  (%.0f <= SNR < %.0f):          %s" % (ROW_SNR, MIMO_SNR,
+                                                       weak or "none"))
     log("  other:                         %s"
         % ([("a%d:%s" % (r["ch"], r["verdict"])) for r in res
             if r["verdict"] not in ("LIVE", "WEAK")] or "none"))
@@ -1531,7 +1718,7 @@ def sensors_run(dac, seconds, rec, log=print):
     park(dac)
     rdr = Reader(dac)
     rec.mark("passive")
-    t, c, _, _ = acquire(dac, rdr, rec, seconds, guard=False)
+    t, c, _, _ = acquire(dac, rdr, rec, seconds)
     rdr.report()
     if len(t) < 100:
         sys.exit("  only %d samples -- the board is not streaming." % len(t))
@@ -1556,7 +1743,7 @@ def _point(dac, rdr, rec, coil, name, f, amp, log, skip_unwind=False):
         tripped_at["t"], tripped_at["counts"] = t, list(s)
 
     rec.mark("pre", coil, f, amp)
-    tp, cp, _, _ = acquire(dac, rdr, rec, PRE_S, None, coil, t0)
+    _, cp, _, _ = acquire(dac, rdr, rec, PRE_S, None, coil, t0)
     watch = guard_mask(cp, log)
 
     rec.mark("drive", coil, f, amp)
@@ -1577,31 +1764,28 @@ def _point(dac, rdr, rec, coil, name, f, amp, log, skip_unwind=False):
         park(dac, [coil])
         resid = peak = float("nan")
     else:
-      for k in range(1 + UNWIND_EXTRA):
-          rec.mark("unwind", coil, f, amp)
-          acquire(dac, rdr, rec, done if k == 0 else min(done, UNWIND_S),
-                  lambda t: -amp * math.sin(w * t), coil, t0, t_ref=0.0)
-          rec.mark("quiet", coil, f, amp)
-          tq, cq, _, _ = acquire(dac, rdr, rec, QUIET_S, None, coil, t0)
-          # LIKE FOR LIKE, and it was not before. `resid` is a lock-in over a
-          # steady QUIET_S window, so it is the true current amplitude. `peak` used
-          # to be a lock-in over the WHOLE drive, which ramps linearly from zero and
-          # therefore averages to about HALF the end-of-drive amplitude -- so the
-          # test `resid <= 0.25 * peak` was really `resid <= 0.125 * final` and
-          # failed points that had cancelled perfectly well. Measure the peak over
-          # the last QUIET_S of the drive instead: same window length, same
-          # estimator, and the ramp only covers the final ~27% there.
-          m = td >= td[-1] - QUIET_S if len(td) > 8 else np.zeros(len(td), bool)
-          peak = max(abs(lockin(td[m], (cd[m, i] - cd[m, i].mean()) * COUNTS_TO_V, f))
-                     for i in range(NCOLS)) if m.sum() > 8 else 0.0
-          resid = max(abs(lockin(tq, (cq[:, i] - cq[:, i].mean()) * COUNTS_TO_V, f))
-                      for i in range(NCOLS)) if len(tq) > 8 else 0.0
-          if peak <= 0 or resid <= QUIET_FRAC * peak:
-              break
-          # Reported, NOT retried -- see UNWIND_EXTRA. `resid` is returned with the
-          # point so a contaminated measurement is identifiable offline.
-          log("      unwind %d: residual %.4f V vs end-of-drive %.4f V (%.0f%%)"
-              % (k + 1, resid, peak, 100.0 * resid / peak if peak > 0 else 0.0))
+        rec.mark("unwind", coil, f, amp)
+        acquire(dac, rdr, rec, done, lambda t: -amp * math.sin(w * t), coil, t0,
+                t_ref=0.0)
+        rec.mark("quiet", coil, f, amp)
+        tq, cq, _, _ = acquire(dac, rdr, rec, QUIET_S, None, coil, t0)
+        # LIKE FOR LIKE, and it was not before. `resid` is a lock-in over a steady
+        # QUIET_S window, so it is the true current amplitude. `peak` used to be a
+        # lock-in over the WHOLE drive, which ramps linearly from zero and
+        # therefore averages to about HALF the end-of-drive amplitude -- so the
+        # test `resid <= 0.25 * peak` was really `resid <= 0.125 * final` and
+        # failed points that had cancelled perfectly well. Measure the peak over
+        # the last QUIET_S of the drive instead: same window length, same
+        # estimator, and the ramp only covers the final ~27% there.
+        m = td >= td[-1] - QUIET_S if len(td) > 8 else np.zeros(len(td), bool)
+        peak = worst_lockin(td[m], cd[m], f)
+        resid = worst_lockin(tq, cq, f)
+        if peak > 0 and resid > QUIET_FRAC * peak:
+            # Reported, never retried -- a second unwind PUMPS. `resid` goes back
+            # with the point, so a contaminated measurement is identifiable
+            # offline rather than guessed at.
+            log("      unwind: residual %.4f V vs end-of-drive %.4f V (%.0f%%)"
+                % (resid, peak, 100.0 * resid / peak))
     park(dac, [coil])
 
     if trip:
@@ -1618,12 +1802,7 @@ def _point(dac, rdr, rec, coil, name, f, amp, log, skip_unwind=False):
         return None
 
     bad = railed_frac(cd, rest=cp) > RAIL_FRAC_REJECT
-    H = np.zeros(NCOLS, complex)
-    S = np.zeros(NCOLS)
-    for i in range(NCOLS):
-        v = (cd[:, i] - cd[:, i].mean()) * COUNTS_TO_V
-        z, sd = lockin_sigma(td, v, f, ramp=True)
-        H[i], S[i] = z / U, sd / abs(U)
+    H, S = response(td, cd, U, f)
     swing = cd.max(axis=0) - cd.min(axis=0)
     log("      swing %s counts, |H| %s"
         % (" ".join("%4.0f" % s for s in swing),
@@ -1658,6 +1837,16 @@ def _point_multi(dac, rdr, rec, coil, amps, log):
     Driving the three tones together removes the inter-mode carryover entirely --
     there is no "next mode" to leak into. Carryover between COILS survives, which
     is why there are still only three transitions to damp by hand.
+
+    AND ON RESONANCE IT IS A NEGATIVE RESULT. Run 2026-08-18: the per-coil phase
+    spread improved (73-89 deg -> 31.6 / 36.7 / 7.8) and THE SIGNS BROKE -- 7 of
+    12 agreed with the two DC passes, against 12 of 12 for the one-at-a-time
+    pass. The reason is structural, not tuning: an on-resonance response RAMPS,
+    so it has broad 1/f^2 skirts rather than a clean line, and the loudest mode
+    leaks into the quietest mode's bin. Mode A is strongest (|H| 8.58) and mode B
+    weakest (|H| 3.03), and mode B is exactly where the signs go wrong. The flag
+    stays because it is the right trade OFF resonance; do not spend another 18
+    minutes rediscovering that it is not the right trade on it.
 
     THE TONES DO NOT INTERFERE. They are 0.27 Hz apart and the window is 30 s, so
     the lock-in resolution is 0.033 Hz -- eight resolution elements between
@@ -1722,32 +1911,22 @@ def _point_multi(dac, rdr, rec, coil, amps, log):
         if abs(U) < 1e-7:
             log("      !! mode %s: no drive measured at that tone -- skipped" % name)
             continue
-        H = np.zeros(NCOLS, complex)
-        Hraw = np.zeros(NCOLS, complex)
-        S = np.zeros(NCOLS)
+        Hraw, S = response(td, cd, U, f)
         # One shared time origin covers pre and drive -- `_point`'s own note says
         # that is what makes the anti-phase unwind cancel -- so a free oscillation
         # is a CONSTANT phasor across both windows, decaying only at gamma. The
         # subtraction is therefore arithmetic, not a model.
-        dec = math.exp(-MODE_GAMMA.get(name, 0.0072)
-                       * (float(td.mean()) - float(tp.mean())))
-        for i in range(NCOLS):
-            v = (cd[:, i] - cd[:, i].mean()) * COUNTS_TO_V
-            z, sd = lockin_sigma(td, v, f, ramp=True)
-            vp = (cp[:, i] - cp[:, i].mean()) * COUNTS_TO_V
-            zp = lockin(tp, vp, f) if len(tp) > 8 else 0j
-            Hraw[i] = z / U
-            H[i], S[i] = (z - zp * dec) / U, sd / abs(U)
+        dec = math.exp(-MODE_GAMMA[name] * (float(td.mean()) - float(tp.mean())))
+        vp = to_volts(cp)
+        H = np.array([Hraw[i] - (lockin(tp, vp[:, i], f) if len(tp) > 8 else 0j)
+                      * dec / U for i in range(NCOLS)])
         # Residual at this tone, and the leftover it started from. Both reported
         # per tone so a contaminated point is identifiable offline rather than
         # guessed at -- the 23:12 pass had no such number until it was replayed.
-        pre = max(abs(lockin(tp, (cp[:, i] - cp[:, i].mean()) * COUNTS_TO_V, f))
-                  for i in range(NCOLS)) if len(tp) > 8 else 0.0
-        resid = max(abs(lockin(tq, (cq[:, i] - cq[:, i].mean()) * COUNTS_TO_V, f))
-                    for i in range(NCOLS)) if len(tq) > 8 else 0.0
+        pre = worst_lockin(tp, cp, f)
+        resid = worst_lockin(tq, cq, f)
         m = td >= td[-1] - QUIET_S if len(td) > 8 else np.zeros(len(td), bool)
-        peak = max(abs(lockin(td[m], (cd[m, i] - cd[m, i].mean()) * COUNTS_TO_V, f))
-                   for i in range(NCOLS)) if m.sum() > 8 else 0.0
+        peak = worst_lockin(td[m], cd[m], f)
         log("      %s @ %.4f  |H| %s" % (name, f, " ".join("%6.2f" % abs(h) for h in H)))
         log("           started on %.0f%% of its own drive, ended on %.0f%%"
             % (100.0 * pre / peak if peak > 0 else 0.0,
@@ -1765,11 +1944,12 @@ MULTI_PRE_S = 30.0            # pre window for the multisine point. Same length
                               # as the drive, so the leftover ring is measured to
                               # the same SNR as the response it contaminates.
 # ---- settling between points, by the CONTROLLER rather than by hand ---------
-# 2026-08-18. The hand-rolled loop below (`settle`) was written first and is
-# NEUTRAL on hardware: 55.45 -> 53.73 counts over 45 s, i.e. it does nothing.
-# The real controller is measured: 0.0683 /s modal and 0.0434 /s diagonal
-# against the plant's intrinsic 0.0072 /s, so it takes a ring down 10x in 34 s
-# or 53 s respectively. Use that instead of a second implementation.
+# 2026-08-18. A hand-rolled diagonal loop was tried here first and measured
+# NEUTRAL on hardware: 55.45 -> 53.73 counts over 45 s, i.e. it did nothing --
+# and it ran with the INVERTED sign convention (see SENSOR_H), so neutral was the
+# best it could have done. The real controller is measured at 0.0683 /s modal and
+# 0.0434 /s diagonal against the plant's intrinsic 0.0072 /s, so it takes a ring
+# down 10x in 34 s or 53 s. Use that rather than a second implementation.
 #
 # WHY THIS IS SAFE EVEN THOUGH THE BREAKER IS UNFIXED. The breaker trips on
 # `high AND growing` sustained RUNAWAY_SUSTAIN_S. What killed both runs of
@@ -1777,8 +1957,18 @@ MULTI_PRE_S = 30.0            # pre window for the multisine point. Same length
 # left over from a coil drive is high but DECAYING, so `growing` goes false and
 # the trip never arms. Settling after a drive is the case the breaker was built
 # to tolerate; a kick during damping is the case it gets wrong.
-SETTLE_VERSION = "zeta"       # untouched by the 2026-08-18 refactor, and the
-                              # only rung with a closed modal loop on the rig
+SETTLE_VERSION = "eta"
+# CHANGED FROM "zeta" 2026-08-20, AND IT WAS PUMPING THE PLATE BETWEEN POINTS.
+# `osem.zeta.py:191` still carries `STEADY_GAIN = [-0.035, -0.035, +0.035,
+# -0.035]`, which is the pre-2026-08-20 INVERTED sign convention: dissipation
+# requires `slope x gain > 0` and that vector is the negated slope, measured at
+# 5.4 / 11.0 / 22.6 / 12.3 % of steps dissipating against 90-97 % once corrected.
+# Its ch3 entry is stale on top of that, since a3's physical slope flipped in the
+# re-seating (+81.08 -> -98.79 counts/V). So handing the port to zeta to "settle"
+# between coil points drove the modes UP, which contaminates the very next point
+# -- exactly the leftover-ring problem the settle exists to remove.
+# `eta` carries the corrected, slope-normalised gains and is the rung that has
+# actually locked on this rig (13.2 s, ratios 0.05-0.09, 2026-08-20 18:56).
 SETTLE_CTL_S = 40.0           # 34 s is 10x at the measured MODAL rate 0.0683 /s,
                               # plus ~2 s warm-up when the stored baseline is
                               # fresh (BASELINE_FILE_MAX_AGE_S = 1800 s), which it
@@ -1791,24 +1981,24 @@ SETTLE_GRACE_S = 10.0         # SIGINT grace before SIGKILL. Long enough for a
                               # unbounded, not slow.
 
 SETTLE_KP = 0.030             # validated on hardware; -0.040 is the rail onset
-SETTLE_SIGN = np.array([-1., -1., +1., -1., +1., -1., +1., +1.])
 SETTLE_MAX_S = 90.0           # ceiling; it exits early on the amplitude test
 SETTLE_TARGET = 0.15          # of the amplitude it started at
 SETTLE_MIN_S = 8.0            # never call it settled off one window
-SETTLE_HZ = 100.0             # control clock, DECOUPLED from the 379 Hz wire
-SETTLE_WARMUP_S = 3.0         # the 0.3 Hz tracker starts at the first sample, so
-                              # `bp` is zero by construction until it converges;
-                              # measuring the starting amplitude before that
-                              # under-reports it and every later ratio is wrong
+SETTLE_HZ = 100.0             # control clock, DECOUPLED from the ~420 Hz wire
+SETTLE_RATE_HZ = 350.0        # nominal wire rate; it only sizes the rms window
+SETTLE_WARMUP_S = 3.0         # the estimator starts at the first sample, so
+                              # measuring the starting amplitude before it has
+                              # converged under-reports it and every later ratio
+                              # is wrong
 SETTLE_ABORT = 1.5            # x the starting amplitude -> stop, it is pumping
 
 
 def settle_controller(seconds=SETTLE_CTL_S, version=SETTLE_VERSION, log=print):
     """Hand the port to a real controller for `seconds`, then take it back.
 
-    `signtest.py` used exactly this pattern -- launch `bench.py <version>` as a
-    subprocess -- and it is the only way to get the measured damping without a
-    second implementation of the loop drifting out of step with the first.
+    Launching `bench.py <version>` as a subprocess is the only way to get the
+    measured damping without a second implementation of the loop drifting out of
+    step with the first (the since-deleted `signtest.py` did the same).
 
     THE CALLER MUST HAVE CLOSED ITS OWN PORT. Opening resets the board (~2 s), so
     the coils return to a known state on both handovers; park before closing.
@@ -1817,7 +2007,6 @@ def settle_controller(seconds=SETTLE_CTL_S, version=SETTLE_VERSION, log=print):
     SIGTERM does not unwind it. The coils were left energised three times on
     2026-08-17/18 by exactly that. The wait is long for the same reason.
     """
-    import signal as _sig
     log("    settling: handing the port to `%s` for %.0f s" % (version, seconds))
     # THE BOARD DOES NOT GO QUIET THE INSTANT THE PORT CLOSES. Measured
     # 2026-08-18: handing over immediately made the controller exit rc=1 -- its
@@ -1873,9 +2062,9 @@ def settle_controller(seconds=SETTLE_CTL_S, version=SETTLE_VERSION, log=print):
         # than the teardown it replaces, because it does not depend on the dying
         # process doing anything at all.
         try:
-            os.killpg(os.getpgid(proc.pid), _sig.SIGINT)
+            os.killpg(os.getpgid(proc.pid), signal.SIGINT)
         except (ProcessLookupError, PermissionError):
-            proc.send_signal(_sig.SIGINT)
+            proc.send_signal(signal.SIGINT)
         try:
             proc.wait(timeout=SETTLE_GRACE_S)
             log("      settled for %.0f s, exited cleanly." % (time.time() - t0))
@@ -1884,7 +2073,7 @@ def settle_controller(seconds=SETTLE_CTL_S, version=SETTLE_VERSION, log=print):
                 " coil on the reset that the next open triggers, and the caller"
                 " parks to bias after that." % SETTLE_GRACE_S)
             try:
-                os.killpg(os.getpgid(proc.pid), _sig.SIGKILL)
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 proc.kill()
             try:
@@ -1899,14 +2088,14 @@ def settle_controller(seconds=SETTLE_CTL_S, version=SETTLE_VERSION, log=print):
         # rule as above: ask nicely, then kill, and let the board's own reset
         # zero the coils.
         try:
-            os.killpg(os.getpgid(proc.pid), _sig.SIGINT)
+            os.killpg(os.getpgid(proc.pid), signal.SIGINT)
         except (ProcessLookupError, PermissionError):
-            proc.send_signal(_sig.SIGINT)
+            proc.send_signal(signal.SIGINT)
         try:
             proc.wait(timeout=SETTLE_GRACE_S)
         except subprocess.TimeoutExpired:
             try:
-                os.killpg(os.getpgid(proc.pid), _sig.SIGKILL)
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 proc.kill()
         raise
@@ -1923,152 +2112,6 @@ DEMOD_HZ = 0.15               # demodulator lowpass. 1/DEMOD_HZ = 6.7 s is sever
 MODAL_DEMAND_CAP_V = 0.20     # per-vector, uniform; same number the controllers use
 
 
-class StdlibDamper:
-    """The settle, built out of the SAME components the controllers run.
-
-    WHY THIS REPLACES `ModalDamper`. That one demodulated each mode against an
-    ASSUMED frequency. Measured 2026-08-18, it does not work at any phase: the
-    best of nine tau values was 0.68 over 45 s, i.e. 0.0086 /s against the
-    plant's own 0.0072 /s -- nothing. zeta on the same rig does 0.0683 /s.
-
-    The flaw is structural, not a tuning miss. A demodulator locked to a wrong
-    frequency produces a phasor that ROTATES at the difference, so its velocity
-    phase error grows without bound. Mode B moved 1.3 half-widths tonight
-    (0.99193 -> 0.99343 Hz); at 0.0015 Hz that is 24 degrees of drift across a
-    45 s settle, still accumulating. No fixed correction can track it, which is
-    exactly what the tau sweep showed -- an optimum that barely beats doing
-    nothing. `stdlib.KalmanVelocity` is broadband and carries displacement as a
-    state, so it has no such lock to lose.
-
-    So: `stdlib.Modal` for Phi/A and the per-mode scalar LS, `stdlib.KalmanVelocity`
-    for the velocity, and the allocator from the same file. Identical to what
-    zeta runs; the only difference is that it runs IN THIS PROCESS, so the port
-    is never handed over, the board never resets, and the coils are never
-    stepped 0.25 -> 0 -> 0.25 V. That step is a FORCE step and it is what made
-    the handover version worse than no settling at all (sign agreement 12/12 ->
-    10/12).
-    """
-
-    def __init__(self, path=None, kp=None, log=print):
-        self.ok, self.why = False, ""
-        path = MODAL_PATH if path is None else path
-        try:
-            import stdlib as sl
-            import importlib
-            eta = importlib.import_module("osem" + ".eta") if False else None
-        except Exception as exc:
-            self.why = "stdlib unavailable (%s)" % type(exc).__name__
-            return
-        self.sl = sl
-        # Load the controller AS A MODULE and read its constants, rather than
-        # copying them here. F_MODE_HZ, KALMAN_K, MODAL_KP and the modal
-        # thresholds are the rung's own declarations; a copy in this file would
-        # drift out of step silently, which is the failure `ladder.py` exists to
-        # prevent. eta guards its main() behind __name__, so importing is safe.
-        try:
-            import importlib.util as _u
-            spec = _u.spec_from_file_location("_eta_cfg", "osem.eta.py")
-            src = _u.module_from_spec(spec)
-            spec.loader.exec_module(src)
-        except Exception as exc:
-            self.why = "cannot import osem.eta.py (%s: %s)" % (type(exc).__name__, exc)
-            return
-        try:
-            self.f = np.asarray(src.F_MODE_HZ, float)
-            K = np.asarray(src.KALMAN_K, float)
-            self.dt = 1.0 / float(src.CONTROL_HZ)
-            self.kp = float(np.atleast_1d(src.MODAL_KP)[0] if kp is None else kp)
-            self.cap = float(src.MODAL_DEMAND_CAP_V)
-            self.modal = src._modal(path) if hasattr(src, "_modal") else \
-                sl.Modal(path, NCOLS, self.f, src.MODAL_SCHEMA)
-        except Exception as exc:
-            self.why = "wiring failed (%s: %s)" % (type(exc).__name__, exc)
-            return
-        if not self.modal.ok:
-            self.why = "modal refused: %s" % self.modal.why
-            return
-        # THE MODAL KALMAN, not the per-sensor one. eta's control path is
-        #     qdot          = mkf.update(volts, sense_ok, dt)
-        #     qd, rank      = modal.project(qdot, drive_ok)
-        #     f             = -mode_gain * qd
-        #     u, ...        = modal.allocate(f, drive_ok)
-        # `modal.sense()` is used ONLY for the residual and chi2 -- I wired the
-        # damper to it first and it measured neutral, because it is not the
-        # control quantity. And `project` is load-bearing: -Proj K Proj qdot is
-        # symmetric PSD and therefore dissipative, while -Proj K qdot is not and
-        # can pump (stdlib.Modal.project's own docstring).
-        self.mkf = sl.ModalKalman(self.modal.phi, self.modal.rowok, src.KALMAN_R,
-                                  src.KALMAN_Q, src.KALMAN_Q_DC, self.f,
-                                  self.dt, NCOLS, src.T_AMP_S)
-        self.gain = np.atleast_1d(np.asarray(src.MODAL_KP, float))
-        if kp is not None:
-            self.gain = np.full(len(self.f), float(kp))
-        self.coils = list(self.modal.a_coils)
-        # The A-free fallback: per-sensor velocity and the shipped diagonal gains.
-        self.kfv = sl.KalmanVelocity(K, NCOLS, self.f, self.dt)
-        self.diag_gain = np.asarray(src.STEADY_GAIN, float)
-        self.ok = True
-        log("    stdlib damper: modes %s, coils %s, Kp %.3f"
-            % (np.round(self.f, 5), self.coils, self.kp))
-
-    def step_diagonal(self, y_counts):
-        """COLOCATED velocity feedback: u_j = k_j * v_j, each coil from its own
-        sensor. NEEDS NO A, and that is the whole point.
-
-        The modal law cannot settle the pass that measures A, and tonight showed
-        why rather than argued it: the allocator inverts A_MODEL, so the realised
-        modal force is A_true A_model^+ f. A's SIGNS are cross-validated 12/12,
-        but its MAGNITUDES reproduce only to a factor 0.23-1.8 between two static
-        passes, and that product need not oppose the velocity. A force orthogonal
-        to velocity does no work, which is exactly the neutral result measured
-        here: real velocities (qdot rms 0.66/0.80/0.76), real commands (peak
-        0.111 V), and no damping.
-
-        Colocated velocity feedback has no such dependence. Each coil is driven
-        from the sensor beside it, at the sign measured from that channel's own
-        decay fit, so the power it removes is sum_j k_j v_j^2 -- negative
-        semi-definite for ANY passive structure, whatever the mode shapes are.
-        It is the weaker law (0.0434 /s measured against modal's 0.0683 /s) and
-        it is the one that can bootstrap the measurement.
-        """
-        v = (np.asarray(y_counts, float) - MID_COUNTS) * COUNTS_TO_V
-        self.kfv.update(v, self.dt)
-        vel = self.kfv.velocity() if hasattr(self.kfv, "velocity") else None
-        if vel is None:
-            vel = self.kfv.modal_velocity().sum(axis=1)
-        u = np.zeros(NCOLS)
-        u[self.coils] = self.diag_gain[self.coils] * np.asarray(vel, float)[self.coils]
-        pk = float(np.max(np.abs(u)))
-        if pk > self.cap:
-            u = u * (self.cap / pk)
-        self.last_q = np.asarray(vel, float)[self.coils]
-        self.last_ok = True
-        return u
-
-    def step_at(self, t, y_counts, dt):
-        """Adapter so `settle_modal` can drive either damper. `dt` is ignored:
-        KalmanVelocity was built with a FIXED transition at CONTROL_PERIOD_S and
-        re-deriving it per sample would be a different filter from the one the
-        controllers run and the one KALMAN_K was fitted for."""
-        return self.step(y_counts)
-
-    def step(self, y_counts):
-        """y_counts -> volts about bias, indexed by CHANNEL. Call at the control rate."""
-        v = (np.asarray(y_counts, float) - MID_COUNTS) * COUNTS_TO_V
-        ok = self.modal.rowok.any(axis=1)          # only rows carrying a mode
-        qdot = self.mkf.update(v, ok, self.dt)
-        self.chi2 = self.mkf.chi2_per_dof()
-        qd, rank = self.modal.project(qdot, np.ones(NCOLS, bool))
-        f = -self.gain * qd
-        # `allocate` applies the reachable-mode PROJECTION and the demand cap
-        # itself -- projecting the velocity before the gain is what keeps the
-        # law symmetric positive semi-definite, i.e. dissipative, and doing it
-        # here by hand would lose that.
-        u, mask, cols, ok2 = self.modal.allocate(f, np.ones(NCOLS, bool))
-        self.last_ok, self.last_q, self.last_rank = ok2, qdot, rank
-        return np.asarray(u, float) if ok2 else np.zeros(NCOLS)
-
-
 class ModalDamper:
     """The modal law, in-process, with a narrowband velocity estimate.
 
@@ -2082,12 +2125,11 @@ class ModalDamper:
     (with settling), and sign agreement against the two DC passes fell 12/12 ->
     10/12. In-process there is no reset and no step.
 
-    WHY THE ESTIMATOR IS DIFFERENT FROM `settle` BELOW. That one bandpasses and
-    differentiates, and it measured NEUTRAL on hardware: 55.45 -> 53.73 counts
-    over 45 s. Differentiating broadband noise to recover a velocity at a KNOWN
-    frequency throws the knowledge away. Here each mode is demodulated against
-    its own e^{-i w t}, so the modal coordinate becomes a slowly varying complex
-    phasor z_m and
+    WHY THE ESTIMATOR IS NARROWBAND. Bandpassing and differentiating measured
+    NEUTRAL on hardware (55.45 -> 53.73 counts over 45 s): differentiating
+    broadband noise to recover a velocity at a KNOWN frequency throws the
+    knowledge away. Here each mode is demodulated against its own e^{-i w t}, so
+    the modal coordinate becomes a slowly varying complex phasor z_m and
 
         q_m(t)     = 2 Re[z_m e^{i w t}]
         qdot_m(t)  = -2 w Im[z_m e^{i w t}]
@@ -2102,6 +2144,16 @@ class ModalDamper:
     construction, and the allocator realises it exactly while no coil clips --
     which is why the total demand is capped, not the modal part (CLAUDE.md Sec 2:
     the derivative term added after the cap took coil 3 to 169% of its window).
+
+    AND IT HAS NOT BEEN SHOWN TO WORK. Measured 2026-08-18 over nine values of
+    tau, the best was 0.68 of the starting amplitude over 45 s -- 0.0086 /s
+    against the plant's own 0.0072 /s, i.e. nothing, where a controller does
+    0.0683 /s. A demodulator locked to an ASSUMED frequency produces a phasor
+    that rotates at the difference, so its velocity phase error grows without
+    bound: mode B moved 1.3 half-widths in one night (0.99193 -> 0.99343 Hz),
+    which is 24 degrees of drift across a 45 s settle and still accumulating. No
+    fixed `tau` can track that. Treat `--settle` as UNPROVEN, and prefer
+    `settle_controller`, which hands the port to a rung that is measured.
     """
 
     def __init__(self, path=None, kp=None, tau=None, phase_deg=None, log=print):
@@ -2164,17 +2216,16 @@ class ModalDamper:
         if not self.primed:
             self.primed = True
             return np.zeros(len(self.coils))
-        # PHASE ADVANCE FOR THE TRANSPORT DELAY, and it is why the first
-        # version of this measured NEUTRAL on hardware (0.2043 -> 0.2214 V) while
-        # damping 300x in a zero-delay simulation. Neutral is the signature of a
-        # 90 degree error: a force orthogonal to velocity does no net work, so it
-        # is a spring rather than a damper.
+        # PHASE ADVANCE FOR THE TRANSPORT DELAY. Without it this measured
+        # NEUTRAL on hardware (0.2043 -> 0.2214 V) while damping 300x in a
+        # zero-delay simulation, and neutral is the signature of a 90 degree
+        # error: a force orthogonal to velocity does no net work.
         #
         # The delay is measured, not assumed. Excess lag beyond the -90 degrees
         # that resonance requires, from the 23:12 coil pass: 33 deg at 0.722 Hz,
         # 40 deg at 0.992 Hz, 51 deg at 1.656 Hz -- rising with frequency, which
         # is what a constant TIME delay looks like, and implying 127 / 112 / 86 ms.
-        # Advancing the phasor by w*tau puts the force back on velocity.
+        # It is NOT enough on its own -- see the tau sweep in the class docstring.
         adv = self.w * self.tau if self.phase is None else self.phase
         qdot = -2.0 * self.w * np.imag(self.z * np.exp(1j * (self.w * t + adv)))
         f = -self.kp * qdot
@@ -2185,8 +2236,8 @@ class ModalDamper:
         return u
 
 
-def settle_modal(dac, rdr, rec, coils, log=print, max_s=SETTLE_MAX_S,
-                 target=SETTLE_TARGET, damper=None, diagonal=True):
+def settle_modal(dac, rdr, rec, log=print, max_s=SETTLE_MAX_S,
+                 target=SETTLE_TARGET, damper=None):
     """Damp in-process with the modal law. No handover, no reset, no bias step."""
     if damper is None or not damper.ok:
         log("    modal damper unavailable (%s) -- NOT settling"
@@ -2198,7 +2249,7 @@ def settle_modal(dac, rdr, rec, coils, log=print, max_s=SETTLE_MAX_S,
     t0 = time.time()
     prev_t, last_send, last_report = None, -1.0, 0.0
     win, amp0, acc = [], None, []
-    u = np.full(NCOLS, BIAS_V)
+    u = BIAS_CH.copy()
     try:
         while time.time() - t0 < max_s:
             s = rdr.read()
@@ -2212,43 +2263,26 @@ def settle_modal(dac, rdr, rec, coils, log=print, max_s=SETTLE_MAX_S,
                 continue
             dt = max(now - prev_t, 1e-4)
             prev_t = now
-            # DECIMATE INTO THE CONTROL CLOCK. `KalmanVelocity` is built with a
-            # FIXED exact-ZOH transition at CONTROL_PERIOD_S, so it must be
-            # stepped once per control period on the MEAN of the samples that
-            # arrived in it -- which is what `stdlib.Decimator` does for the
-            # controllers. Stepping it per sample at ~378 Hz tells a filter built
-            # for 10 ms that 10 ms passed when 2.6 ms did: a 3.8x time-base
-            # error, which corrupts exactly the quantity that decides whether
-            # feedback dissipates or pumps. Measured 2026-08-18: doing that gave
-            # 106 -> 132 -> 102 % of the starting amplitude, i.e. nothing.
-            win.append(float(np.sqrt(np.mean(((c[:4] - c[:4].mean()) * COUNTS_TO_V) ** 2))))
-            if len(win) > int(2.0 * 350):
+            win.append(float(np.sqrt(np.mean(((c[:4] - c[:4].mean())
+                                              * COUNTS_TO_V) ** 2))))
+            if len(win) > int(2.0 * SETTLE_RATE_HZ):
                 win.pop(0)
             acc.append(c)
+            # 100 Hz control clock, DECOUPLED from the ~420 Hz wire, on the MEAN
+            # of the samples that arrived in the period. At the sample rate the
+            # SET traffic is ~182 kbit/s against a 115200 baud link: the applied
+            # voltage then lags by a GROWING delay, which turned a damper into a
+            # driver on 2026-08-18 (40 -> 84 counts).
             if now - last_send < 1.0 / SETTLE_HZ:
                 continue
+            last_send = now
             cbar = np.mean(np.asarray(acc, float), axis=0)
             acc = []
-            du = (damper.step_diagonal(cbar) if diagonal
-                  and hasattr(damper, "step_diagonal")
-                  else (damper.step_at(now, cbar, dt)
-                        if hasattr(damper, "step_at")
-                        else damper.step(now, cbar, dt)))
-            # 100 Hz control clock, DECOUPLED from the ~350 Hz wire. At the
-            # sample rate the SET traffic is ~182 kbit/s against a 115200 baud
-            # link and the applied voltage lags by a GROWING delay -- measured
-            # 2026-08-18, that turned a damper into a driver (40 -> 84 counts).
-            if now - last_send >= 1.0 / SETTLE_HZ:
-                last_send = now
-                du = np.asarray(du, float)
-                for j in damper.coils:
-                    # `allocate` returns a FULL-WIDTH vector indexed by channel;
-                    # the narrowband damper returns one entry per coil. Index by
-                    # channel when the vector is full width.
-                    v = du[j] if du.size == NCOLS else du[damper.coils.index(j)]
-                    u[j] = clamp(BIAS_V + float(v))
-                    dac.set_voltage(DAC_MAP[j], u[j])
-            if len(win) >= int(1.5 * 350) and now >= SETTLE_WARMUP_S:
+            du = np.asarray(damper.step(now, cbar, dt), float)
+            for n, j in enumerate(damper.coils):
+                u[j] = clamp(BIAS_CH[j] + float(du[n]))
+                dac.set_voltage(DAC_MAP[j], u[j])
+            if len(win) >= int(1.5 * SETTLE_RATE_HZ) and now >= SETTLE_WARMUP_S:
                 a = float(np.mean(win))
                 if amp0 is None:
                     amp0 = a
@@ -2271,111 +2305,6 @@ def settle_modal(dac, rdr, rec, coils, log=print, max_s=SETTLE_MAX_S,
         park(dac, damper.coils)
 
 
-def settle(dac, rdr, rec, coils, log=print, max_s=SETTLE_MAX_S,
-           target=SETTLE_TARGET):
-    """Close a diagonal velocity loop and KILL THE RING before the next point.
-
-    THE PROBLEM THIS SOLVES. tau > 138 s and a point is 74 s, so every point of
-    the one-at-a-time pass started on top of the previous one -- measured
-    |pre|/|drive| of 3.5% to 417% over all twelve points of the 23:12 pass, and a
-    per-coil modal phase scatter of 73-89 degrees where a single mode admits
-    exactly two phases. Waiting it out costs five minutes a point. The multisine
-    removes the leftover BETWEEN MODES; this removes what is left between COILS.
-
-    WHY IT IS SAFE TO POINT AT AN UNMEASURED PLANT. This is COLOCATED velocity
-    feedback -- each coil is driven from its own sensor, at the sign measured from
-    that channel's own decay fit -- and colocated velocity feedback is dissipative
-    for ANY passive structure regardless of the mode shapes. It needs no Phi, no A,
-    and no modal.json, which is the point: A is what we are here to measure.
-
-    Measured decay for exactly this law: 0.0278 /s against the plant's intrinsic
-    0.0072 /s (CLAUDE.md, three hand kicks), so 10x down takes about 83 s and 5x
-    about 58 s. The exit is on the AMPLITUDE, not the clock, with `max_s` as a
-    ceiling.
-
-    Gain is SETTLE_KP = 0.030, the value validated on hardware. Do not raise it
-    to -0.040: that is the documented instability and rail onset, and this
-    function runs unattended between points.
-    """
-    log("    settling: diagonal velocity loop on %s, <=%.0f s, exit at %.0f%% of"
-        " the starting amplitude" % (list(coils), max_s, 100 * target))
-    rec.mark("settle", -1, -1.0, 0.0)
-    t0 = time.time()
-    prev_t = None
-    lp = np.zeros(NCOLS)          # lowpassed counts (the DC/track term)
-    bp = np.zeros(NCOLS)          # bandpassed displacement
-    vel = np.zeros(NCOLS)
-    prev_bp = np.zeros(NCOLS)
-    win, amp0, last_report, last_send = [], None, 0.0, -1.0
-    u = np.full(NCOLS, BIAS_V)
-    try:
-        while time.time() - t0 < max_s:
-            s = rdr.read()
-            if s is None:
-                continue
-            now = time.time() - t0
-            c = np.asarray(s, float)
-            rec.write(now, c, float(np.mean([u[j] for j in coils])))
-            if prev_t is None:
-                lp = c.copy()
-                prev_t = now
-                continue
-            dt = max(now - prev_t, 1e-4)
-            prev_t = now
-            # 0.3 Hz one-pole tracks the operating point; what is left is in-band.
-            k = min(2.0 * math.pi * 0.3 * dt, 1.0)
-            lp += k * (c - lp)
-            bp_new = c - lp
-            # velocity, lowpassed at 3 Hz so a 350 Hz difference is not all dither
-            kv = min(2.0 * math.pi * 3.0 * dt, 1.0)
-            vel += kv * ((bp_new - prev_bp) / dt - vel)
-            prev_bp = bp_new
-            bp = bp_new
-            win.append(float(np.sqrt(np.mean(bp[:4] ** 2))))
-            if len(win) > int(2.0 * 350):
-                win.pop(0)
-            # CONTROL CLOCK DECOUPLED FROM THE WIRE, and this is not optional.
-            # At 379 Hz x 4 coils the SET traffic is about 182 kbit/s against a
-            # 115200 baud link: the wire saturates, commands queue, and the
-            # applied voltage lags by a delay that GROWS. Measured 2026-08-17 --
-            # the first version of this function ran at the sample rate and took
-            # the in-band rms from 40 to 84 counts, i.e. it drove the plate
-            # instead of damping it. `delta`'s `decimate` exists for exactly this
-            # and the lesson did not transfer until it was repeated.
-            if now - last_send >= 1.0 / SETTLE_HZ:
-                last_send = now
-                for j in coils:
-                    du = SETTLE_KP * SETTLE_SIGN[j] * vel[j] * COUNTS_TO_V
-                    u[j] = clamp(BIAS_V + float(np.clip(du, -AMP_MAX, AMP_MAX)))
-                    dac.set_voltage(DAC_MAP[j], u[j])
-            if len(win) >= int(1.5 * 350) and now >= SETTLE_WARMUP_S:
-                a = float(np.mean(win))
-                if amp0 is None:
-                    amp0 = a
-                if now - last_report >= 10.0:
-                    log("      %4.0fs  in-band rms %6.2f counts (%.0f%% of start)"
-                        % (now, a, 100.0 * a / amp0 if amp0 > 0 else 0.0))
-                    last_report = now
-                if now >= SETTLE_MIN_S and amp0 > 0 and a <= target * amp0:
-                    log("      settled: %.2f -> %.2f counts in %.0f s" % (amp0, a, now))
-                    break
-                # RUNAWAY ABORT. A damper that is adding energy is the one failure
-                # this must not run unattended into, and nothing else here would
-                # catch it: the loop would simply time out and report a big number.
-                if amp0 > 0 and a > SETTLE_ABORT * amp0 and now >= SETTLE_MIN_S:
-                    log("      !! ABORT: %.2f -> %.2f counts (%.0fx). This loop is"
-                        " PUMPING, not damping -- parked." % (amp0, a, a / amp0))
-                    break
-        else:
-            a = float(np.mean(win)) if win else float("nan")
-            log("      TIMEOUT at %.0f s: %.2f -> %.2f counts (%.0f%%). The next"
-                " point starts contaminated; its `pre` is recorded."
-                % (max_s, amp0 if amp0 else float("nan"), a,
-                   100.0 * a / amp0 if amp0 else float("nan")))
-    finally:
-        park(dac, list(coils))
-
-
 def phase_compare(res, log=print):
     """Score the raw and leftover-subtracted estimators against the SAME physics.
 
@@ -2395,14 +2324,15 @@ def phase_compare(res, log=print):
     b = phase_consistency(res, log=lambda m: log("  " + m))
     log("\n  worst per-coil phase spread   raw %.1f deg   subtracted %.1f deg"
         % (a, b))
-    if b < a - 5.0:
+    if b < a - PHASE_DIFF_DEG:
         log("  The subtraction HELPS. It is exported.")
-    elif b > a + 5.0:
+    elif b > a + PHASE_DIFF_DEG:
         log("  The subtraction HURTS -- as it did at PRE_S = 6 s on the 23:12")
         log("  pass. Export the RAW estimator and say so; do not tune this.")
     else:
-        log("  No difference beyond 5 deg. Either the leftover was small or the")
-        log("  pre window still does not measure it well enough.")
+        log("  No difference beyond %.0f deg: either the leftover was small, or"
+            % PHASE_DIFF_DEG)
+        log("  the pre window still does not measure it well enough.")
     return a, b
 
 
@@ -2431,14 +2361,14 @@ def phase_consistency(res, log=print):
     log("  contamination, not physics -- most likely a leftover ring, which stays")
     log("  EXACTLY rank 1 and is therefore invisible to the rank-1 check.")
     worst = 0.0
-    for mi, (name, f) in enumerate(MODES):
+    for mi, (name, _) in enumerate(MODES):
         pts = sorted([p for p in res if p["mode"] == name], key=lambda p: p["coil"])
         if len(pts) < 2:
             continue
-        g = GEO_PHI[:, mi] if mi < GEO_PHI.shape[1] else None
+        g = GEO_PHI[:, mi]
         ang = []
         for p in pts:
-            if g is not None and np.abs(g).sum() > 0:
+            if np.abs(g).sum() > 0:
                 z = complex(np.dot(g[:4], p["H"][:4]))
             else:
                 k = int(np.argmax(np.abs(p["H"])))
@@ -2456,7 +2386,8 @@ def phase_consistency(res, log=print):
         worst = max(worst, spread)
         log("   mode %s  per-coil phase (mod 180) %s   spread %5.1f deg  %s"
             % (name, " ".join("%6.1f" % a for a in ang), spread,
-               "OK" if spread < 20.0 else "<-- SCATTERED; A's phase is not trustworthy"))
+               "OK" if spread < PHASE_SPREAD_OK_DEG else
+               "<-- SCATTERED; A's phase is not trustworthy"))
     log("\n   worst spread %.1f deg. On the 2026-08-17 23:12 pass this was 73-89"
         % worst)
     log("   deg and the off-quadrature fraction was 0.65 / 0.83 / 1.23.")
@@ -2475,10 +2406,10 @@ def _dc_point(dac, rdr, rec, coil, log):
     """
     out = []
     for sgn in (+1.0, -1.0):
-        v = BIAS_V + sgn * DC_STEP_V
+        v = bias_of(coil) + sgn * DC_STEP_V
         rec.mark("dc", coil, -1.0, sgn * DC_STEP_V)
         dac.set_voltage(DAC_MAP[coil], clamp(v))
-        t, c, _, _ = acquire(dac, rdr, rec, DC_STEP_S, None, coil, hold_v=v)
+        _, c, _, _ = acquire(dac, rdr, rec, DC_STEP_S, None, coil, hold_v=v)
         out.append(c.mean(axis=0) if len(c) else np.full(NCOLS, np.nan))
     park(dac, [coil])
     d = (out[0] - out[1]) / (2.0 * DC_STEP_V)      # counts per volt
@@ -2532,7 +2463,7 @@ def coils_run(dac, coils, rec, log=print, dc=True, multi=False, pause=None,
         # back to bias is a force step that undoes the settle. See park_ramped.
         log("      restoring bias over %.0f s (a step here re-excites the plate)"
             % BIAS_RAMP_S)
-        park_ramped(state["dac"], log=log)
+        park_ramped(state["dac"])
     for ci, coil in enumerate(coils):
         log("\n  --- coil %d (DAC ch%d) ---" % (coil, DAC_MAP[coil]))
         # Between coils the plate is still ringing from the last one and tau is
@@ -2553,13 +2484,13 @@ def coils_run(dac, coils, rec, log=print, dc=True, multi=False, pause=None,
                    sum(amps), seed))
             res.extend(_point_multi(state["dac"], state["rdr"], rec, coil, amps, log))
             if damp and damper is not None and damper.ok:
-                settle_modal(state["dac"], state["rdr"], rec, coils, log=log,
+                settle_modal(state["dac"], state["rdr"], rec, log=log,
                              damper=damper)
             elif damp and reopen is not None:
                 handover(coil)
             else:
-                acquire(state["dac"], state["rdr"], rec, SETTLE_BETWEEN_COILS_S,
-                        None, None, guard=False)
+                acquire(state["dac"], state["rdr"], rec,
+                        SETTLE_BETWEEN_COILS_S)
             continue
         for name, f in MODES:
             n += 1
@@ -2568,7 +2499,7 @@ def coils_run(dac, coils, rec, log=print, dc=True, multi=False, pause=None,
             log("    [%d/%d] mode %s @ %.4f Hz  amp %.4f V  (seed %.0f counts/V,"
                 " ramp x%.0f, predict %.0f counts)"
                 % (n, total, name, f, amp, seed, ramp_gain(f, DWELL_S), pred))
-            for k in range(1 + AMP_RETRIES):
+            for _ in range(1 + AMP_RETRIES):
                 p = _point(state["dac"], state["rdr"], rec, coil, name, f, amp,
                            log, skip_unwind=damp)
                 if p is not None:
@@ -2579,13 +2510,12 @@ def coils_run(dac, coils, rec, log=print, dc=True, multi=False, pause=None,
                     break
                 log("      retry at amp %.4f V" % amp)
             if damp and damper is not None and damper.ok:
-                settle_modal(state["dac"], state["rdr"], rec, coils, log=log,
+                settle_modal(state["dac"], state["rdr"], rec, log=log,
                              damper=damper)
             elif damp and reopen is not None:
                 handover(coil)
         if not (damp and reopen is not None):
-            acquire(state["dac"], state["rdr"], rec, SETTLE_BETWEEN_COILS_S,
-                    None, None, guard=False)
+            acquire(state["dac"], state["rdr"], rec, SETTLE_BETWEEN_COILS_S)
     state["rdr"].report()
     return res, dcm
 
@@ -2600,23 +2530,22 @@ def coils_report(res, dcm=None, log=print):
                 "%+6.1f" % dcm[i, j] if np.isfinite(dcm[i, j]) else "     ."
                 for j in range(NCOLS))))
         fin = np.isfinite(dcm)
-        if fin.any():
-            blk = dcm[:4, :4][fin[:4, :4]]
-            oth = dcm[4:, 4:][fin[4:, 4:]]
-            if blk.size:
-                log("\n  mean |response| a0-a3 x coil0-3: %.1f counts/V" % np.abs(blk).mean())
-            if oth.size:
-                log("  mean |response| a4-a7 x coil4-7: %.1f counts/V"
-                    " (4.0 was this measurement's noise floor in 2026-08-04)"
-                    % np.abs(oth).mean())
-            log("\n  DAC_MAP check: coil j should dominate its own sensor j.")
-            for j in range(NCOLS):
-                col = dcm[:, j]
-                if not np.isfinite(col).any():
-                    continue
-                k = int(np.nanargmax(np.abs(col)))
-                log("   coil %d (DAC ch%d) -> loudest sensor a%d (%+.1f counts/V)%s"
-                    % (j, DAC_MAP[j], k, col[k], "" if k == j else "   <-- NOT a%d" % j))
+        blk = dcm[:4, :4][fin[:4, :4]]
+        oth = dcm[4:, 4:][fin[4:, 4:]]
+        if blk.size:
+            log("\n  mean |response| a0-a3 x coil0-3: %.1f counts/V" % np.abs(blk).mean())
+        if oth.size:
+            log("  mean |response| a4-a7 x coil4-7: %.1f counts/V"
+                " (%.1f was this measurement's noise floor in 2026-08-04)"
+                % (np.abs(oth).mean(), DC_SEED_FLOOR))
+        log("\n  DAC_MAP check: coil j should dominate its own sensor j.")
+        for j in range(NCOLS):
+            col = dcm[:, j]
+            if not np.isfinite(col).any():
+                continue
+            k = int(np.nanargmax(np.abs(col)))
+            log("   coil %d (DAC ch%d) -> loudest sensor a%d (%+.1f counts/V)%s"
+                % (j, DAC_MAP[j], k, col[k], "" if k == j else "   <-- NOT a%d" % j))
 
     for name, _ in MODES:
         pts = [p for p in res if p["mode"] == name]
@@ -2634,7 +2563,6 @@ def coils_report(res, dcm=None, log=print):
                 for p in pts)))
     if res:
         census_coils(res, dcm, log=log)
-    return res
 
 
 # ===========================================================================
@@ -2675,12 +2603,12 @@ def phi_from_passive(t, counts, window_s=PHI_WINDOW_S, log=print):
     t = np.asarray(t, float)
     span = t[-1] - t[0]
     K = int(span // window_s)
-    if K < 6:
+    if K < PHI_MIN_WINDOWS:
         log("  passive record is %.0f s; need at least %.0f s for %d windows."
-            % (span, 6 * window_s, 6))
+            % (span, PHI_MIN_WINDOWS * window_s, PHI_MIN_WINDOWS))
         return None
     edges = [np.searchsorted(t, t[0] + k * window_s) for k in range(K + 1)]
-    v = (counts - counts.mean(axis=0)) * COUNTS_TO_V
+    v = to_volts(counts)
 
     Phi = np.zeros((NCOLS, MODES_N), complex)
     Sig = np.full((NCOLS, MODES_N), np.inf)
@@ -2901,9 +2829,9 @@ def mimo_gate(res, log=print):
         # least-squares projection, a[j] = (g . Psi[:,j]) / (g . g). Every sign
         # in the answer is then a property of the plant rather than of a
         # factorisation, which is the whole point (see GEO_PHI).
-        g = GEO_PHI[:, mi] if mi < GEO_PHI.shape[1] else np.zeros(NCOLS)
+        g = GEO_PHI[:, mi]
         use = good.all(axis=1) & (g != 0)
-        if use.sum() >= 3 and mi < GEO_PHI.shape[1]:
+        if use.sum() >= 3:
             ag = (g[use] @ Psi[use, :]) / float(g[use] @ g[use])
             Ag[mi, cols] = ag
             nag = np.linalg.norm(ag)
@@ -2918,11 +2846,12 @@ def mimo_gate(res, log=print):
             cosg = float(abs(np.vdot(gv, pv)) / (np.linalg.norm(gv) * np.linalg.norm(pv))) \
                 if np.linalg.norm(pv) > 0 else np.nan
             # And how much of the DRIVEN response lands in warp, which no rigid
-            # body produces. Measured on ambient it is 0.14-0.17 and unexplained.
-            w = GEO_WARP if use.sum() == 4 else None
-            wfrac = (float(np.linalg.norm(w @ Psi[:4, :] / 4.0)
+            # body produces. On ambient it ran 0.139 before the 2026-08-20
+            # re-seating and 0.262 after, and SENSOR_H accounts for it: the same
+            # warp-null fit takes the static residual down 19.3x.
+            wfrac = (float(np.linalg.norm(GEO_WARP @ Psi[:4, :] / 4.0)
                            / max(np.linalg.norm(g[:4] @ Psi[:4, :] / 4.0), 1e-30))
-                     if w is not None and use[:4].all() else np.nan)
+                     if use[:4].all() else np.nan)
             log("    geometry: %s   |cos| vs measured %.3f %s" % (
                 GEO_DOF[mi], cosg,
                 "OK" if cosg >= GEO_COS_WARN else "<-- DISAGREES with geometry"))
@@ -2940,8 +2869,7 @@ def mimo_gate(res, log=print):
         log("   mode   dof         |cos| vs measured   unexplained   rows")
         for name, cosg, rfrac, nr in geo_note:
             log("     %s    %-10s %13.3f %13.3f %6d"
-                % (name, GEO_DOF["ABC".index(name)] if name in "ABC" else "?",
-                   cosg, rfrac, nr))
+                % (name, GEO_DOF["ABC".index(name)], cosg, rfrac, nr))
         log("   Phi is EXACT here, so it carries no sigma of its own and there is")
         log("   no gauge left for A's sign to disagree with. The sigma exported")
         log("   with it is the per-sensor measurement noise, which is what the")
@@ -2959,7 +2887,11 @@ def mimo_gate(res, log=print):
 # ===========================================================================
 # the modal export -- the only way Phi and A reach a controller
 # ===========================================================================
-_EXPORT = {"phi": None, "a": None, "source": ""}
+# `dcm` is carried too: `a_from_dc(Phi)` with dc=None silently falls back to
+# DC_SEED, the HARDCODED 2026-08-04 matrix, even on a run that just measured its
+# own. That is two dates and two rigs, and it is one of the three reasons
+# `a_from_dc` labels its result PROVISIONAL. Added 2026-08-20.
+_EXPORT = {"phi": None, "source": "", "dcm": None}
 MODAL_PATH = os.path.join("data", "modal.json")
 MODAL_SCHEMA = "osem-modal-1"
 
@@ -2993,7 +2925,7 @@ def realify(Z):
     Z = np.asarray(Z, complex)
     M = np.array([[float(np.sum(Z.real ** 2)), float(np.sum(Z.real * Z.imag))],
                   [float(np.sum(Z.real * Z.imag)), float(np.sum(Z.imag ** 2))]])
-    w, V = np.linalg.eigh(M)
+    _, V = np.linalg.eigh(M)
     th = math.atan2(V[1, -1], V[0, -1])
     rot = np.exp(-1j * th)
     R = Z * rot
@@ -3047,8 +2979,33 @@ def a_from_dc(Phi, dc=None, log=print):
     log("  osem.zeta.py refuses it unless OSEM_MODAL_PROVISIONAL=1.")
     for mi, (n, _) in enumerate(MODES):
         log("    mode %s  %s" % (n, " ".join("%+9.1f" % x for x in A[mi])))
-    return dict(A=A, coils=list(range(4)), provisional=True,
-                provenance="bench/20260804/dcmatrix.log projected onto Phi")
+    # HANDED BACK AS PURE IMAGINARY, and that is not a cosmetic choice.
+    # `save_modal` writes `-Im(A * conj(rot_phi))`, because on resonance the
+    # response lags the drive by 90 degrees and so a DRIVEN A sits entirely in the
+    # quadrature part with a determined sign. A static A has no quadrature at all:
+    # it is real. Handing this real array straight to `save_modal` therefore wrote
+    # `-Im(real) == 0` and produced a modal.json whose `a.value` was ALL ZEROS,
+    # with `imag_frac` inf. That was silent -- the file wrote, parsed, and carried
+    # a perfectly good Phi -- and it means the `--derive-a-dc` path never once
+    # produced a usable A. Found 2026-08-20.
+    # Multiplying by -1j puts the magnitude where the writer looks for it and
+    # preserves the sign exactly: with rot = 1 (which is what a geometric Phi
+    # gives), z = -1j*A, z.imag = -A, and -z.imag = A. The real part is then
+    # exactly zero, so `imag_frac` correctly reports 0.0 -- a static response has
+    # no off-quadrature residual to report, which is the whole reason a DC pass is
+    # immune to the leftover-ring contamination that ruins a driven one.
+    # ALL EIGHT COILS, not the first four -- this said `list(range(4))` until
+    # 2026-08-20 and silently threw away half the actuator set. THE DISCARDED
+    # COILS ARE NOT NEGLIGIBLE: on the 2026-08-20 DC matrix projected onto the
+    # geometric Phi, mode C reads coil 3 +331.7, coil 4 -337.1, coil 5 +304.8,
+    # coil 7 +183.4, so coil 4 is LARGER there than the coil that was kept.
+    # Low SNR is a weighting question, not a reason to drop a column:
+    # `Modal._build_tables` keeps `sum(sv >= sv[0]/MODAL_COND_MAX)` singular
+    # directions downstream and refuses only what is genuinely unreachable.
+    return dict(A=(-1j) * A, coils=list(range(NCOLS)), provisional=True,
+                provenance=("DC matrix projected onto Phi; real by construction, "
+                            "carried as -1j*A so save_modal's quadrature "
+                            "convention recovers it exactly"))
 
 
 def pick_export(g, geo=True):
@@ -3088,7 +3045,7 @@ def do_export(path, want_geo=True, derive_a_dc=False, log=print):
         log("  carries a sign per mode that nothing offline can check.")
     ph, ex = pick_export(g, geo=geo)
     if ex is None and derive_a_dc:
-        ex = a_from_dc(ph["Phi"])
+        ex = a_from_dc(ph["Phi"], _EXPORT.get("dcm"))
     return save_modal(ph, ex, path, _EXPORT["source"], log=log, geo=geo)
 
 
@@ -3149,7 +3106,7 @@ def save_modal(phi=None, a=None, path=MODAL_PATH, source="", log=print, geo=Fals
         log("  shape explains; a controller multiplies the real part only.")
         for mi, (n, _) in enumerate(MODES):
             log("    mode %s  imag_frac %.3f   %s"
-                % (n, imag[mi], "OK" if imag[mi] < 0.35 else
+                % (n, imag[mi], "OK" if imag[mi] < IMAG_FRAC_MAX else
                    "<-- large; treat Phi at this mode as provisional"))
 
     # `gauge` ties Phi and A to ONE factorisation. Each mode's Phi and A are
@@ -3213,7 +3170,8 @@ def save_modal(phi=None, a=None, path=MODAL_PATH, source="", log=print, geo=Fals
         log("\n  A off-quadrature fraction per mode (should be small on resonance):")
         for mi, (n, _) in enumerate(MODES):
             log("    mode %s  %.3f   %s" % (n, a_imag[mi],
-                "OK" if a_imag[mi] < 0.35 else "<-- large; A at this mode is suspect"))
+                "OK" if a_imag[mi] < IMAG_FRAC_MAX else
+                "<-- large; A at this mode is suspect"))
         # `basis` lives in the A block because that is where a controller reads
         # it: stdlib.Modal refuses an A whose basis differs from the Phi it is
         # holding, in both directions. A geometric Phi paired with an A measured
@@ -3270,7 +3228,7 @@ def pulse_run(dac, rec, coil=PULSE_COIL, repeats=PULSE_REPEATS, log=print):
         # while `acquire` keeps timestamping in the latter, which is the whole
         # reason the two arguments are separate.
         rec.mark("pulse", coil, -1.0, PULSE_AMP_V)
-        tpu, cpu, upu, _ = acquire(
+        tpu, _, upu, _ = acquire(
             dac, rdr, rec, PULSE_W_S + 0.2,
             lambda t: _hann_pulse(t, PULSE_W_S, PULSE_AMP_V),
             coil, t0, guard=watch)
@@ -3473,7 +3431,7 @@ def replay(path, what, log=print):
                                   t=[], u=[], c=[]))
         s = segs[seg]
         s["t"].append(t)
-        s["u"].append(u - BIAS_V)
+        s["u"].append(u - bias_of(coil if coil >= 0 else None))
         s["c"].append(c)
     for s in segs.values():
         s["t"] = np.asarray(s["t"])
@@ -3515,12 +3473,7 @@ def replay(path, what, log=print):
             U = lockin(s["t"], s["u"], s["f"])
             if abs(U) < 1e-7:
                 continue
-            H = np.zeros(NCOLS, complex)
-            S = np.zeros(NCOLS)
-            for i in range(NCOLS):
-                v = (s["c"][:, i] - s["c"][:, i].mean()) * COUNTS_TO_V
-                z, sd = lockin_sigma(s["t"], v, s["f"], ramp=True)
-                H[i], S[i] = z / U, sd / abs(U)
+            H, S = response(s["t"], s["c"], U, s["f"])
             name = min(MODES, key=lambda m: abs(m[1] - s["f"]))[0]
             res.append(dict(coil=s["coil"], mode=name, f=s["f"], amp=s["amp"],
                             H=H, sigma=S,
@@ -3548,8 +3501,8 @@ def replay(path, what, log=print):
         g = mimo_gate(res, log=log)
         g["coils"] = sorted({p["coil"] for p in res})
         _EXPORT["phi"] = g
-        _EXPORT["a"] = dict(A=g["A"], coils=g["coils"])
         _EXPORT["source"] = "driven: " + os.path.basename(path)
+        _EXPORT["dcm"] = dcm
 
 
 # ===========================================================================
@@ -3741,15 +3694,10 @@ def selftest(log=print):
 def resolve_port(explicit):
     """Autodetect by USB VID, exactly the way `bench.py` does for the controllers.
 
-    REUSED, not reimplemented. bench.py's chooser ranks the ports by vendor ID,
-    prints what it picked, lists the candidates when there are several, and exits
-    with "plug the board in" when there are none. Copying that logic here is how
-    `bench.py` and `harness.py` ended up with two version regexes that drifted
-    until `make run` could not see `osem.v5.5.py` at all -- the story `ladder.py`
-    exists to prevent a repeat of.
-
-    Imported lazily, so `--replay`, `--dry-run` and `--selftest` never need
-    pyserial and never touch a port.
+    REUSED, not reimplemented: two copies of one hardware fact drift, which is
+    how `bench.py` and `harness.py` ended up with version regexes that stopped
+    agreeing. Imported lazily, so `--replay`, `--dry-run` and `--selftest` never
+    need pyserial and never touch a port.
     """
     if explicit:
         return explicit
@@ -3762,13 +3710,11 @@ def resolve_port(explicit):
 
 
 def probe_baud(port):
-    """The board's actual rate. Delegates to pyDAC2, which owns BAUD.
-
-    This function used to carry its own copy of the candidate list and the probe
-    loop. Two copies of the same hardware fact is the exact mistake `ladder.py`
-    exists to prevent -- bench.py and harness.py each had a version regex, they
-    drifted, and `make run` silently could not see a controller at all. So the
-    probe lives in the transport and this is a one-line forward.
+    """The board's actual rate. Delegates to pyDAC2, which owns the candidate
+    list and the probe loop for every tool in the tree -- a second copy here
+    would be the same drift as the two version regexes `ladder.py` exists to
+    prevent. Never assume the rate: at the wrong one the probe scans 200 lines
+    at a 2 s timeout, which is up to 400 s of total silence.
     """
     import pyDAC2
     return pyDAC2.resolve_baud(port)
@@ -3852,10 +3798,13 @@ def plan(coils, multi=False, damp=False, dc=True):
             print("     %d     %s      %.4f    %8.0f   %5.0f  %.4f   %8.0f%s"
                   % (c, name, f, seed, g, amp, amp * seed * g,
                      "  <-- at AMP_MAX" if amp >= AMP_MAX else ""))
-    print("\n  AMP_MAX is %.2f V against a %.2f V half-window; the rail guard"
-          % (AMP_MAX, VMAX - BIAS_V))
-    print("  unwinds at %d/%d counts and each point is retried at half amplitude."
-          % (RAIL_GUARD_LOW, RAIL_GUARD_HIGH))
+    print("\n  AMP_MAX is %.2f V against a %.2f V worst-case half-window (the"
+          % (AMP_MAX, float(np.min(np.minimum(BIAS_CH - VMIN, VMAX - BIAS_CH)))))
+    print("  bias is per-channel now, so the binding coil is the one nearest a")
+    print("  rail: %s V). The rail guard unwinds at %d/%d counts and each point"
+          % (" ".join("%.2f" % v for v in BIAS_CH), RAIL_GUARD_LOW,
+             RAIL_GUARD_HIGH))
+    print("  is retried at half amplitude.")
 
 
 def main():
@@ -3879,14 +3828,19 @@ def main():
     ap.add_argument("--no-dc", action="store_true", help="skip the DC step pass")
     ap.add_argument("--multisine", action="store_true",
                     help="drive all three modes at once, one point per coil "
-                         "instead of three. Removes the inter-mode leftover ring "
-                         "that contaminated every point of the 2026-08-17 23:12 "
-                         "pass (|pre|/|drive| 3.5%% to 417%%)")
+                         "instead of three. NEGATIVE RESULT ON RESONANCE, "
+                         "2026-08-18: it improved the per-coil phase spread "
+                         "(73-89 deg -> 31.6/36.7/7.8) and BROKE the signs, 7 of "
+                         "12 against the one-at-a-time pass's 12 of 12, because a "
+                         "ramping response has 1/f^2 skirts that leak the loudest "
+                         "mode into the quietest mode's bin. Kept, but do not "
+                         "spend 18 minutes rediscovering that")
     ap.add_argument("--settle", action="store_true",
-                    help="between coils, close a diagonal velocity loop until the "
-                         "ring is down rather than waiting tau > 138 s for it. "
-                         "Colocated, so it needs no Phi and no A -- which is what "
-                         "the pass is there to measure")
+                    help="damp between POINTS rather than waiting tau > 138 s for "
+                         "the ring: in-process with `ModalDamper` when "
+                         "data/modal.json loads, otherwise by handing the port to "
+                         "`bench.py %s`. The in-process damper is UNPROVEN -- see "
+                         "its docstring" % SETTLE_VERSION)
     ap.add_argument("--hand-damp", action="store_true",
                     help="stop between coils and ask a human to still the plate "
                          "by hand. tau > 138 s, so this is the only affordable "
@@ -3911,10 +3865,10 @@ def main():
                          "can load it; default data/modal.json")
     ap.add_argument("--signature", default=SIGNATURE_PATH)
     ap.add_argument("--freqs", default=None, metavar="fA,fB,fC",
-                    help="drive/analyse at THESE mode frequencies instead of the "
-                         "2026-08-06 values. The `sensors` pass prints the ones "
-                         "to use; the modes drift and 0.010 Hz was measured "
-                         "between 08-06 and 08-17")
+                    help="drive/analyse at THESE mode frequencies instead of "
+                         "MODES. The `sensors` pass prints the ones to use; the "
+                         "modes drift, by up to 0.0170 Hz over the 11 days to "
+                         "2026-08-17 and 0.0068 Hz again by 2026-08-20")
     ap.add_argument("--baud", type=int, default=None,
                     help="serial baud; probed via pyDAC2 if omitted")
     ap.add_argument("--color", default="auto", choices=["auto", "always", "never"],
@@ -3935,11 +3889,10 @@ def main():
         if len(fs) != MODES_N:
             sys.exit("  --freqs needs %d comma-separated values, got %d"
                      % (MODES_N, len(fs)))
-        MODES = tuple((MODES[i][0], fs[i]) for i in range(MODES_N))
+        was = MODES
+        MODES = tuple((was[i][0], fs[i]) for i in range(MODES_N))
         print("  MODES overridden: %s"
-              % ", ".join("%s=%.5f Hz (was %.5f)"
-                          % (n, fs[i], (0.7154396674928515, 0.9949288053475371,
-                                        1.6395739504316790)[i])
+              % ", ".join("%s=%.5f Hz (was %.5f)" % (n, fs[i], was[i][1])
                           for i, (n, _) in enumerate(MODES)))
     if a.dwell:
         DWELL_S = UNWIND_S = a.dwell
@@ -3977,9 +3930,9 @@ def main():
     # the `finally` parks them either way.
     def _term(signum, frame):
         raise KeyboardInterrupt("SIGTERM")
-    for _sig in (signal.SIGTERM, signal.SIGHUP):
+    for sig in (signal.SIGTERM, signal.SIGHUP):
         try:
-            signal.signal(_sig, _term)
+            signal.signal(sig, _term)
         except (ValueError, OSError, AttributeError):
             pass                       # not on the main thread, or no SIGHUP
 
@@ -3996,7 +3949,7 @@ def main():
         dac = open_dac(port, baud)
         preflight_stream(dac)
         if a.what in ("sensors", "all"):
-            sens = sensors_run(dac, a.seconds, rec)
+            sensors_run(dac, a.seconds, rec)
         if a.what in ("coils", "all"):
             plan(coils, a.multisine, a.settle, not a.no_dc)
             def _pause(coil):
@@ -4033,8 +3986,8 @@ def main():
             g = mimo_gate(res)
             g["coils"] = sorted({p["coil"] for p in res})
             _EXPORT["phi"] = g
-            _EXPORT["a"] = dict(A=g["A"], coils=g["coils"])
             _EXPORT["source"] = "driven: " + os.path.basename(rec.path)
+            _EXPORT["dcm"] = dcm
         if a.what == "phi":
             rdr = Reader(dac)
             park(dac)
@@ -4053,7 +4006,7 @@ def main():
         if a.what == "pulse":
             rdr = Reader(dac)
             rec.mark("passive")
-            t, c, _, _ = acquire(dac, rdr, rec, 10.0, guard=False)
+            t, c, _, _ = acquire(dac, rdr, rec, 10.0)
             resting = [float(x) for x in c.mean(axis=0)] if len(c) else None
             shots = pulse_run(dac, rec, a.pulse_coil, a.repeats)
             if not shots:

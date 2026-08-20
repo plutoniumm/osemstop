@@ -13,3 +13,9 @@ data/
 
 # macOS
 .DS_Store
+
+# The Slidev deck. Not part of the controller and not reviewed with it.
+talk/
+
+# Working notes for the AI assistant. Not part of the deliverable.
+CLAUDE.md

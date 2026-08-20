@@ -1,21 +1,19 @@
 """
 Simulator server -- runs the REAL controller against a simulated plant
 ======================================================================
-This imports whichever `osem.vN.py` harness.py selects and drives its actual `Controller`,
-`Channel`, `OnePoleFilter`, `SlidingRMS`, `slew_limit` and `RateLimitedActuator`.
-There is no second implementation of the control law anywhere: what the suite
-asserts is the output of the same code that talks to the hardware. Edit the
-controller and the simulation changes with it.
+This imports whichever controller `harness.py` selects and drives that module's
+own `Controller`. There is no second implementation of the control law anywhere:
+what the suite asserts is the output of the same code that talks to the hardware.
+Edit the controller and the simulation changes with it.
 
-Two things are faked, and only two:
+Three things are faked, and only three:
 
-  * `serial` is stubbed before import, because pyDAC imports it at module level
-    and there is no port here. Nothing in the stub is ever called.
-  * `DACController` is replaced by `FakeDAC`, which validates its arguments the
-    same way the real one does and remembers the last voltage written to each
-    channel. That held voltage is what the simulated coil pulls on, so the
-    controller's own `RateLimitedActuator` throttle and deadband shape the force
-    exactly as they would on the bench.
+  * `serial` is stubbed before import, because the transport imports it at module
+    level and there is no port here. Nothing in the stub is ever called.
+  * the DAC is replaced by `FakeDAC`, which validates its arguments the same way
+    the real one does and remembers the last voltage written to each channel.
+    That held voltage is what the simulated coil pulls on, so the controller's
+    own write throttle and deadband shape the force exactly as on the bench.
   * the `time` module inside the controller's namespace, so the actuator
     throttle is spaced in SIMULATED milliseconds rather than wall-clock ones.
     See `_SimTimeModule`. Without it a run stepped faster than real time holds a
@@ -52,7 +50,7 @@ facility for the things a test has to command on purpose:
 Injected on demand (`kick`, `earthquake`, `set_occlusion`), because the three
 faults the bench found on 2026-08-03 are otherwise unreachable from here:
 
-  * a kick: one velocity impulse, what `make test` sends on `x`;
+  * a kick: one velocity impulse;
   * an earthquake: a transient aimed at named channels, large enough to rail
     their ADCs and pin their actuators -- the saturation breaker needs 30
     CONSECUTIVE pinned samples, so this is the only way to reach it;
@@ -69,10 +67,21 @@ separate measured objects rather than one parameterised guess:
     in versions.md still reproduces exactly.
   * the EIGHT-OSEM body is built from the 2026-08-04 and 2026-08-06 bench
     sessions and is described in full at BODY 8 below. It reproduces the
-    measured facts that make eight channels hard: two modes 58% apart rather
-    than three near-degenerate ones, a5 sensing at ~1/12 of a0, a4/a6/a7
+    measured facts that made eight channels hard THAT WEEK: two modes 58% apart
+    rather than three near-degenerate ones, a5 sensing at ~1/12 of a0, a4/a6/a7
     reading plenty of signal but none of it in the loop band, and the full
     8x8 DC actuation matrix so a bias trim moves what it measurably moves.
+
+NEITHER BODY IS THE RIG AS IT STANDS, and nothing here should be read as
+claiming otherwise. The eight-OSEM body carries TWO modes at 1.046 and 1.657 Hz;
+the rig was measured on 2026-08-17/20 to have THREE, at 0.71519 / 0.99231 /
+1.65307 Hz (`status.py` MODES), and a4/a6/a7 were shown to be coherent with the
+optic at 0.46 / 0.26 / 0.50 rather than blind (CLAUDE.md Sec 6). So the modal
+path of `eta` and `theta` is NOT REACHABLE from this file, and most of what
+`make check` reports as a failure is that mismatch rather than a controller
+defect. Refitting the body needs bench time, not an edit here; until then the
+numbers below stay exactly as they were measured, which is what keeps every
+result quoted in versions.md reproducible.
 
 `load()` picks the body from len(ENABLE_CHANNEL). Nothing else in this file
 knows which one is running.
@@ -92,7 +101,7 @@ import types
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)            # controllers and pyDAC live one level up
 
-# --- stub `serial` so pyDAC imports without hardware -------------------------
+# --- stub `serial` so pyDAC2 imports without hardware ------------------------
 if "serial" not in sys.modules:
     _serial = types.ModuleType("serial")
 
@@ -103,7 +112,7 @@ if "serial" not in sys.modules:
     _serial.Serial = _Serial
     sys.modules["serial"] = _serial
 
-sys.path.insert(0, ROOT)                # so the controller finds pyDAC
+sys.path.insert(0, ROOT)                # so the controller finds pyDAC2/stdlib
 
 import importlib.util
 
@@ -118,9 +127,10 @@ import importlib.util
 SAMPLE_HZ = 347.2                       # 1 / 2.88 ms -- the WIRE rate
 
 # ...but the CONTROL LOOP does not run at the wire rate whenever it is driving
-# coils. `pyDAC.set_voltage()` writes SET and then reads up to 50 lines waiting
-# for the `OK` ack, and every one of those lines is a stream sample the
-# controller never sees. Measured on the 2026-08-03 logs: median inter-sample
+# coils. The ACKED transport (`pyDAC.py`, deleted 2026-08-17) wrote SET and then
+# read up to 50 lines waiting for the `OK`, and every one of those lines was a
+# stream sample the controller never saw. Measured on the 2026-08-03 logs: median
+# inter-sample
 # time across a whole run is 2.80 ms (348 Hz, matching the wire), but across
 # consecutive DAMPING rows it is 41 ms -- about 24 Hz, a factor of 14.
 #
@@ -135,8 +145,9 @@ SAMPLE_HZ = 347.2                       # 1 / 2.88 ms -- the WIRE rate
 # aggregate -- 24 Hz during DAMPING against a 348 Hz wire -- so the free
 # parameter is set to reproduce it. At ~3.7 writes per loop iteration, 3.5 gives
 # 25 Hz measured in-sim, against the bench's 24.
-#   3.5  reproduces pyDAC.DACController on the bench   (default)
-#   0    pyDAC2.FastDAC, which writes and returns without reading the ack
+#   3.5  reproduces the acked transport on the bench   (default)
+#   0    pyDAC2.FastDAC, which writes and returns without reading the ack.
+#        THIS IS WHAT SHIPS TODAY -- harness.py's BASE_PLANT pins ack_drain to 0
 # A plant parameter rather than a constant, so one session can show both.
 ACK_DRAIN = 3.5
 DT = 1.0 / SAMPLE_HZ
@@ -161,34 +172,26 @@ TRACE_N = int(WINDOW_S * SAMPLE_HZ / DECIM)
 DT_REF = 1.0 / 500.0
 NOISE_SCALE = math.sqrt(DT_REF / DT)
 
-# What a shock delivers, in sensor volts per second.
+# What a shock delivers, in sensor volts per second. KICK_DV is the manual one:
+# a single impulse, to watch a loop absorb a bump.
 #
-# KICK_DV is the manual one -- `x` in the TUI -- and is UNCHANGED at 6.0. It
-# exists to watch a loop absorb a bump.
+# The AUTO kick is the stimulus for the SATURATION scenario, which needs the
+# actuator pinned for MAX_CONSECUTIVE_SATURATED = 30 CONSECUTIVE samples -- 86 ms
+# at the bench's 348 Hz, where the old 500 Hz simulator made it 60 ms. A bare
+# 6.0 V/s impulse under Kp = -0.600 no longer reaches that: the gain damps it
+# away inside one half cycle and the 2.0 V/s slew limit spends part of that
+# travelling. So it is a SUSTAINED transient, which is what the bench event was
+# -- v2 pinned for 31 samples while being DRIVEN, not while ringing down.
 #
-# The AUTO kick is a different job: it is the stimulus for the saturation
-# scenario, and it has to hold the actuator against its clip for
-# MAX_CONSECUTIVE_SATURATED CONSECUTIVE samples. That threshold is counted in
-# samples, so at the bench's 348 Hz it means 86 ms where at the old simulated
-# 500 Hz it meant 60 ms, and a bare 6.0 V/s impulse under Kp = -0.600 no longer
-# reaches it: the gain damps the impulse away inside one half cycle, and the
-# actuator's own 2.0 V/s slew limit spends part of that just travelling. WAS a
-# 6.0 V/s impulse; it is now a SUSTAINED transient of the same order, which is
-# what the bench event actually was -- v2 pinned for 31 samples while being
-# driven, not while ringing down. See Sim.earthquake.
-# AUTO_KICK_DV is BODY-DEPENDENT, and has to be: the scenario is "the actuator
-# is clipped and is STILL bringing the optic back", which is a statement about
-# the kick against the actuator's authority, not about the kick alone. A clipped
-# output delivers +-0.25 V whatever Kp is, so on a body whose coils move the
-# mass 0.30 as hard the same 9.0 V/s is not a disturbance the loop can win
-# against at any gain. See AUTO_KICK_DV_8 and harness.py's `gscale`.
+# AUTO_KICK_DV is BODY-DEPENDENT and has to be: a clipped output delivers
+# +-0.25 V whatever Kp is, so on a body whose coils move the mass 0.30 as hard,
+# the same 9.0 V/s is not a disturbance the loop can win against at any gain.
+# See _select_body's scaling of it, and harness.py's `gscale`.
 KICK_DV = 6.0
 AUTO_KICK_DV = 9.0
 AUTO_KICK_S = 2.0
 
 X_REST = 2.5                # mechanical zero of the optic, in sensor volts
-F0 = 1.0                    # nominal pendulum frequency; MODE_F0 is what runs
-W0 = 2.0 * math.pi * F0
 SENSOR_MIN_V, SENSOR_MAX_V = 0.0, 5.02
 
 # --- the ADC, as the bench actually presents it -----------------------------
@@ -367,7 +370,9 @@ NMODE = 3                           # dynamic modes it has
 # shadow, so where the flag sits decides counts per metre.
 #
 # Every number below is measured. Where something is NOT measured it is marked
-# ASSUMPTION and says what would settle it. Sources:
+# ASSUMPTION and says what would settle it. `provenance.md` and `research.md`,
+# cited here and above, were deleted 2026-08-17 and migrated into CLAUDE.md
+# (Sec "Where the constants came from"); git history still has both. Sources:
 #   versions.md "On the bench, 2026-08-04" and "Sensor centering"
 #   bench/20260804/dcmatrix.log        the 8x8 DC actuation matrix
 #   analysis/where_is_power.py         where each channel's power lives
@@ -404,11 +409,15 @@ MODE_F0_8 = [1.046, 1.657]
 # (see OWN_COUNTS_8). Resolving the split needs a driven measurement, not a
 # passive one -- CLAUDE.md item 2b.
 #
-# a4/a6/a7 are ZERO. Measured: 0.1-9% of their power in the 0.4-3 Hz band
-# against 77-99% for a0-a3, lock-in SNR 1.1-1.5 (their own noise floor), and
-# their bandpassed RMS is flat to three decimals through 40 s of damping that
-# took a factor of 3-12 out of every real channel (osem.v10.py, bench 08-06).
-# They are powered and reading light; the optic is simply not in it.
+# a4/a6/a7 are ZERO here. Measured 2026-08-06: 0.1-9% of their power in the
+# 0.4-3 Hz band against 77-99% for a0-a3, lock-in SNR 1.1-1.5 (their own noise
+# floor), and their bandpassed RMS flat to three decimals through 40 s of damping
+# that took a factor of 3-12 out of every real channel (osem.v10.py, bench 08-06).
+# SUPERSEDED ON THE RIG, NOT HERE: multiple coherence against a0-a3 on
+# 2026-08-17 puts a4/a6/a7 at 0.46 / 0.26 / 0.50 of the optic (CLAUDE.md Sec 6),
+# and the driven test that said otherwise was measuring the COILS' reach, not the
+# sensors'. This body is deliberately left at what 08-06 measured -- refitting it
+# is bench work -- so read a 0.0 row as "the 08-06 plant", never as "the rig".
 SHAPE_8 = [[1.000,  1.000],      # a0   reference
            [0.360, -0.650],      # a1   anti-phase on the differential mode
            [1.210,  1.290],      # a2
@@ -659,7 +668,7 @@ def _select_body(n, counts_per_volt):
 
 
 class FakeDAC:
-    """Stands in for DACController. Same validation, no I/O, no printing."""
+    """Stands in for the real DAC. Same validation, no I/O, no printing."""
 
     def __init__(self):
         self.held = {c: float(osem.BIAS[i]) for i, c in enumerate(osem.DAC_CHANNELS)}
@@ -787,9 +796,7 @@ class Sim:
             self.diag = [osem.SlidingRMS(osem.ENVELOPE_WINDOW_S) for _ in range(N)]
             self.diag_ratio = [0.0] * N
             self.t = 0.0
-            self._drain = 0      # stream samples still being eaten by an ack
-            self._dt_lost = 0.0  # their duration, handed to the controller
-            self._loop_win = []  # (t, seen) over the last 1 s -> loop_hz
+            self._drain, self._dt_lost, self._loop_win = 0, 0.0, []
             self.loop_hz = SAMPLE_HZ
             self.trace = []
             self.cursor = 0
@@ -1219,7 +1226,7 @@ def load(controller_file):
     global COUNTS_PER_VOLT, VOLTS_PER_COUNT, DC_REST_V
     global LINE_V, LINE2_V, OWN_RMS_V, OWN_SIGMA, LINE_ANY, OWN_ANY
     CONTROLLER_FILE = os.path.abspath(controller_file)
-    VERSION = os.path.basename(CONTROLLER_FILE)[:-3]        # "osem.v0"
+    VERSION = os.path.basename(CONTROLLER_FILE)[:-3]        # "osem.eta"
     modname = VERSION.replace(".", "_")                     # dots are not legal
     spec = importlib.util.spec_from_file_location(modname, CONTROLLER_FILE)
     mod = importlib.util.module_from_spec(spec)

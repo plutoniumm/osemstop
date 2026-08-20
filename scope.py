@@ -35,9 +35,10 @@ sys.path.insert(0, HERE)
 
 N = 8
 FULL = 1023                      # 10-bit ADC, full scale
-RAIL_LO, RAIL_HI = 12, 1011      # osem.zeta.py RAIL_LOW_COUNTS / RAIL_HIGH_COUNTS
-MID = 511.5                      # mid-scale; every OSEM rests above it (CLAUDE.md 6)
-KEEP_S = 125.0                   # history held server-side, a little over the widest view
+RAIL_LO, RAIL_HI = 12, 1011      # the ladder's RAIL_LOW_COUNTS / RAIL_HIGH_COUNTS
+MID = FULL / 2.0                 # 511.5; every OSEM rests above it (CLAUDE.md 13)
+WIDEST_VIEW_S = 120.0            # the largest window the page offers
+KEEP_S = WIDEST_VIEW_S + 5.0     # history held server-side, a little over it
 CSV_GLOB = "data/*_fast_lock.csv"
 LIVE_GLOB = "data/*.csv"         # any bench tool holding the port also streams to disk
 LIVE_S = 3.0                     # controllers flush every 200 rows, i.e. ~0.5 s at 380 Hz
@@ -261,26 +262,32 @@ class SerialSource(threading.Thread):
 
 
 def find_port():
-    """First USB serial device that reports a VID, as bench.py ranks them."""
+    """Best candidate port, ranked by `bench.rank` -- one owner for that ranking.
+
+    This used to take the first device reporting any VID, which is NOT what
+    bench.py picks: a known board VID outranks a generic USB serial device.
+    """
     try:
         from serial.tools import list_ports
+
+        import bench
     except ImportError:
         return None
-    for p in list_ports.comports():
-        if p.vid is not None:
-            return p.device
-    return None
+    found = [p for p in list_ports.comports() if bench.rank(p) < 2]
+    return min(found, key=bench.rank).device if found else None
 
 
 def open_board(port):
     """(FastDAC, note) or (None, why-not). Never called while bench_busy()."""
-    import pyDAC2
+    import stdlib
     if port is None:
         return None, "no USB serial device found"
     dac = None
     try:
-        baud = pyDAC2.resolve_baud(port, log=lambda s: print("  " + s))
-        dac = pyDAC2.FastDAC(port)
+        # stdlib.open_dac probes the baud first. Never skip that: at the wrong
+        # rate the READY scan is 200 lines x 2 s = 400 s of silence.
+        dac = stdlib.open_dac(port, log=lambda s: print("  " + s))
+        baud = dac.ser.baudrate
         # Advisory, and it only keeps a SECOND scope.py off the wire -- the
         # controllers do not flock, which is why bench_busy() exists.
         fcntl.flock(dac.ser.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -339,7 +346,7 @@ PAGE = r"""<!doctype html>
 </div>
 <div id="wrap"><canvas id="c"></canvas><div id="leg"></div></div>
 <script>
-const {FULL, LO, HI, MID} = __CONSTS__;      // filled in from the Python side
+const {FULL, LO, HI, MID, KEEP} = __CONSTS__;   // filled in from the Python side
 const COL=['#ff4d4d','#ff9f2e','#ffe14d','#4ade4a',
            '#35e0e0','#5aa0ff','#b07cff','#ff5ec4'];
 const cv=document.getElementById('c'), ctx=cv.getContext('2d');
@@ -361,7 +368,7 @@ function reset(n){
 }
 
 function trim(){
-  const cut=ts[ts.length-1]-125;
+  const cut=ts[ts.length-1]-KEEP;
   let k=0; while(k<ts.length && ts[k]<cut) k++;
   if(k){ ts.splice(0,k); for(const y of ys) y.splice(0,k); }
 }
@@ -485,7 +492,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0].rstrip("/") or "/"
         if path in ("/", "/index.html"):
             page = PAGE.replace("__CONSTS__", json.dumps(
-                {"FULL": FULL, "LO": RAIL_LO, "HI": RAIL_HI, "MID": MID}))
+                {"FULL": FULL, "LO": RAIL_LO, "HI": RAIL_HI, "MID": MID,
+                 "KEEP": KEEP_S}))
             return self._send(200, page, "text/html; charset=utf-8")
         if path == "/data":
             since = 0

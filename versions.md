@@ -1,9 +1,9 @@
 # Controller versions
 
 Every measured number here carries the file it came from. The ladder is
-**epsilon, zeta, eta**; older rungs — including **`delta`, deleted 2026-08-17** —
-are in git history and their sections are kept because the hardware numbers in them
-are real.
+**epsilon, zeta, eta, theta**; older rungs -- including **`delta`, deleted
+2026-08-17** -- are in git history and their sections are kept because the hardware
+numbers in them are real.
 
 **Controllers were standalone until 2026-08-17, and are not any more.** Every
 `osem.*.py` used to import nothing from the others, deliberately: `bench.py` reads
@@ -19,7 +19,6 @@ rule existed, it was load-bearing, and it was dropped on purpose.
 
 ```
 python3 harness.py --list          # what exists, controllers and bench tools
-make test                          # pick one, watch it run, press x to kick it
 make check                         # every version the simulator can drive, asserted
 make scope                         # watch all 8 channels live
 ```
@@ -32,18 +31,36 @@ make scope                         # watch all 8 channels live
 |---|---|---|---|---|
 | **epsilon** | 8/8 | diagonal + Kalman velocity | **never run** | not re-run since the rename |
 | **zeta** | 8/8 | **modal**, Phi/A from `data/modal.json` | **ran 2026-08-17** | 41/10 |
-| **eta** | 8/8 | modal + one filter over the modal coordinates | **ran 2026-08-18** | 41/10, same failure set |
+| **eta** | 8/8 | modal + one filter over the modal coordinates | **ran 2026-08-18, and again 2026-08-20** | 41/10, same failure set |
+| **theta** | 8/8 | eta + the **actuator budget ramp** (`CLAUDE.md` § 17) | **NEVER RUN** | **never in a suite run** |
 
 `zeta` closed a modal loop on 2026-08-17 and damped **5x faster than diagonal**
-(§ *On the bench, 2026-08-17 evening*). **`eta` ran on 2026-08-18** — one diagonal
+(§ *On the bench, 2026-08-17 evening*). **`eta` ran on 2026-08-18** -- one diagonal
 null test and one modal run, and it is the first rung in this repo's history to
-print `LOCKED` (§ *On the bench, 2026-08-18*). **`epsilon` has never been on the
-rig.** `delta`, the only rung that ever carried `BENCH_STATUS = validated`, was
-deleted 2026-08-17 (`git show b90c983:osem.delta.py`); the diagonal control is now
-`zeta` or `eta` run with no `data/modal.json`.
+print `LOCKED` (§ *On the bench, 2026-08-18*). **It ran again on 2026-08-20** --
+diagonal, 91.2 s of DAMPING, four hand kicks, **zero faults, and it PUMPED**
+(§ *On the bench, 2026-08-20*). **`epsilon` has never been on the rig, and neither
+has `theta`.** `delta`, the only rung that ever carried `BENCH_STATUS = validated`,
+was deleted 2026-08-17 (`git show b90c983:osem.delta.py`); the diagonal control is
+now `zeta`, `eta` or `theta` run with no `data/modal.json`.
 
-**The suite counts above predate the deletions and the 2026-08-17/18 tool work and
-have not been re-run.**
+**`theta` is `eta` plus the actuator budget ramp** that `CLAUDE.md` § 17 proposed on
+2026-08-17: one global actuator budget, reallocated continuously between the modal
+term and the per-channel terms as the measured disturbance rises and falls, rather
+than a split fixed at build time. **It is BUILT and it is UNMEASURED.** Its
+selftests pass **144/144**, it is in no `make check` run, and **no part of it has
+been on the rig.** Every open question in § 17 is still open -- above all that **a
+time-varying blend of two dissipative laws is not known to be dissipative**, and
+that nothing offline catches a law that pumps. 2026-08-20 is the precedent for that
+last point: a closed diagonal run pumped on hardware with every offline check
+passing.
+
+**`make check` HAS NOT BEEN RUN SINCE 2026-08-17.** The suite counts above predate
+the `delta` deletion, the 2026-08-17/18 tool work, the whole of 2026-08-20, and the
+addition of `theta`. What has been run on 2026-08-20 is the **per-file selftests**:
+`osem.eta.py` **114/114**, `osem.theta.py` **144/144**, `status.py` all pass. A
+selftest asserts a planted property against a plant known exactly; **it is not the
+suite.**
 
 **Deleted 2026-08-17, git history only:** `zero` (one channel, latching saturation
 fault, the original), `alpha` (`auto-disable`), `beta` (`runaway-trend`, and still
@@ -64,12 +81,13 @@ numbers under it. So a name has to be translated before it can be searched for:
 | `delta` | **v12** | § *v12 — the loop gets its own clock* | deleted 08-17 |
 | `epsilon` | — | no numbered section; written after the rename | in the tree |
 | `zeta` | — | § *On the bench, 2026-08-17 (evening)* | in the tree |
-| `eta` | — | § *eta*, § *On the bench, 2026-08-18* | in the tree |
+| `eta` | -- | § *eta*, § *On the bench, 2026-08-18*, § *On the bench, 2026-08-20* | in the tree |
+| `theta` | -- | no numbered section; § *On the bench, 2026-08-20* for the session that built it | in the tree, **never run** |
 | `sysid` | **v6** | § *Bench tools, not rungs* | in the tree |
 
 `ladder.py`'s `RENAMED` is the authority for what the tools accept, and it is
-narrower than this table on purpose: `LADDER = ("epsilon", "zeta", "eta")` and only
-**v6 → sysid** still resolves to a file from a number. Every other number —
+narrower than this table on purpose: `LADDER = ("epsilon", "zeta", "eta", "theta")`
+(`ladder.py:79`) and only **v6 → sysid** still resolves to a file from a number. Every other number --
 including v0, v4, v9 and now v12, whose sections are still here — reports "that
 version was deleted; see versions.md", which is what this table is for.
 
@@ -545,8 +563,8 @@ the new channels are conservative and the validated four are untouched.
 ## Adding a version
 
 Copy the version you are starting from, bump `VERSION_TAG`, list what you fixed
-in `FIXES`, and the harness picks it up with no other changes — `--list`,
-`make test` and `make check` all discover `osem.v*.py` by glob.
+in `FIXES`, and the harness picks it up with no other changes -- `--list`
+and `make check` both discover `osem.v*.py` by glob.
 
 `FIXES` is load-bearing, not documentation. The suite reads it and **inverts the
 corresponding check**: claim `rail-threshold` and you must now arm the interlock
@@ -594,9 +612,7 @@ It matters more than it sounds: at 24 Hz the sample-counted
 `MAX_CONSECUTIVE_SATURATED = 30` means 1.2 s rather than 86 ms, so saturation
 essentially stops tripping, and the actuator updates 4x less often. Twenty of the
 suite's checks invert under it. `harness.py` therefore pins `ack_drain = 0` in
-`BASE_PLANT` — the suite characterises the control law, not the transport — while
-`make test` runs at the honest default so what you watch is the
-loop the hardware actually has.
+`BASE_PLANT` -- the suite characterises the control law, not the transport.
 
 The plant, though, is modelled: a linear second-order oscillator per axis, with
 exactly one nonlinearity — the ADC, which offsets each channel to its measured
@@ -2145,11 +2161,17 @@ happening.**
 Compare § *Diagonal reallocation* in `CLAUDE.md`, where the term eating the headroom
 was Ki (peak 0.1135 → 0.0056 V). It is now Kd.
 
-### 11. a5 is a disconnected pin; a6/a7 came back with no cause
+### 11. a5 is a disconnected pin; a6/a7 came back with no cause -- SUPERSEDED 2026-08-20
+
+**SUPERSEDED 2026-08-20 ON a5. It came back and `ENABLE_CHANNEL[5]` is `True`
+again** -- std 9.16 counts, 36 distinct values, coherence 0.00 -> 0.70, and **its
+own coil still does not move it** (−0.39 ±0.93 counts/V, 0.4 sigma). § *On the
+bench, 2026-08-20*. The measurement below was right for the data it had and no
+cause is recorded for the change.
 
 **a5: exactly one distinct value, 0.0 counts, variance exactly zero, across 236 387
 samples in three records**, while a0–a4 ran std 41–90 counts. A live ADC input
-carries ±1 count of dither. **Now disabled in the controller.**
+carries ±1 count of dither. **Disabled in the controller on that basis.**
 
 **a6/a7 were bottom-railed at 4.3 / 8.8 counts (std 0.48–0.56) at 17:59 and read
 591.3 / 566.0 at 18:20. They came back and NO CAUSE IS RECORDED.**
@@ -2211,9 +2233,13 @@ nothing there. `epsilon`'s 12 are the worst on the ladder and it has never been 
 the rig. All of them are **unattributed**: none of these files has been committed,
 so there is no baseline to diff against. Commit, then bisect.
 
-**That table is stale in one row — `delta` has since been deleted — and the suite has
-not been re-run since the deletions or the 2026-08-17/18 `status.py` / `stdlib.py` /
-`jerk.py` work.**
+**That table is stale in two rows and `make check` HAS NOT BEEN RE-RUN SINCE.**
+`delta` has since been deleted; `theta` did not exist and has never appeared in a
+suite run. Nothing after 2026-08-17 is represented -- not the deletions, not the
+`status.py` / `stdlib.py` / `jerk.py` work of 2026-08-17/18, and not the whole of
+2026-08-20. The only thing run on 2026-08-20 was the **per-file selftests**:
+`osem.eta.py` **114/114**, `osem.theta.py` **144/144**, `status.py` all pass, and a
+selftest is not the suite.
 
 ### What this session did NOT establish
 
@@ -2397,6 +2423,379 @@ never run; **the χ²/dof distribution**; and **whether `settle` can be made to 
 
 ---
 
+## On the bench, 2026-08-20 -- the coils were re-seated, a slope flipped sign, and the loop pumped
+
+**The largest uncontrolled change to this plant since the 2026-08-03 rewiring.** A
+bias raise took the front end down at midday; the hardware team **re-seated the
+coils**; every slope was re-measured afterwards and **one had changed sign**. One
+closed-loop run followed and it **pumped**. Records:
+
+| record | what it is |
+|---|---|
+| `data/20260820_125342_status_sensors.csv`, `data/20260820_125525_status_sensors.csv` | the dead front end -- all eight channels at exactly 0.0 counts |
+| `data/20260820_155638_status_slopesign.csv` | the 8-coil DC pass, 0.10 -> 0.40 V, 12 s dwell |
+| `data/20260820_162534_status_sensors.csv` | 300 s census, 105 013 samples, no drive |
+| `data/20260820_171227_jerk_eta.log` + `data/20260820_171242_fast_lock.csv` | the one closed-loop run, `eta`, diagonal |
+
+**The rig runs on a 3 A power supply** (rig owner, 2026-08-20). Nothing computable
+from this repo bounds the coil current -- the coil driver is not in the tree.
+
+### 1. a3's slope CHANGED SIGN, and nothing in software could catch it
+
+All eight coils, one at a time, **0.10 -> 0.40 V, 12 s dwell**, counts/V on each
+channel's own sensor, uncertainty on the **mean** over 1 s blocks (`slopesign.py`):
+
+| ch | counts/V | | ch | counts/V | |
+|---|---|---|---|---|---|
+| a0 | **+70.50** ±5.63 | 12.5σ | a4 | **+5.06** ±0.46 | 10.9σ |
+| a1 | **+88.87** ±10.15 | 8.8σ | a5 | **−0.39** ±0.93 | 0.4σ, **UNRESOLVED** |
+| a2 | **−205.94** ±30.46 | 6.8σ | a6 | **+10.37** ±0.30 | 34.9σ |
+| a3 | **−98.79** ±19.81 | 5.0σ | a7 | **+8.07** ±0.17 | 46.2σ |
+
+**a3 was +81.08 counts/V before the re-seating and is −98.79 after**, so
+`STEADY_GAIN[3]` is now **+0.035** and a0-a3 read **−0.035 −0.035 +0.035 +0.035**
+(`osem.eta.py:221`, `osem.theta.py:351`). Until it was flipped, that channel's
+shipped gain was **positive feedback**.
+
+**NOTHING IN SOFTWARE COULD HAVE CAUGHT IT** -- same class as the wrong-`DAC_MAP`
+trap and the 2026-08-17 sign-of-A failure. **Only a DC step on the bench sees it.**
+
+**a6/a7 reproduce their 2026-08-17 values inside 1 sigma** (+10.37 against +10.07,
++8.07 against +8.05), so the estimator is confirmed and a3's change is a change in
+the **rig**. **a4 is now resolved** at 10.9σ where it was 2.9σ, same sign.
+
+**CONSEQUENCE FOR A, and it is an argument from a measurement rather than a
+re-measurement.** Every determination of A in this repo -- including the twelve
+signs settled 12-of-12 on 2026-08-18 -- predates the re-seating. **A DC slope on
+this rig has now been observed to flip sign across a re-seating**, so
+`data/modal.json` may not be assumed to describe this plant. **A has not been
+re-measured.** `CLAUDE.md` § 3.
+
+### 2. A SIGN BUG: `SLOPE_SIGN` held two conventions at once
+
+`SLOPE_SIGN` was carrying two different quantities in one array: **a0-a3's entries
+were copied from `STEADY_GAIN`** (the **negated** slope, never measured as a slope)
+and **a4/a6/a7's came from a real DC step** (the **raw** slope). So
+`HYBRID_GAIN = HYBRID_KP * SLOPE_SIGN * HYBRID_COHERENT` gave **a4/a6/a7 positive
+feedback**.
+
+**It never fired, and only because of an unrelated defect**: `inband-floor` demoted
+those three at engage on both 2026-08-18 runs, so `|gain|` was exactly 0.0000 for
+100 % of DAMPING. **A latent positive-feedback path was saved by a defect this repo
+lists as a defect.** Neither the selftests, nor the modal gate, nor the colocation
+check saw it.
+
+**The fix** (`osem.eta.py:480-496`, `osem.theta.py:632-648`): `SLOPE_SIGN` is now the
+**physical, measured** slope sign and nothing else; **`DAMP_SIGN = -SLOPE_SIGN`** is
+the separate quantity the gains use; and `HYBRID_GAIN` is additionally masked by
+**`HYBRID_CHANNEL`**, so a non-hybrid channel carries an **identically zero** gain
+rather than a nonzero one held off by a gate.
+
+**The `DAMP_SIGN` negation is EMPIRICAL and the file says so.** The four gains that
+have actually damped on this rig are the negated slope on all four, and that is what
+produced every decay number in the repo -- but working the sign through the code
+gives the **opposite** answer, because `Pid.terms` sets `p = gain x (−vel)`. **One
+of those is wrong and it is not the four hardware confirmations.** There is an
+unfound inversion between `bp`, `vel` and the coil force; if anyone finds it, the
+negation has to come out at the same time.
+
+### 3. a5 is ALIVE -- and its own coil still does not move it
+
+| | before | 2026-08-20 |
+|---|---|---|
+| std, quiet record | **0.00 counts** (variance exactly zero, 236 387 samples, 3 records) | **9.16 counts** |
+| distinct values | **1** | **36** |
+| multiple coherence with a0-a3 | **0.00** | **0.70** |
+
+`ENABLE_CHANNEL[5]` is now **`True`**. Independently, over the 300 s 16:25 census
+(105 013 samples) a5 reads **mean 537.4, std 8.02 counts, 82 distinct values** --
+same verdict, different record.
+
+**ITS GAIN STAYS ZERO, AND THE 0.70 IS NOT A REASON TO TURN IT ON.** **Coil 5 does
+not move a5**: **−0.39 ±0.93 counts/V, 0.4 sigma**, the only unresolved slope on the
+rig. The same drive moves **a1 +9.30, a2 −18.39, a3 +11.11** counts/V. So a5 into
+coil 5 is a **NON-COLOCATED** loop, and **the whole free-dissipation argument for
+the per-channel term is colocation** -- sensor j and coil j on the same coordinate,
+so `−Kp x velocity` opposes motion whatever the plant does, at any positive gain,
+without a model. Non-colocated rate feedback has no such guarantee; it needs A, and
+A's magnitudes are not established. **`HYBRID_CHANNEL[5] = False`**
+(`osem.eta.py:558`).
+
+**a5 is a good SENSOR with no actuator of its own.** The place to use it is a Φ row,
+and nothing has tested that. **No cause is recorded for it coming back.**
+
+### 4. Mode frequencies re-measured, and THE TWO TILTS SWAPPED
+
+**0.71519 / 0.99231 / 1.65307 Hz**, 16:25, 300 s, 105 013 samples, no drive,
+consensus over a0-a3 which agree to **0.00050 / 0.00050 / 0.00000 Hz**. Shifts
+against 2026-08-06: **−0.00675 / +0.00038 / −0.00300 Hz**. **a5 deliberately
+excluded** -- its mode-C peak is **0.0345 Hz out, 41 half-widths**. Alive is not the
+same as belonging in a consensus.
+
+**AND THE TILT LABELS REVERSED:**
+
+| | 2026-08-17 | 2026-08-20 |
+|---|---|---|
+| lowest mode | 0.7283 Hz -> **T1**, 90.3 % | 0.7264 Hz -> **T2**, 81.6 % |
+| middle | 0.9941 Hz -> Z, 88.2 % | 0.9828 Hz -> Z, 73.7 % |
+| highest | 1.6530 Hz -> **T2**, 89.4 % | 1.6665 Hz -> **T1**, 89.9 % |
+
+Recomputed directly from the 16:25 record at the **consensus** frequencies over
+±0.02 Hz, the same reversal and the same sizes: **T2 81.9 % / Z 73.9 % / T1 90.2 %**.
+
+**The geometric Φ's two tilt COLUMNS are therefore exchanged** in `osem.eta.py`,
+`osem.theta.py` and `status.py`. Z is unchanged.
+
+**Every per-mode statement in this file that names a tilt was written under the old
+labels** -- § *On the bench, 2026-08-17 (evening)* § 9 and `CLAUDE.md`
+§ *Per-mode residual*. **Those measurements are still valid; their LABELS are not**,
+and nothing has re-derived which physical tilt each conclusion belongs to.
+
+### 5. The corner assignment survives; the warp grew
+
+Candidate warp vectors on the 16:25 record, counts rms: **`a0+a1 vs a2+a3` 48.17,
+`a0+a2 vs a1+a3` 20.09, `a0+a3 vs a1+a2` 12.61**. `[+1,−1,−1,+1]` is still smallest,
+so **a0 is still diagonal to a3** -- but it wins by **1.6x** where it won by **2x**.
+
+**Warp GREW: warp over the loudest rigid DOF, 0.139 -> 0.262.** Recorded as
+unexplained when measured, and **RESOLVED later the same day: warp is per-sensor
+gain mismatch**, so a growth across a re-seating is a change in the sensor gains.
+The plate is 2-inch steel (rig owner), so its warp is far below the noise floor
+and `warp = 0` is a HARD constraint, one equation per coil -- 8 equations in 4
+unknowns, over-determined, against the 3-in-4 fit that failed on 2026-08-17.
+Fitted `h = 1/g = [1.6057, 1.0667, 0.4761, 0.8514]`, which takes rms warp over rms
+response **0.6224 -> 0.0322, a 19.3x reduction**, and correlates **+0.960** with
+`1/|diagonal slope|` that it never saw. MEASURED BUT NOT SHIPPED: folding `h` into
+Phi's rows alone took cond 3.32 -> 9.41 and chi2/dof 3.47 -> 844.70 and the run
+pumped, because `KALMAN_R` is a variance in RAW volts -- applying it properly needs
+the READINGS normalised and `R` rescaled by `h^2` together. See `CLAUDE.md`
+Sec *WARP IS CALIBRATION*.
+
+### 6. Coherence re-measured, and the caveat IS the result
+
+24 Hann segments of 8192, bias floor **4/24 = 0.167**, raw -> bias-corrected, with
+the in-band rms:
+
+| ch | raw | corrected | in-band rms |
+|---|---|---|---|
+| a4 | 0.240 | **0.09** | 0.115 counts |
+| a5 | 0.751 | **0.70** | 0.237 counts |
+| a6 | 0.271 | **0.12** | 0.038 counts |
+| a7 | 0.209 | **0.05** | 0.034 counts |
+
+**THIS IS NOT EVIDENCE a4/a6/a7 WENT BLIND**, and recording it as such would be the
+**fifth** instance of the error family `CLAUDE.md` § 6 documents four of. Their
+in-band rms is **0.034-0.115 counts, at or under ADC dither** -- a coherence
+estimate on quantisation noise. The 2026-08-17 numbers (**0.46 / 0.26 / 0.50**) came
+from a different record with different ambient and **nothing reconciles the two.**
+Both are single ambient records. **a5's 0.70 is the one number that moved for an
+understood reason.**
+
+### 7. TWO BIAS RAISES FAILED, and a centring vector is a negative result
+
+**ATTEMPT 1, midday: 1.10 V on all eight coils at once.** **Every analog input went
+to zero and STAYED there** through reverts to 0.50 V and then 0.25 V --
+`data/20260820_125342_status_sensors.csv` and `data/20260820_125525_status_sensors.csv`
+read **mean 0.0, std 0.00 counts on all eight** over 38 726 rows each. The board kept
+streaming at **822 Hz with zero dropped frames**, so **the transport was healthy and
+the front end was not.** The coils were reset by hand and re-seated.
+
+**ATTEMPT 2, evening: 0.75 V bias with `BIAS_SWING` also raised 0.25 -> 0.75.** The
+swing is what matters -- it sets how much current a coil can pull, and tripling it
+triples the demand. **The rig owner stopped the run with the power supply audibly
+alarming at its limit**, and `data/20260820_171242_fast_lock.csv` agrees:
+
+- common-mode rms over all eight sensors **15.4 -> 132.3 counts**;
+- on **a4-a7, at ZERO gain with coils pinned at exactly 0.750 V for every sample**,
+  **78-83 %** of their variance was that common mode. **Channels nothing drives
+  cannot move mechanically** -- that is the shared rail feeding the OSEM LEDs;
+- every DC level fell **together** against the census 47 minutes earlier:
+  **−185 −197 −286 −251 −247 −242 −238 −237 counts**.
+
+**`BIAS` now ships at 0.50 V uniform with `BIAS_SWING` back at 0.25**
+(`osem.eta.py:194`, `osem.eta.py:428`), and **`VMIN, VMAX` is now `0.0, 2.5`** where
+this repo elsewhere still says `0.0, 0.5`. **0.50 V IS NOT ESTABLISHED AS SAFE** --
+it sits between 0.25 V, which has run for months, and values measured to fail. The
+test is 30 s at bias with the gains at zero, watching common-mode rms and whether
+the DC levels fall as a block.
+
+**A PER-CHANNEL CENTRING VECTOR IS A NEGATIVE RESULT.**
+`[0.250, 0.494, 0.750, 0.750]` was solved from the DC matrix to pull a2 off the top
+rail. **Stepping coils 2/3 to 1.25 V did NOTHING**: a2 sat at **845 / 857 / 859 /
+861 / 860 counts across five steps** where the linear model predicted **762**, and
+its railed fraction went the wrong way, **5.8 % -> 10.8 %**. **The DC matrix does not
+extrapolate past the 0.10-0.40 V range it was fitted over.** The vector survives as
+`status.py:187` `BIAS_CH`; **the record of the five steps is not named anywhere in
+this repo.**
+
+### 8. The 17:12 run PUMPED, and it is a PHASE error, not a sign error
+
+**A DIAGONAL run** -- `[modal] REFUSED -- running DIAGONAL`, no `data/modal.json`,
+the only A available being the provisional DC fallback. 20.0 s CALIBRATING, then
+**DAMPING from 20.01 s to 111.21 s (91.2 s) with ZERO FAULT samples.**
+
+Dissipation measured directly as `slope x (u − bias) x velocity`, band-limited
+**0.5-2.0 Hz**, common mode removed. Fraction of steps on which the applied force
+was dissipating:
+
+| | a0 | a1 | a2 | a3 |
+|---|---|---|---|---|
+| dissipating steps | **24.2 %** | **41.4 %** | **49.1 %** | **46.1 %** |
+
+**WITHDRAWN THE SAME SESSION, AND THE NUMBERS ABOVE ARE WRONG.** The
+discriminator is right -- a wrong sign gives ~0 %, a 90 deg lag gives 50 % -- but
+the fractions were computed on **WIRE-RATE rows**. The CSV logs every sample at
+581 Hz while `bp`, `vel` and `out` change once per control step at 100 Hz, so in
+the file they are **staircases**, and correlating against a staircase understates
+the velocity term. Re-evaluated at the control clock, same file:
+
+| | a0 | a1 | a2 | a3 |
+|---|---|---|---|---|
+| dissipating, wire rate (WRONG) | 24.2 % | 41.4 % | 49.1 % | 46.1 % |
+| **dissipating, control clock** | **5.4 %** | **11.0 %** | **22.6 %** | **12.3 %** |
+| corr(u, vel) | +0.919 | +0.624 | -0.678 | -0.623 |
+| corr(vel, d(bp)/dt) | +0.782 | +0.703 | +0.722 | +0.763 |
+
+**5-23 % IS AN INVERTED SIGN.** The last two rows also kill the hypotheses built on
+the wrong numbers: the Kalman filter WAS producing velocity (0.70-0.78) and the
+control law WAS feeding it back (0.62-0.92). **`slope x gain` was negative on all
+four channels**, where dissipation requires it positive. Correcting it took the
+dissipating fraction to **93.0 / 90.1 / 50.4 / 96.6 %** and printed `LOCKED`
+(`data/20260820_180344_fast_lock.csv`). See `CLAUDE.md` § *THE GAIN SIGN WAS
+INVERTED ON EVERY DRIVEN CHANNEL*.
+
+Differential rigid DOF, common mode removed, CALIBRATING -> DAMPING, counts rms:
+
+| | Z | T1 | T2 | WARP |
+|---|---|---|---|---|
+| CALIBRATING | 9.47 | 48.11 | 10.82 | 7.76 |
+| DAMPING | **46.52** | **131.85** | **67.05** | **53.68** |
+
+**WARP pumped 6.9x and no gain can damp it, because it is not a rigid-body DOF.**
+**a2 railed 21.2 % of DAMPING** -- 15.4 % at the top rail, 5.8 % at the bottom,
+counted from the raw counts in the CSV.
+
+**TWO THINGS THIS RUN DOES NOT ESTABLISH.** It does **not** show the diagonal law
+pumps in general: it ran at 0.75 V bias with a tripled swing, on re-seated coils, at
+226 Hz. And **no decay measurement is obtainable from it**, so the kick test is no
+closer.
+
+### 9. The cause: the sample rate halves under load, and the old wire budget was wrong
+
+**MEASURED: 351.9 -> 226.5 Hz at the exact instant DAMPING began**, and it stayed
+there. Gap **p50 5.40 ms, p99 5.60 ms, ZERO gaps over 50 ms across 91 s** -- a clean
+step is **contention**, not supply jitter, which would show as tail.
+
+**THE MECHANISM, and the first reading of it was wrong.** It is **NOT** that `SET`
+competes with the stream for wire. **The UART is FULL DUPLEX**, so host->board bytes
+cost the board CPU time to parse but take **no** board->host bandwidth -- `pyDAC2`'s
+own header has said so since 2026-08-06. **What binds is that the ASCII stream is
+already nearly the whole downstream on its own.** A row measured off the wire is
+`563,632,914,668,670,534,588,586\r\n`, **exactly 32 bytes**, so 352 Hz is
+**11.3 kB/s against 11.52 kB/s at 115200 8N1 -- about 98 %**. The board has no
+slack, and once four coils start writing it must **also** parse ~400 `SET`/s and
+format eight integers per sample. **The sampling loop is what gives.**
+
+**`CLAUDE.md`'s wire-budget paragraph counted only the `SET` traffic and has been
+corrected.** `osem.zeta.py:1376` and `osem.epsilon.py:821` still count only that
+direction. `pyDAC2.py` cited the same 50 kB/s figure and **was corrected on
+2026-08-20** to the measured 11.52 kB/s each way, full duplex.
+
+**THE FIX IS BUILT, IT NEEDED A REFLASH, AND IT IS NOW ON.**
+`BINARY_TRANSPORT = True`: a fixed **20-byte frame -- 7.0 kB/s at 352 Hz, 61 % of
+the link instead of 98 %** -- costing no `itoa` per channel per sample, and `seq`
+makes lost frames **countable**.
+
+Probed BEFORE flashing, **`MODE BIN`, `MODE ASCII`, `VER` and `INFO` each returned
+`ERR unknown command`**, with **no 0xA5 0xC3 sync in a full second** after forcing
+`MODE BIN` -- **the board was running an older sketch than `arduino.ino`**, which
+the baud had already implied. After `bench.py --flash` the probe returns
+`OK mode=bin` and `INFO nch=8 mode=ascii presc=32 ack=1 frame=20`.
+
+**MEASURED AFTER: 581 Hz, HELD THROUGH DAMPING**, where ASCII stepped
+351.9 -> 226.5 Hz the instant the coils started writing. `data/20260820_180344`:
+41 352 raw samples, wire 581 Hz, 5.8 averaged per control step, **0 frames dropped,
+0 torn rows**.
+
+**A SECOND BUG BLOCKED IT AND FAILED SILENTLY.** `stdlib.SampleGuard.read` was
+**ASCII-only** while the binary framing lived in `pyDAC2.FastDAC._read_binary`, and
+every controller reads through `SampleGuard`. Turning the transport binary left the
+controller decoding frames as UTF-8: `read` returned `None` forever, the CSV got a
+header and **no rows**, and the controller sat in `CALIBRATING` printing nothing --
+the **fourth header-only recording** in this repo. Fixed by delegating to
+`FastDAC.read_sample`, with selftest coverage.
+
+### 10. The runaway breaker did NOT trip on kicks that killed the 2026-08-18 runs
+
+**The breaker was restructured**: `~receded` moved **out of the latch and into
+`run_trip` as a VETO**, so a recession from the envelope's own recent peak now
+vetoes the trip rather than resetting the sustain (`stdlib.py:1183-1305`, marked
+*"WHOLE OF THIS CHANGE -- 2026-08-20"*). And **the breaker and the fault-clear gate
+now scale off `max(baseline, the running loop's own measured floor)`**, while the
+gain schedule and `LOCKED` still scale off the zero-gain baseline:
+
+    [quiet] the running loop's own floor is measured: ch0=0.3598V (1.44x
+    baseline), ch1=0.5161V (1.94x baseline), ch2=1.1545V (4.52x baseline),
+    ch3=0.8709V (3.19x baseline) -- 20th percentile over 30s of DAMPING.
+
+**THE EVIDENCE IS ONE RUN.** Four hand kicks over 91.2 s of DAMPING; per-channel
+`ratio` reached **5.69** at t = 30 s and **6.80** at t = 70 s against a **1.8x**
+breaker; **the run never left DAMPING.** Both 2026-08-18 runs died on their **first**
+kick at **3.8x**.
+
+**IT IS NOT A DEMONSTRATION THAT A FAULT CLEARS.** No fault occurred, so the clear
+gate was never asked to open, and **no clear time exists**. `CLAUDE.md` § 1 stays
+open on exactly that.
+
+### 11. The hybrid PID channels have STILL never run -- three runs, two sessions
+
+    !! demoted: ch4, ch5, ch6, ch7 -- raw counts std 1.304 / 1.815 / 0.971 /
+       1.056, under the 1.30-count dead-pin line.
+
+All four sat at `NOSIG` for the whole run, commanded output **exactly 0.750 V,
+min = max, over every DAMPING sample**, so `|gain|` was again exactly 0.0000.
+
+**The demoting check was `dead-pin` this time, not `inband-floor`, and that is a
+different thing.** `dead-pin` grades a channel on **whether it MOVES**, in raw
+counts, which is the right test for a sensor whose axis has no Φ row. **A defensible
+refusal is still an unmeasured hybrid PID.**
+
+**An unexplained tension: a5's std was 1.815 counts at engage and 8.02-9.16 counts
+on the quiet censuses**, with `DEAD_PIN_STD_COUNTS = 1.3` sitting in the middle of
+that gap.
+
+### 12. Tooling
+
+- **`status.py` gained a per-channel bias**: `BIAS_CH` (`status.py:187`) and
+  `bias_of()` (`status.py:190`), so a DC pass no longer assumes one bias for all
+  eight coils.
+- **A LIVE DEFECT WAS FIXED IN THE EXPORT PATH.** `a_from_dc` silently fell back to
+  **`DC_SEED`, the hardcoded 2026-08-04 matrix** (`status.py:343`), because
+  `_EXPORT` never carried a `"dcm"` key -- so a run that had **just measured** its own
+  DC matrix could export an A built from a two-week-old constant and say nothing.
+  `_EXPORT["dcm"]` is now populated (`status.py:3626`) and read (`status.py:3163`).
+- **`SIGTERM` and `SIGHUP` are routed to the park path**, so a plain `kill` returns
+  the coils to bias. The run announces it. **Nobody has killed a run and read the
+  coil voltages back**, so the handler is claimed, not verified.
+- **`pyDAC2.BAUD` and `arduino.ino`'s `BAUD_HZ` are now 115200**, both having been
+  500000, and **`BAUD_CANDIDATES` tries 115200 first** (`pyDAC2.py:82`).
+
+### What this session did NOT establish
+
+**A -- signs OR magnitudes**, since every determination predates the re-seating and
+nothing has re-measured it. **Whether 0.50 V of bias is safe on the 3 A supply.**
+**The vertical mode frequencies**, still never measured. **Whether the hybrid PID
+helps**, still never run. **The χ²/dof distribution** -- the run was diagonal, so
+the modal Kalman path did not execute at all. **Any decay rate**, because the run
+pumped. **Whether a fault clears**, because no fault occurred. **Why warp grew**,
+**why a5 came back**, and **which physical tilt each earlier per-mode conclusion
+belongs to.**
+
+`osem.eta.py` still declares `BENCH_STATUS = "untested"` and has now run three
+times; `osem.theta.py` declares the same and it is correct.
+
+---
+
 ## eta — the modal velocity comes from ONE filter over the modal coordinates
 
 `osem.eta.py`, written 2026-08-17. It is `zeta`'s modal law with `zeta`'s gains,
@@ -2511,7 +2910,12 @@ means the optic is against a mechanical stop. But on 2026-08-17 **a5 was measure
 to be a disconnected pin** — exactly one distinct value, 0.0 counts, variance
 exactly zero, over three records totalling 236 387 samples — which is below
 `RAIL_LOW = 12`, and **the rig sat in FAULT for 50 s with every gain at zero
-because of one bad solder joint**. `ENABLE_CHANNEL[5] = False` handles a5.
+because of one bad solder joint**. `ENABLE_CHANNEL[5] = False` handled a5.
+
+**SUPERSEDED 2026-08-20 on a5 only: it is ALIVE** -- std 9.16 counts, 36 distinct
+values, coherence with a0-a3 0.00 -> 0.70, and `ENABLE_CHANNEL[5]` is back to
+`True` (§ *On the bench, 2026-08-20*). **`dead-pin` itself is unaffected and is what
+demoted ch4-ch7 on the 2026-08-20 run.**
 
 **a6/a7 are the case that config cannot handle.** At 17:59 they sat *bottom-railed
 at 4.3 and 8.8 counts with std 0.48–0.56*, and at 18:20 they read 591.3 (std

@@ -128,6 +128,23 @@ import ladder                                                    # noqa: E402
 #
 # so no single absolute pair can mean "quiet" and "kicked" on both.
 # ---------------------------------------------------------------------------
+# THE MEASURED EDGES. Every threshold below is the geometric mean of two of
+# these, so the derivation is arithmetic in the file rather than a number typed
+# in beside a sum -- change an edge and every threshold that leans on it moves.
+WEAKEST_KICK = 2.32   # weakest measured peak-over-quiet of a REAL hand kick:
+                      # 3.66/1.58, 2026-08-17 zeta session (peaks 3.66-4.70 over
+                      # six kicks, data/20260817_19*_jerk_zeta.log; quiet median
+                      # 1.58 from the same session's signtest). The other three
+                      # measurable kicks are far above it -- 4.67/1.2224 = 3.82
+                      # and 4.841/0.1185 = 40.9 on 2026-08-18, 3.96/0.08 = 49.5
+                      # for zeta modal.
+FALSE_KICK = 1.21     # the two FALSE kicks of 2026-08-18: peak 2.73 out of a
+                      # stalled FAULT baseline of 2.253 (median of 35848 rows).
+WORST_GOOD_R2 = 0.53  # weakest r2 ever accepted, diagonal 2026-08-17 (accepted
+                      # population n=6: modal 0.79-0.90, diagonal 0.53-0.69).
+WORST_BAD_R2 = 0.065  # the one fit known to be junk -- a 2026-08-18 baseline
+                      # wander that fitted a NEGATIVE rate.
+
 STABLE_MULT = 1.40    # quiet band = STABLE_MULT x the run's quiet, from how far
                       # a quiet plate actually wanders in TIME. p90/median over
                       # the two 2026-08-18 quiet stretches above:
@@ -137,44 +154,24 @@ STABLE_MULT = 1.40    # quiet band = STABLE_MULT x the run's quiet, from how far
                       # band that fits diagonal fits modal. (The old absolute
                       # 2.00 was 1.27x the 1.58 diagonal median -- tighter than
                       # this, and measured across channels rather than time.)
-KICK_MULT = 1.80      # kick trigger = KICK_MULT x the run's quiet.
-                      # sqrt(1.40 * 2.32) = 1.80, the geometric mean of the two
-                      # facing edges, 1.29x clear of each. Same construction as
-                      # the absolute KICK_RATIO it replaces, and as eta's
-                      # DEAD_PIN_STD_COUNTS. The 2.32 is the WEAKEST measured
-                      # peak-over-quiet of a real hand kick, 3.66/1.58, from the
-                      # 2026-08-17 zeta session (peaks 3.66-4.70 over six kicks,
-                      # data/20260817_19*_jerk_zeta.log; quiet median 1.58 from
-                      # the same session's signtest). The other three measurable
-                      # kicks are far above it: 4.67/1.2224 = 3.82 and
-                      # 4.841/0.1185 = 40.9 on 2026-08-18, 3.96/0.08 = 49.5 for
-                      # zeta modal.
-KICK_RISE = 1.68      # a kick must peak at KICK_RISE x the level it ROSE FROM,
-                      # measured over PREKICK_S ending PREKICK_LAG_S before the
-                      # crossing. sqrt(1.21 * 2.32) = 1.68, geometric mean of
-                      #   1.21  the two false kicks of 2026-08-18: peak 2.73 out
-                      #         of a stalled FAULT baseline of 2.253 (median of
-                      #         35848 FAULT rows), and
-                      #   2.32  the weakest real kick, as above.
-                      # 1.39x clear of each. THIS IS NOT INDEPENDENT of
-                      # KICK_MULT -- both are anchored on the same 2.32 -- so it
-                      # is one measurement used twice, not two. It sits BELOW
-                      # KICK_MULT deliberately: off a genuinely quiet plate the
-                      # trigger already implies the rise, so this test only
-                      # bites when the baseline has drifted, which is the case
-                      # it exists for.
-R2_FLOOR = 0.19       # sqrt(0.065 * 0.53). Accepted population, n=6, all from
-                      # the 2026-08-17 zeta session: modal 0.79-0.90, diagonal
-                      # 0.53-0.69, minimum 0.53. The one fit known to be junk --
-                      # a baseline wander on 2026-08-18 with a NEGATIVE rate --
-                      # read 0.065. 2.9x clear of each.
-                      #
-                      # THIS FILTER IS THE WEAKEST OF THE FOUR AND MUST NOT BE
-                      # RELIED ON. The three 2026-08-18 diagonal fits read
-                      # 0.588 / 0.782 / 0.788 and two of them were of an
-                      # UNDRIVEN plate: a free ringdown is exponential too, so a
-                      # good r2 says the envelope decayed, not that the loop was
-                      # what decayed it. Only `state` says that.
+# kick trigger = KICK_MULT x the run's quiet: the geometric mean of the two
+# facing edges, 1.29x clear of each. Same construction as eta's
+# DEAD_PIN_STD_COUNTS.
+KICK_MULT = math.sqrt(STABLE_MULT * WEAKEST_KICK)          # 1.80
+# A kick must also peak at KICK_RISE x the level it ROSE FROM, measured over
+# PREKICK_S ending PREKICK_LAG_S before the crossing. 1.39x clear of each edge.
+# THIS IS NOT INDEPENDENT of KICK_MULT -- both are anchored on WEAKEST_KICK --
+# so it is one measurement used twice, not two. It sits BELOW KICK_MULT
+# deliberately: off a genuinely quiet plate the trigger already implies the
+# rise, so this test only bites when the baseline has drifted, which is the case
+# it exists for.
+KICK_RISE = math.sqrt(FALSE_KICK * WEAKEST_KICK)           # 1.68
+# 2.9x clear of each edge. THIS FILTER IS THE WEAKEST OF THE FOUR AND MUST NOT
+# BE RELIED ON: the three 2026-08-18 diagonal fits read 0.588 / 0.782 / 0.788
+# and two of them were of an UNDRIVEN plate. A free ringdown is exponential too,
+# so a good r2 says the envelope decayed, not that the loop decayed it. Only
+# `state` says that.
+R2_FLOOR = math.sqrt(WORST_BAD_R2 * WORST_GOOD_R2)         # 0.19
 
 # FALLBACKS, used only until the run's own quiet has been measured -- i.e. for
 # the first QUIET_MIN_SPAN_S of DAMPING, before the first ask. They are the old
@@ -182,7 +179,8 @@ R2_FLOOR = 0.19       # sqrt(0.065 * 0.53). Accepted population, n=6, all from
 # they exist so the tool has a number before it has a measurement, not because
 # they are right.
 STABLE_RATIO = 2.00          # diagonal quiet p90, rounded
-KICK_RATIO = 2.70            # sqrt(2.01 * 3.66), the old absolute construction
+KICK_RATIO = math.sqrt(2.01 * 3.66)   # 2.70; 2.01 is that p90 unrounded and
+                                      # 3.66 the weakest 2026-08-17 kick peak
 
 QUIET_WINDOW_S = 30.0        # trailing window the quiet median is taken over
 QUIET_MIN_SPAN_S = 8.0       # ...and the least it may span before it is used.
@@ -236,18 +234,17 @@ REFUSE_BUDGET = 4            # stop after `kicks + REFUSE_BUDGET` refusals. NOT
                              # refuses everything stops instead of holding the
                              # bench forever.
 STOP_WAIT_S = 90.0           # how long to wait for the controller after SIGINT.
-                             # Its shutdown is BOUNDED: pyDAC2._await's 5.0 s
-                             # deadline on STOPPED, four park writes, a 0.1 s
-                             # settle, then prints -- under 6 s of work. The old
-                             # 25 s was 4x that and expired anyway on
-                             # 2026-08-18, and NO jerk.py run has ever captured
-                             # the controller's shutdown output: every
-                             # data/*_jerk_*.log ends mid-line at a periodic
-                             # print. So the cause is not known and the ceiling
-                             # is not what binds. Waiting costs bench seconds;
-                             # not waiting means SIGTERM, which skips the
-                             # `finally` and leaves the coils energised
-                             # (CLAUDE.md sec 15, and it happened on 2026-08-17).
+                             # Its shutdown is BOUNDED at under 6 s of work
+                             # (pyDAC2._await's 5.0 s deadline on STOPPED, four
+                             # park writes, a 0.1 s settle, prints), yet the old
+                             # 25 s ceiling expired anyway on 2026-08-18 and NO
+                             # jerk.py run has ever captured a controller's
+                             # shutdown output -- every data/*_jerk_*.log ends
+                             # mid-line at a periodic print. The cause is not
+                             # known, so this is generous on purpose: waiting
+                             # costs bench seconds, not waiting means SIGTERM,
+                             # which skips the `finally` and leaves the coils
+                             # energised (CLAUDE.md sec 15, seen 2026-08-17).
 POLL_S = 0.35
 SPEAK = "/usr/bin/say"
 
@@ -276,8 +273,7 @@ class Tail:
         self.cols = next(self.rdr)
         self.idx = {k: i for i, k in enumerate(self.cols)}
         self.n = sum(1 for k in self.cols if k.endswith("_counts"))
-        need = ("time_s", "state")
-        for k in need:
+        for k in ("time_s", "state"):
             if k not in self.idx:
                 sys.exit("  %s has no `%s` column." % (path, k))
         self.has_ratio = "ch0_ratio" in self.idx
@@ -294,9 +290,8 @@ class Tail:
                          state=line[self.idx["state"]])
                 live, rat = [], []
                 for i in range(self.n):
-                    h = line[self.idx.get("ch%d_healthy" % i, -1)] \
-                        if ("ch%d_healthy" % i) in self.idx else "1"
-                    if h != "1":
+                    hcol = self.idx.get("ch%d_healthy" % i)
+                    if hcol is not None and line[hcol] != "1":
                         continue
                     live.append(i)
                     if self.has_ratio:
@@ -595,11 +590,9 @@ class Protocol:
             rate, r2 = float("nan"), float("nan")
         else:
             rate, r2 = fit_decay([s[0] for s in seg], [s[1] for s in seg])
-        base = self.kick_base if math.isfinite(self.kick_base or float("nan")) \
-            else float("nan")
         k = dict(peak=self.peak_v, t_kick=self.kick_t,
                  t_quiet=float("nan") if timed_out else now - self.peak_t,
-                 rate=rate, r2=r2, nlive=self.nlive, base=base,
+                 rate=rate, r2=r2, nlive=self.nlive, base=self.kick_base,
                  quiet=self.quiet, stable=self.kick_stable,
                  window_s=now - self.peak_t,
                  left_state=self.win_left[0] if self.win_left else None,

@@ -20,10 +20,10 @@ or through make, which is the intended form:
 What it does before anything reaches the coils:
 
   1. resolves a serial port -- explicit, else auto-detected, else asks;
-  2. PREFLIGHT: opens the port through the real `DACController`, which raises
-     unless the sketch answers `READY`. A failure here means the board is not
-     flashed or the port is wrong, and it costs nothing to find out now rather
-     than after the optic is swinging;
+  2. PREFLIGHT: probes the baud and opens the port through the real `FastDAC`,
+     which raises unless the sketch answers `READY`. A failure here means the
+     board is not flashed or the port is wrong, and it costs nothing to find out
+     now rather than after the optic is swinging;
   3. prints what is about to be applied -- enabled channels, the actual gain
      vectors -- because the gains are per-file constants and the versions do NOT
      ship the same ones;
@@ -37,23 +37,18 @@ module and assigning `mod.PORT` leaves every controller byte-for-byte what was
 validated. `main()` is called explicitly since `__name__` is not `"__main__"`
 here; everything else about the run is identical to launching the file directly.
 
-There is no bench-status gate. It used to refuse `BENCH_STATUS = "broken"` and
-prompt for confirmation on anything not `validated`, but those constants went
-stale faster than they were updated -- and a
-gate whose data is wrong only teaches you to click through it. The preflight and
-the printed gain vectors are the checks that are actually load-bearing, because
-both are computed from the file that is about to run.
+There is no bench-status gate: `BENCH_STATUS` went stale faster than it was
+updated, and a gate whose data is wrong only teaches you to click through it. The
+preflight and the printed gain vectors are the load-bearing checks, because both
+are computed from the file that is about to run.
 """
 
 # The REAL pyserial, imported first and deliberately. `sim/server.py` installs a
-# fake `serial` module into sys.modules -- guarded by `if "serial" not in
-# sys.modules`, so importing the genuine one first also immunises this process
-# against it. That is also why nothing below imports harness.py or sim/: pulling
-# in either would replace the transport with one whose Serial() raises on
-# construction. The version discovery used to be DUPLICATED here for that
-# reason, and the copies drifted. It now lives in `ladder.py`, which imports
-# nothing at all -- so it can be shared without dragging sim/ or numpy into the
-# hardware path, which is what the duplication was avoiding.
+# fake `serial` whose Serial() raises, guarded by `if "serial" not in
+# sys.modules`, so importing the genuine one first immunises this process against
+# it -- and nothing below may import harness.py or sim/. Version discovery used
+# to be duplicated here to stay clear of them and the copies drifted; it now
+# lives in `ladder.py`, which imports only `glob` and `os`.
 try:
     import serial                                # noqa: F401
     from serial.tools import list_ports
@@ -65,7 +60,6 @@ except ImportError:
         "  causes looks like a repo bug rather than a missing dependency.")
 
 import argparse
-import glob
 import importlib.util
 import os
 import shutil
@@ -89,27 +83,15 @@ KNOWN_VIDS = {0x2341, 0x2A03, 0x1A86, 0x0403, 0x10C4}
 DEFAULT_FQBN = "arduino:avr:mega"       # CS on pin 53 is Mega/Due specific
 FIRMWARE = "arduino.ino"                # the sketch that is on the board
 
-# The ladder order lives in ladder.py and NOTHING here derives it from a
-# filename. This file used to carry its own copy of harness.py's regex, and the
-# copies drifted: `make run` silently could not see osem.v5.5.py at all while
-# `make check` could. A version the bench cannot select is a version that does
-# not get run, and nothing announces it.
-#
-# ladder.py imports nothing. That is deliberate -- this is the hardware entry
-# point and it must not acquire a numpy dependency by way of a name lookup.
-
 
 # --------------------------------------------------------------------------
 # versions
 # --------------------------------------------------------------------------
 def versions():
-    """Every controller next to this file, in ladder order, tools last."""
-    found = []
-    for path in glob.glob(os.path.join(HERE, ladder.PREFIX + "*" + ladder.SUFFIX)):
-        k = ladder.sort_key(os.path.basename(path))
-        if k is not None:
-            found.append((k, path))
-    return [p for _, p in sorted(found)]
+    """Every controller next to this file, in ladder order, tools last.
+
+    `ladder.discover` is the only copy of this scan -- see ladder.py."""
+    return ladder.discover(HERE)
 
 
 def resolve(name):
@@ -207,15 +189,17 @@ def choose_port(explicit):
 
 
 def preflight(port):
-    """READY handshake before any coil moves: tells wrong-port from not-flashed."""
-    import pyDAC2
-    from pyDAC2 import FastDAC             # late: needs the real `serial`
-    # Baud first: at the wrong rate the READY scan is 200 lines x 2 s = 400 s silent.
+    """READY handshake before any coil moves: tells wrong-port from not-flashed.
+
+    `stdlib.open_dac` owns probe-then-open, so this cannot drift out of step with
+    what the controller itself will do a second later. Probing first is not
+    optional: at the wrong rate the READY scan is 200 lines x 2 s = 400 s silent.
+    """
+    import stdlib                          # late: needs the real `serial`
     print("\n  preflight: %s" % port)
-    pyDAC2.resolve_baud(port)
     print("  opening (the board resets on open, ~2s)...")
     try:
-        dac = FastDAC(port=port)
+        dac = stdlib.open_dac(port)
     except serial.SerialException as e:
         sys.exit("  FAILED to open %s: %s" % (port, e))
     except RuntimeError as e:
@@ -273,10 +257,10 @@ def run(path, port):
     preflight(port)
 
     mod = load(path)
-    # osem.v6*.py are measurement tools, not controllers: they close no loop and
-    # have no gains to print. What matters before one of those runs is which
-    # coils it will drive, how hard, and for how long -- it is open loop, so
-    # nothing is damping the optic while it does.
+    # osem.sysid.py is a measurement tool, not a controller: it closes no loop and
+    # has no gains to print. What matters before one of those runs is which coils
+    # it will drive, how hard, and for how long -- it is open loop, so nothing is
+    # damping the optic while it does.
     kind = getattr(mod, "KIND", "controller")
     if kind == "skeleton":
         # A skeleton CLOSES THE LOOP -- it is not open loop and the measurement
@@ -309,9 +293,9 @@ def run(path, port):
         print("  coils driven: %s   via DAC ch %s"
               % (",".join("ch%d" % c for c in mod.COILS),
                  ",".join(str(mod.DAC_MAP[c]) for c in mod.COILS)))
+        import sysid                     # the tool's own limits, not a copy
         print("  drive amplitude: %.3f V on top of bias %.2f V (clamped to %.1f-%.1f)"
-              % (mod.AMP, __import__("sysid").BIAS_V, __import__("sysid").VMIN,
-                 __import__("sysid").VMAX))
+              % (mod.AMP, sysid.BIAS_V, sysid.VMIN, sysid.VMAX))
         print("  expecting rank %d -- %d coils drive %d DOF"
               % (mod.EXPECTED_DOF, len(mod.COILS), mod.EXPECTED_DOF))
     else:

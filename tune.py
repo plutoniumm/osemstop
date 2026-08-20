@@ -140,7 +140,9 @@ whose central problem is headroom. So:
 
 SAFETY
 ------
-  * refuses to run against a controller declaring BENCH_STATUS = "broken";
+  * NO BENCH_STATUS gate -- the label went stale faster than it was updated, and
+    a gate whose data is wrong only teaches you to click through it. The status
+    is PRINTED before the run and stamped into `gains.json`;
   * every command clamped to the controller's own VMIN..VMAX window, and the
     dither budget is a fraction of it so the damping loop keeps its headroom;
   * |Kp| ceiling of 0.035 (CLAUDE.md), enforced as a hard box in the optimiser
@@ -154,10 +156,13 @@ SAFETY
 
 `gains.json` IS A PROPOSAL, NOT CONFIG
 --------------------------------------
-Nothing loads it. Every controller in this repo is standalone and `bench.py`
-prints the gain vectors out of the file that is about to run; a silently loaded
-gain file would break exactly that check, on a rig where a wrong sign pumps the
-optic. The tool prints a transcription block and a human types it in.
+Nothing loads it. `bench.py` prints the gain vectors out of the file that is
+about to run, so what an operator reads is what will be applied; a silently
+loaded gain file would break exactly that check, on a rig where a wrong sign
+pumps the optic. The tool prints a transcription block and a human types it in.
+(The controllers stopped being standalone on 2026-08-17 -- the shared machinery
+is in `stdlib.py` -- but the gain VECTORS are still declared per rung, which is
+what keeps that check working.)
 
 USAGE
 -----
@@ -188,7 +193,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # ---------------------------------------------------------------------------
 GAIN_CEILING = 0.035          # CLAUDE.md / analysis/kp040.md. Hard box.
 DEFAULT_CONTROLLER = "osem.eta.py"     # newest rung; see ladder.py
-DEFAULT_MODES_HZ = (1.046, 1.657)      # analysis/out/modes.csv; refitted, not assumed
+# SEEDS ONLY -- `fit_modal` refits both frequency and Q, and these are where the
+# search starts. They are the 2026-08-06 pair (analysis/out/modes.csv) and the
+# rig has since been measured with THREE modes at 0.71519 / 0.99231 / 1.65307 Hz
+# (`status.py` MODES). Pass --modes to seed a re-measured set; do not read this
+# tuple as a statement about the plant.
+DEFAULT_MODES_HZ = (1.046, 1.657)
 DEFAULT_Q = 50.0                       # seed only; zeta is fitted
 
 # Excitation. The tones are deliberately placed OFF the resonances: a Q~50 mode
@@ -199,7 +209,6 @@ BAND_LO_HZ, BAND_HI_HZ, N_TONES = 0.35, 3.40, 15
 DITHER_FRAC = 0.40            # of the half-window; the loop keeps the rest
 SETTLE_S, RECORD_S = 12.0, 90.0        # settle >= ~1 ringdown at tau ~ 16 s
 UPDATE_HZ = 100.0             # coil refresh; fire-and-forget, so it is cheap
-PILOT_S = 12.0                # amplitude-sizing pilot, once, at the start
 
 # Gates
 SNR_MIN = 4.0                 # on-tone / local off-tone floor, per (sensor, coil)
@@ -212,7 +221,6 @@ KP_KNEE_FRAC = 0.90           # smallest effort reaching this share of max dampi
 KI_DAMPING_PENALTY_FRAC = 0.05    # Ki may cost at most this share of Kp's damping
 KI_BUDGET_FRAC = 0.10             # ...and this share of the P term's authority
 KD_NOISE_FRAC = 0.10              # D-path actuator noise vs the P path's
-CREST = 4.0                   # peak / RMS assumed for a narrowband process
 BOOTSTRAP_N = 200
 
 
@@ -367,7 +375,11 @@ class Damper:
 
     def __init__(self, ctl, kp, authority):
         self.n = ctl.n
-        self.kp = np.asarray(kp, float)
+        # kp arrives either full-width (run_measure) or one entry per DRIVEN
+        # coil (_ringdown); zero-pad so the term is always the width of the
+        # filters, and an undriven channel contributes exactly nothing.
+        self.kp = np.zeros(ctl.n)
+        self.kp[:min(len(kp), ctl.n)] = np.asarray(kp, float)[:ctl.n]
         self.authority = float(authority)
         self.hp = ctl.onepole(ctl.bp_low, "high", ctl.n)
         self.lp = ctl.onepole(ctl.bp_high, "low", ctl.n)
@@ -449,8 +461,8 @@ def acquire_closed(dac, ctl, seconds, damper, dither, chans, rec, update_hz,
                 rec.write(now, counts, held)
             if guard:
                 bad = ((counts <= sysid.RAIL_LOW) | (counts >= sysid.RAIL_HIGH)).any()
-                rail_since = (rail_since if bad else None) or (now if bad else None)
-                if bad and rail_since is not None and now - rail_since > RAIL_ABORT_S:
+                rail_since = (rail_since or now) if bad else None
+                if bad and now - rail_since > RAIL_ABORT_S:
                     raise RuntimeError(
                         "sensor railed continuously for %.1f s -- stopping and "
                         "parking at bias. Lower --amp or trim the bias."
@@ -499,10 +511,11 @@ def run_measure(args, dac=None, clock=None, tag="tune"):
 
     own = dac is None
     if own:
-        from pyDAC2 import FastDAC
-        dac = FastDAC(port=args.port)
-    for ch in chans:
-        dac.set_voltage(ch, float(ctl.bias[coils[chans.index(ch)]]))
+        import stdlib
+        # Probes the baud first: at the wrong rate the READY scan is 200 lines
+        # x 2 s = 400 s of silence, indistinguishable from a hung program.
+        dac = stdlib.open_dac(args.port)
+    sysid.park_at(dac, chans, [float(ctl.bias[c]) for c in coils])
     if own:
         if not getattr(args, "yes", False):
             input("  Press Enter to start (Ctrl+C to stop)... ")
@@ -553,11 +566,7 @@ def run_measure(args, dac=None, clock=None, tag="tune"):
         with open(side, "w") as fh:
             json.dump(meta, fh, indent=1)
         print("  run metadata -> %s" % side)
-        for c, ch in zip(coils, chans):
-            try:
-                dac.set_voltage(ch, float(ctl.bias[c]))
-            except Exception:
-                pass
+        sysid.park_at(dac, chans, [float(ctl.bias[c]) for c in coils])
         if own:
             time.sleep(0.1)
             dac.stop_stream()
@@ -1523,12 +1532,12 @@ def transcription(prop, ctl, log=print):
     log("\n" + "=" * 72)
     log("  TRANSCRIBE INTO %s BY HAND. Nothing loads gains.json, deliberately:"
         % os.path.basename(ctl.path))
-    log("  every controller here is standalone and bench.py prints the vectors")
-    log("  out of the file about to run. A wrong sign pumps the optic.")
+    log("  every rung declares its own gain VECTORS and bench.py prints them out")
+    log("  of the file about to run. A wrong sign pumps the optic.")
     log("")
     log("  STEADY_GAIN  = %s" % fmt(prop["kp"]))
     log("  CAPTURE_GAIN = %s   # steady x 7/6, the shipping ratio"
-        % fmt(np.clip(prop["kp"] * 7.0 / 6.0, -0.035, 0.035)))
+        % fmt(np.clip(prop["kp"] * 7.0 / 6.0, -GAIN_CEILING, GAIN_CEILING)))
     log("  KI_GAIN      = %s" % fmt(prop["ki"]))
     log("  KD_GAIN      = " + "np.array([" + ", ".join("%+.5f" % v
                                                        for v in prop["kd"]) + "])")
@@ -1630,6 +1639,13 @@ class _SynthPlant:
                            [0.36, -0.65],
                            [1.21, 1.29],
                            [0.30, -0.60]])[:n]
+        # SIGN CONVENTION IS THE PRE-2026-08-20 ONE, and that is load-bearing for
+        # anyone running this: it matches zeta/epsilon's
+        # [-0.035, -0.035, +0.035, -0.035] and NOT eta/theta's corrected
+        # `slope x gain > 0` vector. Run `self-test --controller osem.zeta.py`
+        # and it passes; run it against eta and the damping loop PUMPS this
+        # planted body, every channel rails and the fit refuses on its own
+        # gates. That is a property of the planted signs, not of eta.
         self.A = np.array([[-9.0, -6.0, +18.0, -4.5],
                            [-7.0, -5.5, +15.0, -3.5]])[:, :n]
         self.P = np.array([[self.S[j, m] * self.A[m, j] for j in range(n)]
@@ -1667,8 +1683,10 @@ class _FakeBoard:
     def now(self):
         return self.t
 
-    def set_voltage(self, ch, v):
-        self.held[int(ch)] = float(v)
+    def set_voltage(self, channel, voltage):
+        # Parameter NAMES match pyDAC2.FastDAC: stdlib.park calls by keyword,
+        # and a fake that only matches positionally is a fake that diverges.
+        self.held[int(channel)] = float(voltage)
 
     def set_many(self, chans, volts):
         for c, v in zip(chans, volts):
@@ -1693,6 +1711,15 @@ class _FakeBoard:
         for _ in range(self.os):
             s = self.p.step(u)
             self.t += self.p.dt
+        if ncols > self.p.n:
+            # `_SynthPlant` is a FOUR-corner body and every rung on the ladder is
+            # now eight channels, so the controller asks for more columns than
+            # the plant has. The extra ones report their resting count and
+            # nothing else -- which is what a4/a6/a7 measurably do -- rather than
+            # a short row. Without this the Damper's filters are sized ctl.n and
+            # fed p.n, and the self-test dies on a broadcast error before it
+            # measures anything.
+            s = np.concatenate([s, np.full(ncols - self.p.n, self.p.rest[0])])
         return list(s[:ncols])
 
 
@@ -1716,13 +1743,17 @@ def _ringdown(plant, ctl, dt_loop, kp, seconds=40.0):
     p.q = np.array([1.0, 1.0])
     d = Damper(ctl, kp, 1e9)
     u = np.zeros(p.n)
+    # The Damper is sized ctl.n and the planted body has p.n corners; the rest
+    # report their resting count, exactly as `_FakeBoard.read_sample` pads them.
+    pad = np.full(max(ctl.n - p.n, 0), p.rest[0])
     t, env, next_u = 0.0, [], 0.0
     while t < seconds:
-        c = p.step(u)
+        c = np.concatenate([p.step(u), pad])
         d.update(c * p.c2v, p.dt)
         if t >= next_u:
             next_u = t + dt_loop
-            u = np.clip(ctl.bias[:p.n] + d.command(), ctl.vmin, ctl.vmax) - ctl.bias[:p.n]
+            u = np.clip(ctl.bias[:p.n] + d.command()[:p.n],
+                        ctl.vmin, ctl.vmax) - ctl.bias[:p.n]
         env.append(abs(float(d.bp[0])))
         t += p.dt
     env = np.asarray(env)
@@ -1893,6 +1924,11 @@ def main(argv=None):
     s.add_argument("--force", action="store_true")
 
     args = ap.parse_args(argv)
+    # Absolute before anything runs: `run_self_test` chdirs into a temp dir and
+    # then reloads the controller, so a relative --controller resolved there and
+    # died with FileNotFoundError. The default was already absolute, which is
+    # why only an explicit path hit it.
+    args.controller = os.path.abspath(args.controller)
     if args.ceiling > GAIN_CEILING and not args.override_ceiling:
         sys.exit("  --ceiling %.4f exceeds the %.3f in CLAUDE.md. Kp = -0.040 has "
                  "never been applied on hardware (analysis/kp040.md). Pass "

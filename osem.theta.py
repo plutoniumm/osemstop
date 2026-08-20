@@ -6,7 +6,7 @@
     f_m   = -w_m K_m * (Proj qdot)_m                   per-mode WEIGHT on eta's law
     u_C   = A_C+ f                                     min-norm, row-norm balanced
     u_j   = w_d * c_j * Kp * (-vel_j)                  coils A does not cover
-    |u - bias| <= BUDGET_V on every coil               ONE number, solved on the TOTAL
+    |u - bias| <= BUDGET_V on the MODAL coils          ONE number, solved on the TOTAL
 
 THE SHIPPED DEFAULT IS eta, BIT FOR BIT, AND THAT IS THE POINT OF THE FILE.
 BUDGET_TILT is 0.0, at which every claimant's weight is EXACTLY 1.0 -- for every
@@ -15,7 +15,9 @@ not by rounding (see BudgetAllocator._weights) -- so f_m = -K_m (Proj qdot)_m,
 the hybrid gains are HYBRID_GAIN unchanged, and every number this file produces
 is eta's. `--selftest` asserts that against `osem.eta.py` itself, both controllers
 driven with the same synthetic sensor history and their commanded voltages
-compared sample by sample through CALIBRATING -> FAULT -> CALIBRATING -> DAMPING.
+compared sample by sample through CALIBRATING -> FAULT(rail) -> CALIBRATING ->
+DAMPING -> FAULT(runaway). Both routes into FAULT are in it because the rail one
+alone reported max |du| 0.0 V while the two breakers disagreed about who may vote.
 WHY it matters that the default is not merely close: eta has fixes pending and
 bench runs planned, so those fixes must PORT into this file as a merge and not a
 reconciliation -- and an allocator has more free parameters than a fixed split,
@@ -37,14 +39,33 @@ argues for cancelling one, git history has the machinery; do not re-add it on an
 argument.
 
 WHAT THE BUDGET IS. One number, BUDGET_V = MODAL_TOTAL_HEADROOM * BIAS_SWING =
-0.225 V, the demand about bias any single coil may carry. That is eta's cap
-unchanged; what is new is that it is DECLARED, that every other cap in the file
-is quoted against it in one ledger, and that the split of it between control
-terms is a computed allocation instead of an accident. The split being implicit
+0.900 * 0.250 = 0.225 V, the demand about bias any single coil may carry. It is a
+FRACTION of the swing, so it tracks BIAS_SWING rather than being retyped. That is
+eta's cap unchanged; what is new is that it is DECLARED, that every other cap in
+the file is quoted against it in one ledger, and that the split of it between
+control terms is a computed allocation instead of an accident. The split being implicit
 is not a stylistic complaint: it is how coil 3 reached 0.4229 V against a
 0.250 V half-window -- 169 % -- and clipped, while the modal allocation stayed
 inside its own 0.20 V cap for the entire run (CLAUDE.md Sec 2). Once a coil clips
 the realised force is no longer A_C+ f and the dissipation guarantee is void.
+
+WHERE THE BUDGET IS ENFORCED, AND WHERE IT IS ONLY OBSERVED. The law block above
+said "on every coil" and that was too strong. `sl.cap_scale` is called with
+`mask = modal_cols`, and only inside `if self.modal_on and self.modal_cols.any()`,
+so BUDGET_V binds the TOTAL demand on the coils the modal allocation drives, plus
+the one coil a commanded burst is on. EVERYWHERE ELSE THE ONLY BOUND IS THE
+WINDOW: the per-channel term and every coil on a run where the modal law is
+refused are clipped by `pid.drive` at BIAS_SWING = 0.250 V, which is 11 % above
+the 0.225 V budget -- the RATIO is what is fixed, not either volt. That gap is
+eta's, inherited unchanged and deliberately not
+closed here -- closing it would make this file command different voltages from
+eta on the diagonal path, and the equivalence is the property the rung is for.
+IT MATTERS TODAY rather than in principle: `data/modal.json` is absent as this is
+written and the DC fallback A is refused by default, so a run started now is a
+DIAGONAL run, in which BUDGET_V is a declared number that nothing enforces.
+`BudgetAllocator.spend` is what makes that visible -- it reads `out - bias` after
+every decision and reports the peak and the count of steps at or past the budget,
+so a run says how much of its own declaration it kept.
 
 WHO THE CLAIMANTS ARE, AND WHY THEY ARE THE MODES. Four: the three modes, and the
 per-channel (hybrid diagonal) block as one. Per-mode is the granularity the data
@@ -52,7 +73,14 @@ argues for. Against a control, modal damping wins 5.9x on mode B (3.39 counts
 against 19.86) and 6.7x on mode C (2.37 against 15.80), but on mode A it is 6.31
 against a best diagonal of 6.86 -- INSIDE the run-to-run scatter of a factor 2-3,
 so its advantage there is not established (CLAUDE.md, per-mode residual). With the
-loop closed A/T1 is the LOUDEST mode. MODAL_KP is flat [0.035, 0.035, 0.035], so
+loop closed mode A is the LOUDEST mode. READ THAT AS A MODE INDEX AND NOT AS A
+TILT: this paragraph said "A/T1" until 2026-08-20, and on that date the
+re-measurement after the coils were re-seated EXCHANGED which tilt modes A and C
+are -- 0.7264 Hz -> T2 81.6 % (was T1 90.3 %) and 1.6665 Hz -> T1 89.9 % (was T2
+89.4 %), data/20260820_162534_status_sensors.csv, and PHI_GEOM's two tilt columns
+were swapped with it. Every number quoted above is indexed by MODE, so all of them
+stand unchanged; only the label each mode carries moved.
+MODAL_KP is flat [0.035, 0.035, 0.035], so
 today nothing can express "this mode needs more than that one". This is the object
 that can.
 
@@ -111,15 +139,13 @@ that has ever been on this rig. A statistic that stops arriving therefore return
 the loop to the configuration with measurements behind it, and the held time is
 counted and printed.
 
-SLOW, AND HOW SLOW IS DERIVED. The slowest mode is 0.72194 Hz, a 1.385 s period, so
-CLAUDE.md Sec 17 asks for a reallocation time constant of order 10 s or more.
-BUDGET_TAU_S = 20 s is 14.4 periods of that mode and twice that floor, and the
-weights are additionally slew-limited to 1/BUDGET_TAU_S = 0.05 per second, so a
-weight moves at most 0.069 -- 6.9 % of nominal -- in one mode-A period. The
-modulation corner 1/(2 pi tau) = 0.0080 Hz is 1.1 % of the slowest mode frequency
-and about 9.5 half-widths off resonance at Q > 433, so the sidebands a time-varying
-gain produces sit outside the resonance rather than inside it. THAT LAST NUMBER IS
-ARITHMETIC ON A MEASURED Q, not a measurement of anything this loop does.
+SLOW, AND HOW SLOW IS DERIVED: BUDGET_TAU_S = 20 s is 14.3 periods of the slowest
+mode and twice the "order 10 s or more" CLAUDE.md Sec 17 asks for, weights are
+additionally slew-limited to 0.05 /s, and the modulation corner sits about 9.6
+half-widths off resonance at Q > 433. The derivation and its numbers are on
+BUDGET_TAU_S. Every one of them is arithmetic on F_MODE_HZ and went stale once
+already, which is why the selftest recomputes the slew bound from
+`F_MODE_HZ.min()` rather than reading it back out of a comment.
 
 DISSIPATIVITY OF A TIME-VARYING BLEND: PARTLY SETTLED, AND THE REST IS OPEN.
 CLAUDE.md Sec 17 lists it as an open question and it stays open, but part of it can
@@ -165,11 +191,24 @@ WHAT IS MEASURED AND WHAT IS NOT.
     is the RIG OWNER'S CLAIM and not a result. The per-mode residual data compares
     two laws at ONE ambient level; nothing compares them at two levels. So
     BUDGET_TILT ships at 0 and this file is eta until somebody measures that.
-  * the per-channel block has NEVER RUN: |gain| was exactly 0.0000 on ch4, ch6 and
-    ch7 for 100 % of DAMPING samples across both 2026-08-18 runs, demoted at engage
-    by `inband-floor`. Its need is therefore 0 today whatever the room is doing,
-    and it can only give budget up, never take it (BUDGET_W_DIAG_MAX).
-  * modes 0.72194 / 0.99193 / 1.65607 Hz, empty room, 840 s, spread 0.00000 Hz.
+  * the per-channel block had NEVER RUN when this file was written -- |gain| was
+    exactly 0.0000 on ch4, ch6 and ch7 for 100 % of DAMPING samples across both
+    2026-08-18 runs, demoted at engage by `inband-floor` -- AND THAT IS NO LONGER
+    TRUE. The sentence that used to follow it here, "its need is therefore 0 today
+    whatever the room is doing", is WITHDRAWN. `inband-floor` now EXEMPTS the rows
+    Phi does not span (INBAND_EXEMPT, derived from PHI_GEOM rather than listed) and
+    grades a4/a6/a7 on their own broadband count motion against
+    DEAD_PIN_STD_COUNTS, an axis-appropriate test. They arm, they carry gain, and
+    the per-channel claimant's need is a live number rather than a structural zero.
+    It still may only give budget up and never take it (BUDGET_W_DIAG_MAX), but
+    that is now a choice about a term that runs, not a description of one that
+    cannot.
+  * modes 0.71519 / 0.99231 / 1.65307 Hz, re-measured 2026-08-20 16:25 after the
+    coils were re-seated: 300 s, 105 013 samples, no drive
+    (data/20260820_162534_status_sensors.csv), a0-a3 agreeing to 0.00050 Hz. This
+    bullet read 0.72194 / 0.99193 / 1.65607 Hz until then, and mode A is 8.1
+    half-widths from that value -- far enough that a drive at the old number gets
+    the wrong phase, not merely a smaller response.
   * Q > 433 (1 sigma), tau > 138 s (analysis/ringdown.md).
   * chi2 per dof is LOGGED and NOT acted on. It was considered as the need
     statistic and refused: its median is 0.14 with the modal law engaged and fitting
@@ -178,6 +217,19 @@ WHAT IS MEASURED AND WHAT IS NOT.
     instant of a hand kick, so it is a model-misfit statistic and not a disturbance
     one.
   * the kernel phase sweep above IS measured, and it is why that layer is gone.
+  * THE PER-CHANNEL GAINS ARE NOT FLAT, and they are eta's, ported forward
+    unchanged on 2026-08-20 rather than invented here. A gain is volts of coil
+    demand per volt of SENSOR velocity, and the four in-plane OSEMs do not share a
+    counts-per-metre -- a2's sensor is 3.37x as sensitive as a0's -- so a flat
+    vector is flat in COUNTS and 3.37x out in PHYSICS, which is why coil 2 and only
+    coil 2 clipped (pinned on 5.55 % of a DAMPING block, at the 2.0 V/s slew cap for
+    34.4 % of it). They are scaled by the measured sensor gain h so that g/h is
+    equal on all four; h comes from a warp constraint a rigid plate cannot violate.
+    See SENSOR_GAIN_H and dissipation_eig. IT DOES NOT TOUCH THE BUDGET: BUDGET_V
+    is MODAL_TOTAL_HEADROOM * BIAS_SWING and has no gain in it, and the
+    per-channel claimant's need is summed over the HYBRID channels a4/a6/a7, which
+    are not in GAIN_NORM_CHANNELS and are therefore unscaled. The twin-equivalence
+    check is what proves the two files still command the same voltages.
 """
 
 import json
@@ -224,35 +276,434 @@ FIXES = ("saturation-latch", "rail-threshold", "runaway-baseline", "auto-disable
          "sat-window", "fast-transport",
          "sample-guard", "decimate", "persist-baseline", "baseline-sanity",
          "kalman-velocity", "mains-null", "lock-quorum",
-         "runaway-quorum", "runaway-peak", "trim-quiet",
+         "runaway-quorum", "runaway-peak", "runaway-veto", "trim-quiet",
          "modal-law", "modal-refuse", "modal-colocation", "modal-residual",
          "modal-kalman", "modal-chi2", "dead-pin",
          "inband-floor", "hybrid-diagonal", "fault-clear-live", "per-mode-gain",
-         "budget-ramp")
+         "gain-normalise", "budget-ramp")
 
 # ---------------------------------------------------------------------------
 # channels and gains  (bench.py reads these five vectors out of this module)
 # ---------------------------------------------------------------------------
-# a5 is a disconnected pin: exactly one distinct value, 0.0 counts, variance
-# exactly zero, across 236387 samples.
-ENABLE_CHANNEL = [True, True, True, True, True, False, True, True]
+# a5 WAS a disconnected pin -- exactly one distinct value, 0.0 counts, variance
+# exactly zero, across 236 387 samples in three records. IT IS NOT ANY MORE.
+# Measured 2026-08-20 after the coils were re-seated: std 9.16 counts over a
+# quiet record with 36 distinct values, i.e. a live ADC input on a moving optic.
+# No cause is recorded for either the failure or the recovery, which is why this
+# is enabled on measurement rather than on trust -- `dead-pin` still demotes it
+# by variance if it goes back to being a pin, and its gain stays at zero until
+# its coherence with a0-a3 has been re-measured.
+# ITS COIL IS A SEPARATE QUESTION AND THE ANSWER IS NO: coil 5 moves a5 by
+# -0.39 +-0.93 counts/V, 0.4 sigma, UNRESOLVED (`slopesign.py` 2026-08-20). It
+# does move a1/a2/a3 by +9.3/-18.4/+11.1, so the coil has authority on the
+# a0-a3 plane -- just not on its own sensor.
+ENABLE_CHANNEL = [True, True, True, True, True, True, True, True]
+# 2026-08-20: ALL EIGHT ON. ch2 and ch5 were both off at various points and both
+# are now physically live; a rail is the CODE's problem, not a reason to switch a
+# channel off in config. `dead-pin` demotes a railed-and-motionless channel and
+# `rail clear` re-engages it -- both were observed working on the 12:38 run.
+#   ch2 rests at 905.7 counts with max touching 1023 and is PINNED 22 % of a
+#     60 s record (data/20260820_122926_status_sensors.csv). It railed during
+#     calibration and faulted the whole rig at t=10 s on the 12:35 run. A bias
+#     sweep says the offset is ELECTROMAGNETIC and trimmable at -193 counts/V,
+#     but reaching mid-scale needs ~2.29 V against a 0.5 V window, so it cannot
+#     be rescued until the window opens.
+#   ch5 read EXACTLY 0.0 counts with variance exactly 0.0 over 236 387 samples
+#     in three records and was disabled as a dead pin. It now reads 546.6 +/- 11.6
+#     and carries mode B at SNR 44.1. Something in its signal path was fixed.
 
-BIAS = np.full(N, 0.25)
-VMIN, VMAX, MAX_SLEW_PER_S = 0.0, 0.5, 2.0     # nominal; the trim moves the window
+# A PER-CHANNEL BIAS VECTOR WAS SOLVED 2026-08-20 AND BIAS SHIPS UNIFORM. Recorded
+# here because the solve is what says centring is unreachable, not because it is
+# in force -- see BIAS. The bias is a static force, so it sets where each flag sits
+# in its OSEM's shadow and an OSEM is linear only near half-shadow (MID_COUNTS
+# 511.5); a2 rested at 884.0 counts and railed at 1023 for 40 % of a QUIET record.
+# Solved as `min ||M v - (511.5 - resting)||^2` over the DC matrix M from
+# `slopesign.py` (data/20260820_155638_status_slopesign.csv), subject to
+# `BIAS_SWING <= v <= VMAX - BIAS_SWING` so every coil keeps a full swing of
+# authority BOTH ways -- a coil biased at 0 V can only push one direction.
+#
+# CENTRING ALL FOUR IS UNREACHABLE AT ANY VOLTAGE, and the reason is geometric.
+# M has cond 72.2 (singular values 309.1 / 117.6 / 60.4 / 4.3) and the direction
+# that would centre all four is essentially WARP, which no rigid-body motion
+# produces -- so it costs ~72x the voltage of the rigid directions. The
+# unconstrained solve asks for -6.87 to +7.50 V, and the DAC is unipolar 0-2.5 V.
+#
+# WHAT IT ACTUALLY BOUGHT, measured not predicted: a2 884.0 -> 794.7 counts,
+# railed 40 % -> 0.4 %. The solve predicted 764, so extrapolating M from its
+# 0.10-0.40 V fit out to 0.75 V runs ~30 counts optimistic. DO NOT EXTRAPOLATE IT
+# FURTHER, and re-solve rather than scaling a vector.
 
-# Signs are per-channel residue signs from the measured response (tune.py's
-# fit_modal). -0.035 is the ceiling: -0.040 is the documented rail onset and the
-# least-evidenced number in the repo (analysis/kp040.md).
-STEADY_GAIN = np.array([-0.035, -0.035, +0.035, -0.035,
-                        +0.000, +0.000, +0.000, +0.000])
-CAPTURE_GAIN = np.array([-0.035, -0.035, +0.035, -0.035,
-                         +0.000, +0.000, +0.000, +0.000])
+# TRANSPORT FRAMING. Binary: a fixed 20-byte frame, not ~32 B of ASCII.
+#
+# WHY IT WAS WANTED. The sample rate stepped 351.9 -> 226.5 Hz at the exact
+# instant DAMPING began on the 17:12 run and stayed there -- gap p50 5.40 ms,
+# p99 5.60 ms, ZERO gaps over 50 ms across 91 s. A rock-steady step is
+# contention, not a supply sag, which would jitter.
+#
+# THE MECHANISM, and the first reading of it was wrong. It is NOT that `SET`
+# competes with the stream for wire: the UART is FULL DUPLEX, so host->board
+# bytes cost the board CPU time to parse but take no board->host bandwidth
+# (`pyDAC2`'s own header says exactly this). What binds is that the ASCII stream
+# is ALREADY nearly the whole downstream on its own. A row measured off the wire
+# is `563,632,914,668,670,534,588,586\r\n` -- exactly 32 bytes -- so 352 Hz is
+# 11.3 kB/s against 11.52 kB/s at 115200 8N1, about 98 %. The board has no slack,
+# and once four coils start writing it must also parse ~400 SET/s and format
+# eight integers per sample. The sampling loop is what gives.
+#
+# WHY THAT MATTERS MORE THAN THROUGHPUT: the applied voltage lags, and velocity
+# feedback with enough phase lag is positive feedback. Measured on the same run
+# as `slope x (u - bias) x velocity`, band-limited to the mode band with the
+# common mode removed, every driven channel PUMPED -- dissipating on only 24.2 /
+# 41.4 / 49.1 / 46.1 % of steps. A wrong SIGN gives ~0 %; a 90 deg phase lag
+# gives 50 %. These are phase, not sign, and a0 -- the ONE channel whose gain was
+# NOT changed that day -- was the worst of the four.
+#
+# IT NEEDED A REFLASH, AND THE BOARD HAD BEEN LYING ABOUT ITS FIRMWARE. Probed
+# 2026-08-20 BEFORE flashing: `MODE BIN`, `MODE ASCII`, `VER` and `INFO` each
+# returned `ERR unknown command` and forcing MODE BIN produced no 0xA5 0xC3 sync in
+# a full second. The board was running an OLDER sketch than this tree's
+# arduino.ino, so every capability read out of that file was a claim about SOURCE
+# and not about the bench. After `bench.py --flash` the probe returns
+# `OK mode=bin`, `INFO nch=8 mode=ascii presc=32 ack=1 frame=20`, and the sync
+# appears. 20 B/frame is 7.0 kB/s at 352 Hz, 61 % of the link instead of 98 %, with
+# no itoa per channel per sample, and `seq` makes lost frames COUNTABLE.
+#
+# NEVER SET THIS TRUE ON FAITH. A host in binary mode against an ASCII board reads
+# NOTHING, and that failure is indistinguishable from a dead rig. Re-probe after
+# any reflash.
+BINARY_TRANSPORT = True
+
+# 0.50 V, UNIFORM. Set 2026-08-20 evening, between a value known to work and one
+# measured to fail, and the supply is the constraint -- THE RIG RUNS ON A 3 A
+# SUPPLY (rig owner, 2026-08-20). Nothing computable from this repo bounds the
+# coil current, because the coil driver and its resistance are not in the tree.
+#
+# ATTEMPT 1, midday: 1.10 V on all eight coils at once. Every analog input went to
+# zero and STAYED there through a revert to 0.50 and then to 0.25 V. The board
+# kept streaming at 822 Hz with zero dropped frames, so the transport was healthy
+# and the front end was not. The coils had to be reset by hand.
+#
+# ATTEMPT 2, evening: 0.75 V with BIAS_SWING raised 0.25 -> 0.75 as well. The
+# swing is the part that matters -- it sets how much current a coil can pull, and
+# tripling it triples the demand. The rig owner stopped the run with THE POWER
+# SUPPLY AUDIBLY ALARMING AT ITS LIMIT, and the data agrees
+# (`data/20260820_171242_fast_lock.csv`):
+#   * common-mode rms over all eight sensors went 15.4 -> 132.3 counts, and on
+#     a4-a7 -- ZERO gain, coils pinned at exactly 0.750 V for the whole run --
+#     78-83 % of their variance was that common mode. Channels nothing drives
+#     cannot move mechanically; that is the shared rail feeding the OSEM LEDs.
+#   * every DC level fell together against the census taken 47 minutes earlier:
+#     -185 -197 -286 -251 -247 -242 -238 -237 counts, uniform across channels
+#     whose coils barely couple to each other.
+#
+# 0.25 V HAS RUN FOR MONTHS WITHOUT EITHER SIGNATURE. 0.50 doubles the static
+# operating point but leaves BIAS_SWING at 0.25, so the peak per-coil demand is
+# 0.75 V -- the bias that sagged, but reached only at the extreme of the swing
+# rather than held continuously on all eight. The swing is TRANSIENT, BIAS is
+# CONTINUOUS, and the static load is 8 x 0.5^2 = 2.00 V^2, identical to what
+# these two runs were compared against. VERIFY IT RATHER THAN TRUSTING IT: 30 s
+# at bias with the gains at zero, checking that common-mode rms stays near its
+# 15-count quiet level and that the DC levels do not drop as a block. Both are
+# measurable before any coil is driven.
+#
+# A PER-CHANNEL CENTRING VECTOR WAS TRIED -- [0.250, 0.494, 0.750, 0.750, ...],
+# solved against the DC matrix to pull a2 off the top rail -- and a2 did not move:
+# 845 / 857 / 859 / 861 / 860 counts across five steps where the model predicted
+# 762, railed fraction 5.8 % -> 10.8 %. THE CONCLUSION DRAWN FROM THAT ("a2 is not
+# electrically trimmable from here") IS WITHDRAWN. The sweep stepped coils 2 AND 3
+# TOGETHER and on a2 those two OPPOSE -- coil 2 gives -204.7 counts/V, coil 3
+# +50.5 (data/20260820_155638_status_slopesign.csv) -- so moving both largely
+# cancels there. Coil 2 alone does move a2, at about -205 counts/V, confirmed by
+# two closed-loop trims: 861 -> 810 -> 758 -> 702 counts in 0.25 V steps
+# (data/20260820_180344_fast_lock.csv) and 860 -> 828.8 -> 816.4 -> 759.8 on the
+# 18:56 run. a2 is trimmable but not FAR ENOUGH: 348 counts off mid-scale against
+# three affordable quanta x 205.94 = 154 counts, 44 % of what is needed. That is a
+# REACHABILITY limit, not an electrical one -- see TRIM_MIN_REACHABLE_FRAC.
+BIAS = np.full(N, 0.50)
+VMIN, VMAX, MAX_SLEW_PER_S = 0.0, 2.5, 2.0
+# OPENED 2026-08-20, and the bench forced it rather than suggested it.
+#   The DAC's hard ceiling is 2.5000 V: `arduino.ino` clamps at 25000 units of
+#   100 uV and maps 0..25000 onto the AD5628's 0..4095 codes on its internal
+#   reference. It is UNIPOLAR -- there is no negative side, so a negative bias
+#   cannot be commanded at any setting.
+#   0.0-0.5 V used 20 % of that and there was never a recorded justification for
+#   it (CLAUDE.md Sec 11). What made it binding: on the 12:40 run every one of
+#   coils 0-3 slammed BOTH rails, out spanning 0.000 to 0.500 V with an rms
+#   demand of 0.089-0.148 V against a 0.25 V half-window, and the loop PUMPED --
+#   counts std 81.8/86.8/170.4/84.7 at zero gain against 136.6/153.8/273.8/180.7
+#   with the gain live, a factor 1.61-2.13, steady over twelve 20 s slices.
+#   The signs were re-measured the same session and are NOT the cause
+#   (slopesign.py: a0 +70.92, a1 +67.75, a2 -184.26, a3 +81.08 counts/V, and
+#   STEADY_GAIN already carries a2 inverted). Clipping is: once a coil clips the
+#   realised force is no longer -Kp*v and the dissipation guarantee is void.
+#   HIGHEST VOLTAGE EVER COMMANDED ON THIS HARDWARE WITHOUT INCIDENT IS 1.1 V
+#   (analysis/bias_sweep.py). Above that is unmeasured, and the coil driver
+#   between the DAC and the coil IS NOT IN THIS REPO, so 0.25 V may have encoded
+#   a real current limit. BIAS is the CONTINUOUS one: it sits on every coil for
+#   the whole run, so if the driver is a voltage source into a resistive coil
+#   the static dissipation goes as BIAS^2.     # nominal; the trim moves the window
+
+# ---------------------------------------------------------------------------
+# THE SENSOR CALIBRATION, and why a FLAT gain vector is not a flat law
+# ---------------------------------------------------------------------------
+# A gain in this file is volts of coil demand per volt of SENSOR velocity, and a
+# sensor volt is counts. The four in-plane OSEMs do NOT share a counts-per-metre,
+# so a flat gain vector is flat in COUNTS and lopsided in PHYSICS: the most
+# sensitive sensor reports the largest velocity for the same motion of the plate
+# and its coil is asked for the largest voltage. That is measured, it is large,
+# and it is why exactly one coil clips.
+#
+# MEASURED 2026-08-20, two closed-loop runs, DAMPING blocks only, window
+# BIAS 0.50 +- BIAS_SWING 0.25:
+#   data/20260820_181504_fast_lock.csv (26 782 samples, 2 611 control steps in
+#   DAMPING, one hand kick at t=23 s):
+#     ch   peak |u - bias|   of the 0.25 V half-window   pinned at a rail
+#     u0        0.1476 V              59 %                    0.00 %
+#     u1        0.1915 V              77 %                    0.00 %
+#     u2        0.3009 V             120 %                    5.55 %
+#     u3        0.1942 V              78 %                    0.00 %
+#   data/20260820_180344_fast_lock.csv (quiet, no kick): peak |u - bias|
+#     0.0589 / 0.0558 / 0.1102 / 0.0545 V, nothing pinned on any channel.
+#
+# A SECOND SATURATION, SIX TIMES MORE FREQUENT THAN THE RAIL, AND IT WAS NOT IN
+# THE BRIEF. `PID.drive` slew-limits at MAX_SLEW_PER_S = 2.0 V/s. Over the same
+# 18:15 DAMPING block, |d(out)/dt| evaluated at the CONTROL clock:
+#     ch   p50      p99      at the 2.0 V/s cap
+#     u0   0.764    1.527         0.00 % of control steps
+#     u1   0.900    1.999         1.15 %
+#     u2   1.614    2.018        34.41 %
+#     u3   0.873    1.929         0.54 %
+# Coil 2 spent a THIRD of the run rate-limited. A rate limit is a saturation like
+# any other -- the applied voltage is not what the law asked for -- and it is the
+# same defect: u2 alone is asked for 2-3x the swing at the same physical motion.
+# It is ALSO a phase lag, and this file's own DAMP_SIGN note is the reason to care
+# (velocity feedback with enough lag stops dissipating). That last step is an
+# ARGUMENT, not a measurement: the 18:15 run was hand-kicked at t=23 s, so its
+# counts std rising 23.8/27.6/58.1/31.3 -> 47.4/56.6/93.8/53.8 is not evidence of
+# pumping and is not offered as any.
+#
+# THE FIRST FIGURE IN THE BRIEF FOR THIS WORK WAS AN ARTIFACT, AND IT IS WORTH
+# RECORDING SO IT IS NOT RE-DERIVED. "u2 pinned at a rail 57.0 % of samples" on
+# `data/20260820_180344_fast_lock.csv` is what you get by judging a TRIMMED
+# channel against that day's UNTRIMMED nominal window, 0.25-0.75 V. The bias trim had
+# walked ch2 to 0.75, then 1.00, then 1.25 V (three steps at t = 35, 50, 65 s),
+# and its window moved with it. Against its own window ch2 touched a rail on
+# 0.0000 of that run's DAMPING samples, and its peak demand about bias was
+# 0.1102 V, 44 % of the half-window. See the bias-trim section for the rest.
+#
+# ---------------------------------------------------------------------------
+# WHERE THE CALIBRATION COMES FROM: A RIGID PLATE CANNOT WARP
+# ---------------------------------------------------------------------------
+# a0-a3 are four coplanar sensors reading one axis, so their readings span three
+# rigid-body quantities plus WARP = [+1,-1,-1,+1] (PHI_WARP), which no rigid-body
+# motion produces. A coil pushes a rigid plate. Therefore for EVERY coil j the
+# static response expressed in PHYSICAL units must have zero warp component:
+#
+#     sum_i  w_i * h_i * M[i,j]  =  0,     w = PHI_WARP[:4] = [+1,-1,-1,+1]
+#
+# with M[i,j] the measured DC response of sensor i to coil j in counts/V and
+# h_i proportional to 1 / (counts per metre) for sensor i. That is ONE EQUATION
+# PER COIL. Over eight coils it is four unknowns in eight equations, so it is
+# OVER-DETERMINED AND CAN FAIL. h is the smallest right singular vector of
+# W[j,i] = w_i * M[i,j].
+#
+# THIS IS NOT THE ATTEMPT CLAUDE.md RECORDS AS A FAILURE. That one nulled warp in
+# Phi over the three mode shapes: 3 equations in 4 unknowns, where a solution
+# always exists and therefore proves nothing, and its two independent checks came
+# out mixed. This one is over-determined and its residual is what carries the
+# evidence.
+#
+# THE RESULT, from data/20260820_155638_status_slopesign.csv, all eight coils,
+# singular values 310.69 / 117.98 / 60.82 / 5.03 (smallest/largest 0.0162):
+#
+#     warp residual per coil, counts,  raw -> h-calibrated
+#       coil 0  -127.90 -> +3.92          coil 4   -6.90 -> -3.34
+#       coil 1   +57.90 -> -5.09          coil 5  +14.90 -> -0.22
+#       coil 2  +141.10 -> +4.11          coil 6  -10.20 -> +4.47
+#       coil 3   -65.10 -> -5.29          coil 7   -0.40 -> +0.96
+#     rms warp / rms |response|:  0.6224 -> 0.0322, a 19.3x reduction.
+#
+# RE-DERIVED INDEPENDENTLY FROM THE SAME RAW CSV WHILE WRITING THIS, with a
+# different settle window on each dwell: h = [1.6084, 1.0598, 0.4665, 0.8653],
+# singular values 316.17 / 122.08 / 61.13 / 5.39, per-coil calibrated warp
+# +2.93 / -4.12 / +2.70 / -4.26 counts. Agrees to 1.7 % on every entry.
+#
+# AND IT IS CONFIRMED BY A ROUTE THAT NEVER SAW THE OFF-DIAGONAL. h correlates
+# +0.9604 with 1/|diagonal slope| ([70.50, 88.87, 205.94, 98.79] counts/V, the
+# response of each sensor to ITS OWN coil). h was fitted from the off-diagonal
+# warp constraint across all eight coils and the diagonal entered nowhere. Two
+# unrelated measurements of the same four numbers.
+#
+# SO a2's SENSOR IS 2.10x AS SENSITIVE AS THE MEAN AND 3.37x AS SENSITIVE AS a0.
+# Under a flat gain in counts it demands 3.37x a0's voltage for the same motion
+# of the plate. Normalising the gain by the sensor gain is a UNIT CONVERSION, not
+# a fudge.
+#
+# ONE 300 s DC pass, one session, and h is a property of the OSEMs and their
+# electronics, so it moves when they are re-seated -- which they were on
+# 2026-08-20. RE-MEASURE IT with `slopesign.py --coils 0,1,2,3` after any
+# hardware work, and re-solve rather than scaling this vector.
+SENSOR_GAIN_H = np.array([1.6057, 1.0667, 0.4761, 0.8514])
+# The DC response matrix the calibration and the dissipation check are both built
+# on, coils 0-3 against sensors a0-a3, counts/V, from the same file. Its DIAGONAL
+# is SENSOR_SLOPE_COUNTS_PER_V[:4] to within 1.24 counts/V, i.e. well inside the
+# 5.6-30.5 counts/V uncertainty on those entries -- asserted in the selftest,
+# because a transposed or re-ordered matrix here would silently invert the whole
+# argument. INDEX ORDER IS D[coil][sensor]; M = D.T is [sensor][coil].
+DC_MATRIX_COUNTS_PER_V = np.array([
+    [+70.4,  -6.3, +155.5,  -49.1],       # coil 0 -> a0 a1 a2 a3
+    [ -2.7, +88.9,  -88.5,  +61.0],       # coil 1
+    [-40.7, +39.5, -204.7,  +16.6],       # coil 2
+    [+24.1, -60.4,  +50.5,  -99.1]])      # coil 3
+
+# ---------------------------------------------------------------------------
+# the per-channel gains  (bench.py reads these five vectors out of this module)
+# ---------------------------------------------------------------------------
+# THE CEILING IS UNCHANGED. |Kp| = 0.035 is the largest per-channel gain any
+# channel carries here, before and after normalisation: -0.040 is the documented
+# rail onset and the least-evidenced number in the repo (analysis/kp040.md).
+# Normalisation may only ever REDUCE a gain -- `slope_gain` clamps at KP_REF and
+# the selftest asserts it -- so nothing in this change can put a channel
+# somewhere no channel has been.
+KP_REF = 0.035
+KD_REF = 0.00045
+# The channels the normalisation applies to: exactly the four with a Phi row and
+# a determined h. a4/a5/a6/a7 have neither, and their gains are set by the hybrid
+# section, not here. The selftest asserts this list is PHI_GEOM's rows.
+GAIN_NORM_CHANNELS = (0, 1, 2, 3)
+# One switch, so the bench can put the flat law back without editing a vector.
+GAIN_NORMALISE = True
+
+# The velocity-feedback sign on a0-a3. It is DAMP_SIGN[:4], repeated here only
+# because DAMP_SIGN is declared further down with the measurement that fixes it;
+# the selftest asserts the two are identical, so they cannot drift apart.
+DAMP_SIGN_A0A3 = np.array([+1.0, +1.0, -1.0, -1.0])
+
+
+def slope_gain(kp_ref, h=SENSOR_GAIN_H, sign=None, channels=GAIN_NORM_CHANNELS,
+               normalise=GAIN_NORMALISE):
+    """kp_ref on the LEAST sensitive channel, scaled DOWN by sensor gain on the rest.
+
+    g_j = kp_ref * (h_j / max h) * sign_j, so g_j / h_j is the same on every
+    channel: equal coil demand per unit PHYSICAL velocity of the plate. Because
+    the reference is the largest h, no |g| ever exceeds kp_ref, and the clamp
+    below makes that true even if a re-measured h says otherwise.
+    """
+    h = np.abs(np.asarray(h, float))
+    idx = np.asarray(channels, int)
+    g = np.zeros(N)
+    if sign is None:
+        sign = DAMP_SIGN_A0A3
+    scale = (h / h.max()) if normalise else np.ones(h.size)
+    g[idx] = kp_ref * scale * np.asarray(sign, float)
+    return np.clip(g, -abs(kp_ref), abs(kp_ref))
+
+
+# SHIPPED. `gain_report()` prints the vectors and the h/max(h) scale behind them,
+# computed from the constants above rather than transcribed here -- a hand-copied
+# vector goes stale silently the first time h is re-measured.
+#
+# PROJECTED ONTO THE RUN THAT CLIPPED, at the same motion (P and D scale
+# together, so the whole demand scales by h_j/max h) --
+# data/20260820_181504_fast_lock.csv, DAMPING:
+#     ch   peak |u - bias|      of the half-window     at the 2.0 V/s slew cap
+#     u0   0.1476 -> 0.1476 V     59 % ->  59 %          0.00 % ->  0.00 %
+#     u1   0.1915 -> 0.1272 V     77 % ->  51 %          1.15 % ->  0.00 %
+#     u2   0.3009 -> 0.0892 V    120 % ->  36 %         34.41 % ->  0.00 %
+#     u3   0.1942 -> 0.1030 V     78 % ->  41 %          0.54 % ->  0.00 %
+# Both saturations go away, and the peak demand across all four falls to 59 % of
+# the window, so no per-channel window is needed (see BIAS_SWING).
+#
+# WHAT IT COSTS, STATED PLAINLY BECAUSE IT IS NOT SMALL. Every mode still
+# dissipates -- that is the constraint below and it is checked numerically, not
+# assumed -- but the worst mode dissipates LESS. Eigenvalues of the symmetric
+# part of S = A diag(g) Phi, A = pinv(PHI_GEOM[:4]) @ DC_MATRIX^T:
+#     flat  [+0.035,+0.035,-0.035,-0.035]   1.9393 / 4.0678 / 10.0229
+#     h-normalised, shipped                 0.7593 / 2.4882 /  6.0345
+# a factor 0.39 on the worst mode. In the physically consistent form -- modal
+# force from the h-calibrated response, demand from diag(g/h) -- it is
+#     flat 2.0343 / 4.1678 / 9.8134   against   shipped 1.2797 / 2.3935 / 4.7210,
+# a factor 0.63. BOTH FORMS ARE POSITIVE DEFINITE, which is the whole safety
+# argument, and both are asserted in the selftest.
+#
+# THE HEADROOM TO BUY IT BACK IS MEASURED AND IT IS 1.7x: the shipped vector
+# peaks at 59 % of the half-window where the flat one reached 120 %. Spend it
+# with OSEM_GAIN_RAMP, ATTENDED, which is what that tool is for -- not with a
+# desk edit. Raising KP_REF raises every channel together and keeps g/h flat,
+# which is the property this change exists to establish.
+STEADY_GAIN = slope_gain(KP_REF)
+CAPTURE_GAIN = slope_gain(KP_REF)
 # Ki dissipates nothing and ate the headroom: peak 0.1135 -> 0.0056 V when it
 # went to zero, which took total peak demand 0.2998 -> 0.200 V.
+#
+# AND IT IS WHY THE ANTI-WINDUP PATH NEEDS NOTHING DOING FOR A PINNED CHANNEL,
+# checked while fixing the clipping. `PID.terms` feeds `clip_excess` back inside
+# `np.where(self.ki != 0.0, ..., 0.0)`, so with KI_GAIN identically zero there is
+# no state to wind up and the clip is MEMORYLESS: `p` and `d` are recomputed from
+# the current velocity every step and the output leaves the rail on the first step
+# the velocity reverses. u2 was pinned 5.55 % of the 18:15 DAMPING block and its
+# `i` column is exactly 0.0000 for all 26 782 rows. stdlib gates the
+# back-calculation on ki != 0 deliberately -- at ki = 0 it is a one-way ratchet and
+# one clipped sample would leave a standing offset of up to I_CLAMP_V. Nothing to
+# change; recorded so nobody hunts a windup bug that cannot exist yet. IT BECOMES
+# LIVE THE MOMENT ANY KI_GAIN ENTRY IS MADE NON-ZERO.
 KI_GAIN = np.array([+0.0000, +0.0000, +0.0000, +0.0000,
                     +0.0000, +0.0000, +0.0000, +0.0000])
-KD_GAIN = np.array([-0.00045, -0.00045, +0.00045, -0.00045,
-                    +0.00000, +0.00000, +0.00000, +0.00000])
+# NORMALISED BY THE SAME FACTOR AS Kp, deliberately: the D term is in the same
+# units, it saturates the same coil, and CLAUDE.md Sec 2 is the record of what
+# happens when it is left out of an actuator budget -- it is added AFTER the
+# modal cap and it is what took coil 3 to 0.4229 V against a 0.250 V half-window.
+# Scaling P and D by the same factor also leaves each channel's P/D ratio, and so
+# the loop shape, exactly where it was. Measured contribution on the run that
+# clipped: |d| peaked at 0.0144 / 0.0190 / 0.0280 / 0.0173 V on a0-a3, i.e. 9 %
+# of u2's peak demand -- small, but the same lopsidedness, 1.9x a0 on the channel
+# whose sensor is 3.37x as sensitive.
+KD_GAIN = slope_gain(KD_REF)
+
+def gain_report():
+    """What the bench needs to see before the coils are energised, and why.
+
+    The gain vector is no longer flat, and a printed vector that is not flat
+    reads as a typo unless the reason is printed with it. Everything here is
+    computed from the constants above, so it cannot describe a different vector
+    from the one about to be applied.
+    """
+    e_counts = dissipation_eig(STEADY_GAIN, "counts")
+    e_phys = dissipation_eig(STEADY_GAIN, "physical")
+    flat = KP_REF * np.concatenate([DAMP_SIGN_A0A3, np.zeros(N - 4)])
+    if not GAIN_NORMALISE:
+        return ["[gain] NORMALISATION OFF -- flat %s on a0-a3, the pre-2026-08-20 "
+                "law. This is the null test, not the shipped configuration."
+                % np.round(STEADY_GAIN[:4], 5)]
+    return [
+        "[gain] SLOPE-NORMALISED: a0-a3 carry %s against a flat %+.3f, because "
+        "the four in-plane OSEMs do not share a counts-per-metre. Sensor gains "
+        "h = %s (1 / counts-per-metre, mean 1), from the warp-null fit on "
+        "data/20260820_155638_status_slopesign.csv."
+        % (np.round(STEADY_GAIN[:4], 5), KP_REF * DAMP_SIGN_A0A3[0],
+           np.round(SENSOR_GAIN_H, 4)),
+        "[gain] g/h is %.6f on all four -- equal coil demand per unit PHYSICAL "
+        "velocity. Under the flat vector it was %s, i.e. a2's coil was asked for "
+        "%.2fx a0's at the same motion of the plate, which is why coil 2 and only "
+        "coil 2 clipped (5.55 %% of DAMPING samples pinned, peak 0.3009 V against "
+        "a %.2f V half-window) and spent 34.4 %% of the run at the %.1f V/s slew "
+        "cap."
+        % (float(np.abs(STEADY_GAIN[0]) / abs(SENSOR_GAIN_H[0])),
+           np.round(np.abs(flat[:4]) / np.abs(SENSOR_GAIN_H), 4),
+           float(np.abs(SENSOR_GAIN_H)[0] / np.abs(SENSOR_GAIN_H).min()),
+           BIAS_SWING, MAX_SLEW_PER_S),
+        "[gain] EVERY MODE STILL DISSIPATES, checked numerically and not assumed "
+        "(colocation does not hold on this rig): sym(A diag(g) Phi) eigenvalues "
+        "%s counts-form and %s physical-form, all positive. The flat vector gave "
+        "%s and %s, so the worst mode loses a factor %.2f -- that is what this "
+        "costs, and the headroom to buy it back with OSEM_GAIN_RAMP is measured "
+        "at 1.7x."
+        % (np.round(e_counts, 4), np.round(e_phys, 4),
+           np.round(dissipation_eig(flat, "counts"), 4),
+           np.round(dissipation_eig(flat, "physical"), 4),
+           float(e_counts.min() / dissipation_eig(flat, "counts").min())),
+    ]
+
 
 CAPTURE_HIGH_FRAC, CAPTURE_LOW_FRAC = 0.6, 0.2
 # THE CAPTURE/STEADY SCHEDULE IS INERT, AND THE BUDGET ALLOCATOR DEPENDS ON IT.
@@ -293,7 +744,28 @@ MAINS_NULL = True              # two-step boxcar = a null at 50 Hz
 # values differ by <= 0.001 Hz, half a half-width. KALMAN_K below is a
 # steady-state gain solved at those previous values and is not re-solved for a
 # 0.14 % shift.
-F_MODE_HZ = np.array([0.72194, 0.99193, 1.65607])
+F_MODE_HZ = np.array([0.71519, 0.99231, 1.65307])
+      # RE-MEASURED 2026-08-20 16:25 on the bench, AFTER the coils were re-seated
+      # and the per-channel bias applied -- 300 s, 105 013 samples, no drive
+      # (`data/20260820_162534_status_sensors.csv`). Consensus over a0-a3, whose
+      # per-sensor peaks agree to 0.00050 / 0.00050 / 0.00000 Hz.
+      #
+      # a5 is DELIBERATELY EXCLUDED from the consensus even though the census
+      # includes it. It carries mode B at SNR 30.1 but modes A and C at 6.4 and
+      # 2.4, and its mode-C peak lands at 1.61857 against a0-a3's unanimous
+      # 1.65307 -- a 0.0345 Hz outlier, 41 half-widths, which is a noise peak and
+      # not a measurement. Averaging it in is what made the tool's own printed
+      # C spread 0.03450.
+      #
+      # Was [0.71394, 0.99393, 1.65182] at 12:29, which was itself measured this
+      # morning: the shifts are +0.00125 / -0.00162 / +0.00125 Hz, i.e. 1.5 / 1.9
+      # / 1.5 half-widths (the half-width is 0.00083 Hz). Small, but a half-width
+      # is the unit that matters -- a drive off by n half-widths gets
+      # 1/sqrt(1+n^2) of the on-peak response AND the wrong phase.
+      #
+      # Against the 2026-08-06 set the shifts are -0.00675 / +0.00038 / -0.00300,
+      # so mode A is 8.1 half-widths off and anything still carrying 0.72194 is
+      # driving off resonance.
 NMODE = len(F_MODE_HZ)
 T_AMP_S, T_DC_S = 50.0, 20.0   # amplitude and offset wander timescales, measured
 
@@ -313,6 +785,21 @@ KALMAN_Q = np.array([
     [1.305297122e-07, 1.553854780e-06, 5.111513956e-07]])
 KALMAN_Q_DC = KALMAN_R / T_DC_S
 # Steady-state per-sensor gains, one row per channel, 7 states.
+#
+# KEPT AS LITERALS, and `stdlib.steady_state_k` re-derives them from
+# (KALMAN_R, KALMAN_Q, F_MODE_HZ, CONTROL_PERIOD_S) if you want to check.
+# THE TWO DISAGREE BY UP TO 51x AND IT DOES NOT MATTER, which is the useful
+# finding. Re-deriving flips the sign of column 1 -- mode A's velocity state -- on
+# a0-a3 and a5 and makes the DC column 9x larger, yet over the same 41 313
+# decimated control steps of data/20260820_173738_fast_lock.csv the two velocity
+# estimates agree against a zero-phase reference: corr(vel, true dv/dt)
+# 0.597/0.710/0.747/0.749 for these literals against 0.519/0.723/0.706/0.748
+# derived. The filter output is insensitive to K here, so swapping a constant with
+# hardware history for one that measures no better is not a trade worth making.
+# THE DISAGREEMENT IS NOT EXPLAINED, and it is not the 2026-08-20 frequency
+# re-measurement: at the 2026-08-06 frequencies it is 50.1x against 51.2x today.
+# Either the literals came from a different Q convention than `steady_state_k`
+# assumes, or they were never this model's steady-state gain. Open item.
 KALMAN_K = np.array([
     [1.075915568e-02, -1.589312360e-02, 6.570699385e-02, 3.549956589e-01,
      6.423534167e-03, 2.083006063e-01, 2.116536034e-02],
@@ -342,27 +829,42 @@ CALIB_AGREE_N, CALIB_AGREE_TOL = 3, 1.20
 LOCK_RMS_FACTOR, LOCK_SUSTAIN_S, LOCK_WINDOW_S = 0.35, 5.0, 5.0
 
 ENVELOPE_WINDOW_S, RUNAWAY_MULTIPLE = 2.0, 1.8
-# STAYS 4.0, and the margin under it now comes from the mechanism instead of the
-# clock. Reconstructing the breaker's internals from the two records of
-# 2026-08-18, the longest continuous `high & growing` latch produced by a single
-# hand kick was 4.00 s (modal ch2, diagonal ch3) against this 4.0 s sustain, so
-# both runs faulted on the first kick, under both laws, with ZERO margin.
-# stdlib.Breaker now also requires the envelope not to have RECEDED from its own
-# recent peak, which cuts that same measured latch to 1.87-2.23 s -- a 1.8x margin
-# on all eight channel-instances of both records, at the same 4.0 s.
-# RAISING THIS TO 8.0 WAS TRIED AND REVERTED. It bought margin against an
-# idealised smooth ring-up, and it cost two measured detections the simulator
-# holds: the pumped-resonance scenario (peak ch2 ratio 2.58 against the 1.8 line)
-# went uncaught, and the runaway-recovery scenario never tripped at all. A
-# disturbance that grows for 4 s and does not come off its peak is what this
-# breaker is for; the fix belonged in what "growing" means, not in how long the
-# rig waits.
-RUNAWAY_SUSTAIN_S = 4.0
+# 4.0 -> 5.0 ON 2026-08-20, and the number is measured, not chosen. It moved
+# because stdlib.Breaker changed underneath it: a recession now VETOES the trip
+# instead of CLEARING the latch, so the latch a hand kick can accumulate is no
+# longer chopped up by the plate's own beat ripple and the sustain has to cover
+# the whole kick.
+#
+# Sourced from every closed-loop bench record in data/, replayed through the real
+# stdlib.Breaker (channels a0-a3, DAMPING only): 13 runs x 4 channels = 52
+# channel-instances covering nine hand-kick runs, three quiet closed-loop runs and
+# the pumped run 20260817_191710. At 5.0 s NOTHING trips. At 4.0 s exactly one
+# does -- 20260818_024302 ch2 at t=39.1 s, the FIRST hand kick of the only valid
+# kick set this rig has -- and that is CLAUDE.md 1 all over again.
+# The longest continuous `high & growing` a hand kick produced anywhere in that
+# corpus is 5.28 s (20260818_024302 ch3, t=150.7-156.0, envelope 0.245 -> 0.630 V,
+# i.e. ratio 2.0 -> 5.2 at a ring-up rate of 0.27 /s).
+#
+# WHAT IT COSTS: one extra second before a runaway trips. On the same records
+# multiplied by exp(g t) the trip still fires at 0.05, 0.0739 and 0.15 /s (2, 3
+# and 4 of the four channels, and the controller trips on `.any()`), where the
+# rule that shipped until today caught NONE of them.
+#
+# RAISING IT FURTHER IS NOT FREE, and 8.0 was tried and reverted once already.
+# Measured now: at 6.0 s the 0.05 /s runaway -- roughly what the simulator's
+# pumped resonance does -- stops tripping on every channel, and stdlib's own
+# "a ring-up longer than one period is treated as a push" fixture stops firing.
+RUNAWAY_SUSTAIN_S = 5.0
 RUNAWAY_TREND_LAG_S, RUNAWAY_GROWTH_FRAC = 10.0, 1.02
 
 SAT_SUSTAIN_S, SAT_FRACTION = 1.30, 0.80
 SAT_DECAY_FRAC = 0.98
 
+BREAKER_REF_FLOOR_FRAC = 0.10   # of the median driven reference. Same number and
+                                # same argument as BASELINE_FLOOR_FRAC below: a
+                                # channel whose own reference is a small fraction
+                                # of what everything else reads cannot have a
+                                # meaningful RATIO against it.
 BASELINE_FLOOR_FRAC = 0.10     # of the median IN-BAND amplitude across enabled
 
 RAIL_LOW_COUNTS, RAIL_HIGH_COUNTS = 12, 1011
@@ -380,25 +882,19 @@ FAULT_CLEAR_RATIO = 1.4
 # MAX_BASELINE_REFUSALS: hold, then say so and go anyway.
 #
 # WAS 120.0, AND THAT IS EXACTLY WHY IT NEVER FIRED. Measured 2026-08-18, both
-# runs faulted on the first hand kick and sat there to the end of the run:
-# diagonal FAULT 40.9 -> 159.6 s = 118.7 s (data/20260818_001841_fast_lock.csv),
-# modal FAULT 38.5 -> 133.0 s = 94.5 s (data/20260818_002229_fast_lock.csv). The
-# diagonal run MISSED THE CEILING BY 1.3 s. A ceiling longer than a whole jerk.py
-# run is not a ceiling.
-# The re-derivation, from measurements in this repo:
-#   - the LOOP is what brings motion down, not the ringdown: measured re-quiet
-#     after a matched kick is 5.3 s modal / 17.4 s diagonal (CLAUDE.md).
-#   - with the gain at zero the plant decays at 0.0072 /s, tau > 138 s
-#     (analysis/ringdown.md), so ringing down from a trip at ratio 3.8 to
-#     FAULT_CLEAR_RATIO takes ln(3.8/1.4)/0.0072 = 139 s. ANY ceiling under that
-#     is the operative path; the amplitude gate will not open first.
-# 30.0 s is longer than the slowest measured re-quiet (17.4 s), so the loop gets a
-# full chance to be the thing that fixes it before the ceiling is used, and far
-# under the 138 s intrinsic. THE REMAINING FACTOR IS A CHOICE, NOT A MEASUREMENT:
-# 30 s is 1.7x the 17.4 s re-quiet and 6x the FAULT_CLEAR_SUSTAIN_S a re-trip
-# costs. The conservative direction is LONGER -- re-engaging into a disturbance
-# that is still there costs one 5 s re-trip -- and 30 s is the shortest value that
-# clears the measured re-quiet with margin.
+# runs faulted on the first hand kick and sat there to the end: diagonal FAULT
+# 118.7 s (data/20260818_001841_fast_lock.csv), modal 94.5 s
+# (data/20260818_002229_fast_lock.csv). The diagonal run MISSED THE CEILING BY
+# 1.3 s. A ceiling longer than a whole jerk.py run is not a ceiling.
+# The re-derivation, from measurements in this repo: the LOOP is what brings
+# motion down, at a measured re-quiet of 5.3 s modal / 17.4 s diagonal
+# (CLAUDE.md), while at zero gain the plant decays at 0.0072 /s
+# (analysis/ringdown.md) -- so ringing down from a trip at ratio 3.8 to
+# FAULT_CLEAR_RATIO takes ln(3.8/1.4)/0.0072 = 139 s and ANY ceiling under that is
+# the operative path. 30.0 s is longer than the slowest re-quiet, so the loop gets
+# a full chance first, and far under the 138 s intrinsic. THE REMAINING FACTOR IS
+# A CHOICE: 30 s is 1.7x the 17.4 s re-quiet and 6x the FAULT_CLEAR_SUSTAIN_S a
+# re-trip costs, and the conservative direction is LONGER.
 FAULT_CLEAR_MAX_HOLD_S = 30.0
 REARM_SUSTAIN_S = 2.0
 
@@ -413,7 +909,7 @@ REARM_SUSTAIN_S = 2.0
 # this worse" and wrong for "is this loop where it normally lives".
 #
 # WINDOW. 30 s. Two bounds, both from measurements here: it must hold several
-# cycles of the slowest mode (0.72194 Hz, 1.385 s) so the envelope is a level and
+# cycles of the slowest mode (0.71519 Hz, 1.398 s) so the envelope is a level and
 # not a phase; and at the 20th percentile the answer survives a disturbance
 # occupying up to 80 % of the window, so with the diagonal law's measured 17.4 s
 # re-quiet it needs 17.4/0.8 = 21.8 s at minimum. 30 s leaves the quiet 42 %
@@ -436,10 +932,124 @@ MIN_HEALTHY_CHANNELS = 1     # one channel damps the whole mass (provenance.md 3
 # ---------------------------------------------------------------------------
 BIAS_QUANTUM = 0.25            # coarse: 2 DOF, 4 knobs, so fine steps would
 BIAS_MIN, BIAS_MAX = 0.25, 1.25          # just chase each other
+# ONE GLOBAL HALF-WINDOW, AND A PER-CHANNEL ONE IS NOT NEEDED ONCE THE GAINS ARE
+# NORMALISED. On the run that clipped, peak |u - bias| was 59 / 77 / 120 / 78 %
+# of the half-window; with the h-normalised gains the four come to 59 / 51 / 36 /
+# 41 %, which is one window fitting all four. A per-channel window would also
+# have to be justified against a coil driver that is not in this repo
+# (CLAUDE.md Sec 11). NOT ADDED.
+#
+# 0.25 SHIPS, AND THE CASE FOR 0.50 IS RECORDED HERE RATHER THAN ACTED ON.
+# THE CASE FOR RAISING IT, measured 2026-08-20. A hand kick during a DIAGONAL run
+# took `ratio` 0.31 -> 4.99 (16.25x) and THE LOOP NEVER RECOVERED: ratios were
+# still 1.5-3.2 a full 20 s later and ch2 had been dropped from the loop. The
+# commanded voltages over that DAMPING block, against BIAS 0.50 +- 0.25:
+#
+#     coil    min      max                a2's counts spanned 0 to 1023,
+#     u0     0.250    0.750  <- BOTH      i.e. the FULL ADC scale.
+#     u1     0.250    0.750  <- BOTH
+#     u3     0.250    0.750  <- BOTH
+#     u2     0.380    0.702
+#
+# Three of four coils on BOTH rails. Once a coil clips the realised force is no
+# longer -Kp x velocity and the dissipation guarantee is void (CLAUDE.md Sec 2),
+# so that kick was lost to RUNNING OUT OF ACTUATOR, not to the law: the same law
+# locks at ratio 0.01-0.07 unsaturated (`LOCKED` at 12.8 s, 2026-08-20 19:4x).
+#
+# WHY IT IS NOT TAKEN. 0.50 has never been on hardware; 0.25 is the value the
+# 12.8 s lock was measured at, and this file is being handed on. And 0.50 opens a
+# voltage nobody has measured: `_trim` can walk a coil to BIAS_MAX and `PID.drive`
+# clips to vmin/vmax only, so the peak commandable is BIAS_MAX + BIAS_SWING --
+# 1.50 V at 0.25, which is the pre-existing exposure, against 1.75 V at 0.50.
+# The highest ever commanded here without incident is 1.10 V
+# (analysis/bias_sweep.py; the 18:03 run reached 1.329 V on coil 2). Raising the
+# swing is gated on somebody characterising the coil driver and the 3 A supply.
+#
+# WHY BIAS_SWING AND NOT BIAS IF IT IS EVER RAISED. BIAS is a CONTINUOUS load on
+# all eight coils, so the steady dissipation goes as BIAS^2; the swing is only
+# reached at the extremes of a correction. Raising BIAS to 0.75 V AND the swing
+# to 0.75 V together had THE POWER SUPPLY AUDIBLY ALARMING -- common-mode rms
+# 15.4 -> 132.3 counts, every DC level falling together by 185-286 counts
+# (data/20260820_171242_fast_lock.csv, full account in the BIAS comment).
+#
+# MODAL_TOTAL_HEADROOM is a FRACTION of this, so the cap on the TOTAL output
+# follows it automatically (theta names that number BUDGET_V). MODAL_DEMAND_CAP_V
+# is an ABSOLUTE volt and deliberately does not -- see its own comment. Nothing in
+# `_trim` reads BIAS_SWING; only `_moved`/`_bias_ramp` do, to slide vmin/vmax.
 BIAS_SWING = 0.25              # +-this around each channel's own bias
 MID_COUNTS = 511.5             # (ADC_MAX_COUNTS - 1) / 2
-TRIM_PERIOD_S = 15.0           # >= one ringdown at Q~50, f0~1 Hz (~16 s)
+
+# ---------------------------------------------------------------------------
+# A BIAS STEP IS A FORCE STEP. RAMP IT.
+# ---------------------------------------------------------------------------
+# ADDED 2026-08-20 EVENING, and the bench found this, not a desk. On
+# data/20260820_185657_fast_lock.csv -- the first run with the normalised gains,
+# all four Phi channels locked at ratio 0.05-0.09 -- the rig owner saw "stray
+# waves" and "bumps" during lock, and every one of them is a trim step. T2 modal
+# residual in 2 s windows against ch2's commanded bias:
+#
+#     t(s)   u2 mean   a2 mean   T2 rms
+#      12     0.500     860.0     1.85      settled
+#      14     0.619     828.8    15.28      TRIM STEP
+#      16     0.753     816.4     9.99
+#      24     0.750     813.1     2.00      re-settled, about 10 s later
+#      30     0.993     759.8    13.35      TRIM STEP
+#      36     1.000     758.6     4.12      still recovering
+#
+# 7-8x on the residual, about 10 s to recover, and TRIM_PERIOD_S was 15.0 s, so
+# the steps STACKED and the loop never got clear air. Band power over the whole
+# DAMPING block against CALIBRATING says the same thing and says where it goes:
+# the mode band 0.60-1.90 Hz is DOWN 8.5x -- the loop works -- while 0.02-0.30 Hz
+# is UP 2950x. A velocity damper has no mechanism to inject sub-0.3 Hz motion.
+# The trim does.
+#
+# THE MECHANISM IS ALREADY WRITTEN DOWN IN THIS REPO, in `status.park_ramped`:
+# a bias change is a FORCE STEP into an undamped plant, which is exactly the
+# principle `_dc_point` uses to MEASURE the DC matrix, and it has to be spread
+# over about ten periods of the slowest mode to be adiabatic. The trim did not
+# ramp. It handed the new bias straight to the actuator, where the only thing
+# slowing it was MAX_SLEW_PER_S = 2.0 V/s -- 0.25 V in about 125 ms, roughly 120x
+# too fast. That ramps the COIL, not the PLATE.
+#
+# 15.0 s is 10.7 periods of the slowest mode (0.71519 Hz, 1.398 s), the same
+# number `status.BIAS_RAMP_S` uses and for the same reason. Excitation by a ramp
+# falls with its duration; a step is the worst case.
+BIAS_RAMP_S = 15.0
+# The commanded bias moves at most this fast, in volts per second. One
+# BIAS_QUANTUM spread over BIAS_RAMP_S, i.e. 0.0167 V/s against a MAX_SLEW_PER_S
+# of 2.0 -- 120x slower, which is the whole point. Derived, not typed, so
+# changing the quantum cannot silently change the ramp.
+BIAS_RAMP_PER_S = BIAS_QUANTUM / BIAS_RAMP_S
+# WAS 15.0 s, AND THAT WAS SHORTER THAN THE RECOVERY IT CAUSED. The measurement
+# above puts recovery at about 10 s after a stepped trim, so a 15 s period let
+# the next step land on the tail of the last. 45.0 s is the ramp (15 s) plus a
+# full QUIET_WINDOW_S (30 s) of settled data before the step is judged or another
+# is started. It costs step COUNT on a short run -- the 18:03 run took three
+# steps in 51 s of DAMPING and would now take one -- and that is the intended
+# trade: a correction that costs 10 s of lock is one to make rarely.
+TRIM_PERIOD_S = 45.0
 TRIM_DEADBAND_COUNTS = 40.0    # inside this, leave it alone
+# DO NOT SPEND A DISTURBANCE ON A CORRECTION THAT CANNOT CONVERGE. A trim step
+# costs real motion, so it is only worth taking if the budget left can actually
+# close the offset. Before starting a step this asks how far the channel could
+# still move -- steps left, the total excursion budget and the BIAS_MIN/BIAS_MAX
+# clamps, whichever binds first -- multiplies by that channel's MEASURED slope,
+# and refuses if the answer cannot cover this fraction of the offset.
+#
+# IT REFUSES EXACTLY THE TWO CHANNELS THIS FILE ALREADY DOCUMENTS AS UNREACHABLE,
+# and it refuses them from measured numbers rather than from a name:
+#   a2  rests near 860 counts, 348 off mid-scale, slope -205.94 counts/V. Three
+#       affordable steps of 0.25 V reach 154 counts, 44 % of the offset. REFUSED.
+#   a4  drifts 34 counts, slope +5.06 counts/V. Its whole budget is worth 1.3
+#       counts, 4 % of the offset -- the existing note above says 14 % using the
+#       full four-step budget and it is the same conclusion either way. REFUSED.
+# A channel with a modest offset is unaffected: 100 counts on a1 (+88.87
+# counts/V) is 67 % reachable and still trims.
+#
+# WHAT THIS IS NOT: a claim that a2 is electrically untrimmable. Two closed-loop
+# runs measure the trim moving it at -204 to -224 counts/V (see BIAS). It cannot
+# move it FAR ENOUGH inside its own budget, which is a different statement.
+TRIM_MIN_REACHABLE_FRAC = 0.5
 # NOT LOWERED, AND LOWERING IT WOULD NOT HELP. a4 drifted 34.0 counts over 150 s
 # on 2026-08-17 (data/20260817_233920_status_sensors.csv; every other channel moved
 # <= 4.2 counts, and a4 carries 26 % of its power under 0.1 Hz, peaking at
@@ -453,18 +1063,94 @@ TRIM_DEADBAND_COUNTS = 40.0    # inside this, leave it alone
 TRIM_MAX_STEPS = 4             # per channel, per run
 TRIM_MAX_TOTAL_EXCURSION_V = 0.75   # two coils far from nominal gave three
                                     # runaways on 2026-08-07
-# Sign of d(counts)/d(bias volts) per channel.
-#   a0-a3  from the per-channel decay fits (CLAUDE.md); a2 is mounted the other
-#          way round, which is also why STEADY_GAIN[2] is positive.
-#   a6,a7  MEASURED 2026-08-17 by DC step, +10.07 +-2.02 and +8.05 +-1.24
-#          counts/V -- 5.0 and 6.5 sigma (slopesign.py, data/20260817_215348).
-#   a4     +4.83 +-1.66, only 2.9 sigma: same sign, not yet resolved. Its hybrid
-#          gain is live, so re-measure with a longer dwell before trusting it.
-#   a5     no signal at all; its pin is at ground and it is disabled.
-# The sigma is on the MEAN of the step, not the per-sample dither -- a 2-count
-# shift is resolvable because the mean of ~3800 samples is ~60x quieter than one.
-SLOPE_SIGN = np.array([-1.0, -1.0, +1.0, -1.0,
-                       +1.0, -1.0, +1.0, +1.0])
+# SIGN OF d(counts)/d(bias volts) PER CHANNEL -- the PHYSICAL slope, and nothing
+# else. Which way the sensor moves when its own coil pushes.
+#
+# THIS VECTOR USED TO HOLD TWO DIFFERENT CONVENTIONS AT ONCE, AND THAT WAS A LIVE
+# SIGN BUG. Until 2026-08-20 it read [-1,-1,+1,-1, +1,-1,+1,+1]. The a0-a3
+# entries were never measured -- the comment said so, "from the per-channel decay
+# fits" -- they were copied from STEADY_GAIN, which is the NEGATED slope. The
+# a4/a6/a7 entries came from an actual DC step (+4.83, +10.07, +8.05 counts/V)
+# and so were the slope itself, unnegated. `HYBRID_GAIN` then multiplied the lot
+# by HYBRID_KP, giving a4/a6/a7 a gain with the SAME sign as their slope where
+# a0-a3 get the opposite -- positive feedback on three channels.
+# It never fired: `inband-floor` demoted a4/a6/a7 at engage on both 2026-08-18
+# runs, |gain| exactly 0.0000 for 100 % of DAMPING samples (CLAUDE.md Sec 6). The
+# fix is to keep the slope and the gain sign in SEPARATE names so they cannot
+# drift into each other again.
+#
+# ALL EIGHT MEASURED 2026-08-20 after the coils were re-seated, one coil at a
+# time, 0.10 -> 0.40 V, 12 s dwell (`slopesign.py`,
+# `data/20260820_155638_status_slopesign.csv`), counts/V on the channel's own
+# sensor, with the uncertainty of the MEAN over 1 s blocks:
+#   a0  +70.50 +-5.63   12.5 sigma        a4   +5.06 +-0.46   10.9 sigma
+#   a1  +88.87 +-10.15   8.8 sigma        a5   -0.39 +-0.93    0.4 sigma  UNRESOLVED
+#   a2 -205.94 +-30.46   6.8 sigma        a6  +10.37 +-0.30   34.9 sigma
+#   a3  -98.79 +-19.81   5.0 sigma        a7   +8.07 +-0.17   46.2 sigma
+# a6/a7 reproduce the 2026-08-17 values (+10.07, +8.05) to well inside sigma, so
+# the reset did not disturb them. a4 is now 10.9 sigma where it was 2.9.
+#
+# a3 CHANGED SIGN IN THE RESET: +81.08 counts/V before it, -98.79 after. That is
+# not drift, it is the coil or the OSEM remounted the other way round, and it is
+# why STEADY_GAIN[3] is now positive. Nothing in software could have caught it.
+#
+# a5's coil does not move a5: -0.39 +-0.93 counts/V, 0.4 sigma. The SENSOR is
+# alive (std 9.16 counts over a quiet record, 36 distinct values, where it was a
+# hard-grounded pin at exactly 0.0 for 236 387 samples), so this is an actuator
+# result, not a sensor one. Its gain stays zero.
+# THE MAGNITUDES ARE NOW LOAD-BEARING TOO, so they are kept rather than reduced
+# to a sign at the point of measurement. Their RATIOS are what says a flat gain
+# vector is not a flat law -- see SENSOR_GAIN_H, which is fitted from a different
+# part of the same DC pass and agrees with 1/|slope| at correlation +0.9604.
+# a5 is UNRESOLVED at 0.4 sigma and is never normalised against: it is not in
+# GAIN_NORM_CHANNELS, its STEADY_GAIN is zero, and HYBRID_CHANNEL[5] is False.
+SENSOR_SLOPE_COUNTS_PER_V = np.array([+70.50, +88.87, -205.94, -98.79,
+                                      +5.06,   -0.39,  +10.37,  +8.07])
+SENSOR_SLOPE_SIGMA = np.array([5.63, 10.15, 30.46, 19.81,
+                               0.46,  0.93,  0.30,  0.17])
+# DERIVED, not restated. Copying the signs by hand into a second vector is
+# exactly the two-conventions bug described above, so there is no second vector.
+SLOPE_SIGN = np.sign(SENSOR_SLOPE_COUNTS_PER_V)
+
+# The gain sign for velocity feedback, and it CARRIES the slope's sign.
+#
+# THIS WAS -SLOPE_SIGN UNTIL 2026-08-20 AND THAT MADE THE LOOP PUMP. The algebra
+# is short and it is not ambiguous. `Pid.terms` sets p = gain x (-vel), so the
+# demand about bias is (u - bias) = -gain x vel. The force a coil applies along
+# its own sensor's coordinate is proportional to slope x (u - bias), so the power
+# delivered is
+#
+#     slope x (u - bias) x vel  =  -slope x gain x vel^2
+#
+# and vel^2 >= 0, so DISSIPATION REQUIRES slope x gain > 0. Same sign. With
+# gain = -sign(slope) every driven channel pumps, which is what the bench
+# measured.
+#
+# MEASURED, on `data/20260820_173738_fast_lock.csv`, evaluated at the CONTROL
+# CLOCK (the CSV logs every wire sample, but bp/vel/out only change once per
+# control step, so correlating against the 100 Hz staircase inside a 581 Hz
+# record understates the velocity term -- an earlier reading of this same file
+# got the diagnosis backwards for exactly that reason):
+#
+#   ch   corr(u,vel)   corr(vel,d(bp)/dt)   dissipating on
+#   a0     +0.919           +0.782              5.4 % of steps
+#   a1     +0.624           +0.703             11.0 %
+#   a2     -0.678           +0.722             22.6 %
+#   a3     -0.623           +0.763             12.3 %
+#
+# Read those together: corr(vel, d(bp)/dt) of 0.70-0.78 says the FILTER is
+# genuinely producing velocity, and corr(u, vel) of 0.62-0.92 says the LAW is
+# genuinely feeding it back. Neither of those was the fault. Dissipating on
+# 5-23 % of steps is not a phase error -- a 90 deg lag sits at 50 % -- it is an
+# inverted sign, and it inverts because slope x gain was negative on all four.
+#
+# WHY THE OLD SIGN SURVIVED SO LONG: a0-a3's slopes had NEVER BEEN MEASURED. The
+# comment on SLOPE_SIGN said so outright ("from the per-channel decay fits"), and
+# `slopesign.py` was only ever run on a4-a7 until 2026-08-20. So the pairing of
+# STEADY_GAIN's signs against the physical slopes was never checked on hardware,
+# and the 2026-08-17 decay results cannot be used to defend it -- they were
+# measured without knowing what the slopes were.
+DAMP_SIGN = +SLOPE_SIGN
 
 # ---------------------------------------------------------------------------
 # the hybrid law: modal on A's coils, per-channel velocity feedback on the rest
@@ -473,11 +1159,13 @@ SLOPE_SIGN = np.array([-1.0, -1.0, +1.0, -1.0,
 HYBRID_DIAGONAL = True
 # COIL AUTHORITY, measured static |rigid| force: coils 4/6/7 give 3.10-3.60
 # counts/V against coils 0-3's 9.92-34.28, i.e. 1/3 to 1/10 and NOT the ~1/100
-# this repo used to claim (A_DC_COUNTS_PER_V). But their output is almost entirely
-# T1 = mode A, already the best-damped -- modal velocity rms A 0.64 against B 2.61
-# and C 3.15 -- so arming the hybrid adds authority where it is least needed and is
-# NOT the fix for B and C. Per-mode gain is, and MODAL_KP ships flat because
-# retuning it needs the bench.
+# this repo used to claim (A_DC_COUNTS_PER_V), and their output is almost entirely
+# ONE TILT. "So they add authority where it is least needed" WAS WRITTEN HERE AND
+# IS WITHDRAWN, on two counts: against a control it is B and C that modal damping
+# wins on and A that it does not, so with the loop closed A is the mode still
+# needing help (CLAUDE.md, per-mode residual); and which tilt is which mode was
+# EXCHANGED on 2026-08-20 (PHI_GEOM), so any tilt-to-mode label from before that
+# date is unsafe. What the hybrid is worth here is still unmeasured.
 # WHY A NOISY CHANNEL IS STILL WORTH DRIVING. Dissipation is LINEAR in gain, noise
 # injection is QUADRATIC: energy removed goes as g x (the part of the signal
 # correlated with true velocity), energy added as g^2 x (uncorrelated power). For
@@ -487,20 +1175,62 @@ HYBRID_DIAGONAL = True
 # scaled by its coherent fraction, so gain proportional to coherent fraction is
 # Wiener-optimal.
 #
-# MEASURED multiple coherence of each channel against a0-a3 as a block over the
-# 0.6-1.8 Hz mode band, data/20260817_205211_status_sensors.csv (113418 samples,
-# 300 s, 378 Hz, 26 Hann segments of 8192, multiple-coherence bias floor
-# p/K = 3/26 = 0.12) -- raw -> bias-corrected fraction of in-band variance that IS
-# the optic:  a0 1.000 -> 1.00,  a4 0.519 -> 0.46,  a6 0.347 -> 0.26,
-# a7 0.559 -> 0.50.  a5 is 0.00: its pin is at hard ground.
+# RE-MEASURED 2026-08-20 after the coils were re-seated, and it reshuffled
+# completely. Multiple coherence of each channel against a0-a3 as a block over
+# the 0.6-1.8 Hz mode band, `data/20260820_162534_status_sensors.csv` (105 013
+# samples, 300 s, 350 Hz, 24 Hann segments of 8192, bias floor p/K = 4/24 =
+# 0.167), raw -> bias-corrected, with the in-band rms each number is computed
+# from:
+#
+#   ch   raw    corrected   in-band rms      was (2026-08-17)
+#   a4  0.240     0.09        0.115 counts       0.46
+#   a5  0.751     0.70        0.237 counts       0.00   (was a grounded pin)
+#   a6  0.271     0.12        0.038 counts       0.26
+#   a7  0.209     0.05        0.034 counts       0.50
+#
+# READ a4/a6/a7 CAREFULLY -- THIS IS NOT "THEY WENT BLIND". Their in-band rms is
+# 0.03-0.12 counts, at or under ADC dither, and a coherence estimated on 0.03
+# counts of signal is not a measurement of the wiring. a4 senses X and a6/a7
+# sense Y, axes orthogonal to the damped Z/T1/T2, so small in-band amplitude is
+# expected BY CONSTRUCTION. This is the same trap the repo has fallen into four
+# times (CLAUDE.md Sec 6): a test that cannot tell a broken sensor from one
+# pointed where the excitation is not. What the number is legitimately used for
+# is the Wiener weight, and there it is right for the right reason -- a channel
+# carrying 0.03 counts of in-band motion should be weighted at ~0 whatever the
+# cause.
+#
+# a5 IS THE REAL CHANGE: 0.00 -> 0.70, the strongest of the four non-Phi
+# channels, because it stopped being a hard-grounded pin. Its gain is STILL zero,
+# and not for lack of signal -- see HYBRID_CHANNEL below.
 # ONE 300 s ambient record. Re-measure it; these are not constants of the rig.
-HYBRID_COHERENT = np.array([1.00, 1.00, 1.00, 1.00, 0.46, 0.00, 0.26, 0.50])
+HYBRID_COHERENT = np.array([1.00, 1.00, 1.00, 1.00, 0.09, 0.70, 0.12, 0.05])
+# a5 STAYS OFF, AND ITS 0.70 COHERENCE IS NOT THE REASON TO TURN IT ON.
+# The whole dissipation argument for the per-channel term is COLOCATION: sensor j
+# and coil j act on the same coordinate, so -Kp x velocity is a force opposing
+# motion no matter what the plant does, and it is dissipative at any positive
+# gain without needing a model. Coil 5 does not move a5 -- -0.39 +-0.93 counts/V,
+# 0.4 sigma (`slopesign.py` 2026-08-20). It moves a1/a2/a3 by +9.3/-18.4/+11.1.
+# So feeding a5's velocity into coil 5 is a NON-COLOCATED loop, and non-colocated
+# rate feedback is not dissipative for free -- it needs A, which Sec 3 of
+# CLAUDE.md says is not established in magnitude. a5 is a good SENSOR with no
+# actuator of its own; the place to use it is a Phi row, not this term.
 HYBRID_CHANNEL = [True, True, True, True, True, False, True, True]
-# Magnitude is the shipped diagonal law's own |Kp|, not a new number. Sign is the
-# measured SLOPE_SIGN, which equals the STEADY_GAIN sign on all four determined
-# channels (a0-a3: -,-,+,-), so the same rule sets a4/a6/a7.
+# Magnitude is the shipped diagonal law's own reference |Kp| (KP_REF), not a new
+# number, and it is NOT normalised by SENSOR_GAIN_H: h is determined only for
+# a0-a3 from the warp constraint, and a4/a6/a7 are not in that plane.
+#
+# The sign is DAMP_SIGN, which IS the measured slope, not its negation.
+# `Pid.terms` sets p = gain x (-vel), so the demand about bias is -gain x vel and
+# the power delivered goes as -slope x gain x vel^2: dissipation needs
+# slope x gain > 0, the SAME sign. It was -SLOPE_SIGN until 2026-08-20 and every
+# driven channel pumped; see DAMP_SIGN for the measurement.
 HYBRID_KP = 0.035
-HYBRID_GAIN = HYBRID_KP * SLOPE_SIGN * HYBRID_COHERENT
+# Masked by HYBRID_CHANNEL as well, so a channel that is not a hybrid channel has
+# an IDENTICALLY ZERO gain rather than a nonzero one that `_hyb_arm` happens to
+# gate. a5 is why: its coherence is now 0.70, so the unmasked product would be
+# -0.0245 sitting in the vector waiting for one gate change to become live.
+HYBRID_GAIN = (HYBRID_KP * DAMP_SIGN * HYBRID_COHERENT
+               * np.array(HYBRID_CHANNEL, float))
 # A channel whose in-band motion is only fractionally the optic cannot have its
 # amplitude ratio judged against a lock threshold -- one such channel vetoing the
 # rig is CLAUDE.md item 1. So the hybrid channels are DRIVEN and WATCHED but are
@@ -519,17 +1249,21 @@ LOCK_COHERENT_MIN = 0.75
 # the one to revisit first (SNR 5-6 at modes A and B, best of the three); what
 # would settle its coil authority is SNR >= 10 driving its OWN coil.
 #
-# THE HYBRID CHANNELS HAVE NEVER RUN ON HARDWARE, and that is measured rather than
-# assumed: across both runs of the 2026-08-17 evening the |gain| on ch4, ch6 and
-# ch7 was exactly 0.0000 for 100 % of DAMPING samples, because the in-band floor
-# check demotes them at engage. That check scores a channel against the three
-# HORIZONTAL mode frequencies, and a4 senses X while a6/a7 sense Y -- orthogonal
-# axes -- so they fail it BY CONSTRUCTION and not because they are blind (measured
-# coherence with the optic 0.46 / 0.26 / 0.50). The fix belongs in the floor check
-# and is being made in eta. NOTHING IN THIS FILE ASSUMES THOSE THREE ARE DEAD OR
-# ABSENT: the allocator acts on the MODAL path, which is coils 0-3, and the hybrid
-# diagonal term is summed after it exactly as in eta, so whatever the floor fix
-# does to their gain it does the same thing here.
+# THE HYBRID CHANNELS HAD NEVER RUN ON HARDWARE WHEN THIS FILE WAS WRITTEN, AND
+# THE REASON HAS SINCE BEEN FIXED. Measured across both runs of 2026-08-18 (this
+# comment said "the 2026-08-17 evening" and the date was wrong), the |gain| on
+# ch4, ch6 and ch7 was exactly 0.0000 for 100 % of DAMPING samples, because the
+# in-band floor check demoted them at engage. That check scores a channel against
+# the three HORIZONTAL mode frequencies, and a4 senses X while a6/a7 sense Y --
+# orthogonal axes -- so they failed it BY CONSTRUCTION and not because they are
+# blind. `INBAND_EXEMPT` below now takes exactly the rows Phi does not span out of
+# that test and grades them on their own broadband count motion instead, so they
+# ARM: measured in this file's own selftest, `_hyb_arm` returns ch4/ch6/ch7 and
+# their gains are non-zero.
+# NOTHING IN THIS FILE ASSUMES a4/a6/a7 ARE DEAD OR ABSENT: the allocator acts on
+# the MODAL path, which is coils 0-3, and the hybrid diagonal term is summed after
+# it exactly as in eta, so whatever the floor fix does to their gain it does the
+# same thing here.
 
 # ---------------------------------------------------------------------------
 # the sensor -> mode matrix, FROM GEOMETRY
@@ -541,29 +1275,106 @@ LOCK_COHERENT_MIN = 0.75
 #
 # CORNER ASSIGNMENT, determined from data and not assumed: a0 is diagonal to a3
 # and a1 to a2. A rigid plate cannot warp, so the pairing minimising warp is the
-# true one, and it won by 2x -- warp/rigid 0.139 against 0.277 and 1.566 (dof.py
-# on data/20260817_205211_status_sensors.csv).
+# true one. RE-CHECKED 2026-08-20 after the coils were re-seated and IT DID NOT
+# CHANGE (dof.py on data/20260820_162534_status_sensors.csv): the three candidate
+# warp vectors come out 12.61 / 20.09 / 48.17 counts rms, and [+1,-1,-1,+1] is
+# still the smallest. It won by 1.6x here against 2x on 2026-08-17.
 #
-# MODE IDENTIFICATION, 840 s empty room at 0.0116 Hz bins
-# (data/20260817_215634_status_sensors.csv): 0.7283 Hz is 90.3 % T1, 0.9941 Hz is
-# 88.2 % Z, 1.6530 Hz is 89.4 % T2. INDEPENDENT CONFIRMATION: the Phi measured
-# from ambient motion by cross-spectral eigendecomposition, with no geometry as
-# input, matches these vectors at |cos| 0.971 (A/T1), 0.978 (B/Z), 0.963 (C/T2).
+# WARP ITSELF GREW: warp/loudest-rigid 0.139 -> 0.262. Nothing here explains that,
+# and CLAUDE.md's standing warning applies -- per-sensor gain mismatch was tested
+# as the cause on 2026-08-17 and FAILED both independent checks. Do not write down
+# that warp is calibration. It is 12.61 counts rms that no gain can damp, because
+# it is not a rigid-body DOF.
+#
+# MODE IDENTIFICATION -- AND MODES A AND C SWAPPED WHICH TILT THEY ARE.
+# Measured 2026-08-20, 300 s, 0.0427 Hz bins (same file), share of each mode's
+# total power:
+#     0.7264 Hz -> T2  81.6 %      (was T1 90.3 % on 2026-08-17)
+#     0.9828 Hz -> Z   73.7 %      (unchanged, was 88.2 %)
+#     1.6665 Hz -> T1  89.9 %      (was T2 89.4 %)
+# So the two tilt columns below are EXCHANGED relative to every version before
+# this one. Getting this wrong does not attenuate the loop, it points the modal
+# force at the wrong coordinate.
 #
 # ROWS a4-a7 ARE ZERO ON PURPOSE -- DO NOT "FIX" THEM. They read axes orthogonal
-# to Z/T1/T2; their measured coherence with the optic (0.46 / 0.26 / 0.50,
-# bias-corrected) is cross-coupling from imperfect alignment, not their own view
-# of these modes, and the hybrid diagonal path above already drives them.
+# to Z/T1/T2. Their re-measured coherence with the optic is 0.09 / 0.70 / 0.12 /
+# 0.05 for a4/a5/a6/a7, and the hybrid diagonal path above already drives a4/a6/a7
+# on their own colocated loops.
 PHI_BASIS = "geometric"
 PHI_GEOM = np.zeros((N, NMODE))
-PHI_GEOM[:4, 0] = [+1.0, +1.0, -1.0, -1.0]      # T1 tilt  -> mode A 0.72194 Hz
-PHI_GEOM[:4, 1] = [+1.0, +1.0, +1.0, +1.0]      # Z normal -> mode B 0.99193 Hz
-PHI_GEOM[:4, 2] = [+1.0, -1.0, +1.0, -1.0]      # T2 tilt  -> mode C 1.65607 Hz
+PHI_GEOM[:4, 0] = [+1.0, -1.0, +1.0, -1.0]      # T2 tilt  -> mode A 0.71519 Hz
+PHI_GEOM[:4, 1] = [+1.0, +1.0, +1.0, +1.0]      # Z normal -> mode B 0.99231 Hz
+PHI_GEOM[:4, 2] = [+1.0, +1.0, -1.0, -1.0]      # T1 tilt  -> mode C 1.65307 Hz
+
+# Sensors that span the damped modes at all -- the only ones whose amplitude
+# RATIO means anything, and so the only ones allowed to vote on a runaway.
+# a4/a5 sense left-right and a6/a7 vertical, both orthogonal to Z/T1/T2.
+PHI_GEOM_ROWS = np.abs(PHI_GEOM).sum(axis=1) > 0
 # The leftover direction. No rigid-body motion produces it, so it is what the
 # out-of-mode residual measures; it is real at 0.14-0.17 of rigid and its cause
 # is NOT established (CLAUDE.md).
 PHI_WARP = np.zeros(N)
 PHI_WARP[:4] = [+1.0, -1.0, -1.0, +1.0]
+
+
+# ---------------------------------------------------------------------------
+# THE CONSTRAINT EVERY PER-CHANNEL GAIN VECTOR HAS TO SATISFY
+# ---------------------------------------------------------------------------
+# The diagonal law is u_j - bias = -g_j vel_j, and vel_j = sum_m Phi[j,m] qdot_m,
+# so the modal force is f = -S qdot with
+#
+#     S = A diag(g) Phi,      A = pinv(Phi) @ M,   M[sensor, coil] = DC_MATRIX.T
+#
+# and the power delivered to the plate is qdot . f = -qdot^T sym(S) qdot. EVERY
+# MODE DISSIPATES IF AND ONLY IF sym(S) IS POSITIVE DEFINITE. It is not enough
+# that each channel has the right sign: that argument is COLOCATION, sensor j and
+# coil j acting on one coordinate, and colocation does NOT hold on this rig
+# (CLAUDE.md, and coil 1 gives a0 +37.2 and a1 +36.1 counts/V). One eigenvalue
+# going negative is a mode the loop PUMPS, and nothing else in this file catches
+# it -- the 2026-08-17 sign-of-A failure passed the selftest, the modal gate and
+# the colocation check and still took the median channel ratio 1.5 -> 2.3 on
+# hardware.
+#
+# TWO FORMS, and the selftest asserts BOTH, because they use different parts of
+# the calibration and could disagree:
+#   `counts`   Phi = PHI_GEOM as it stands, everything in counts. This is what
+#              the loop literally computes today. It is only exact if the four
+#              sensors share a counts-per-metre, and SENSOR_GAIN_H says they do
+#              not, so read it as the conservative of the two.
+#   `physical` the modal force taken from the h-calibrated response
+#              pinv(Phi) @ diag(h) @ M, and the demand from diag(g/h) Phi. This
+#              is the physically consistent statement and it is the one that
+#              survives if the modal side moves to normalised sensor readings.
+# Measured 2026-08-20 (see the gain block): flat gains give 1.9393 / 4.0678 /
+# 10.0229 counts-form and 2.0343 / 4.1678 / 9.8134 physical; the shipped
+# h-normalised vector gives 0.7593 / 2.4882 / 6.0345 and 1.2797 / 2.3935 /
+# 4.7210. All eight positive.
+#
+# THE `physical` FORM IS AN OFFLINE CHECK AND IT IS NOT AN INVITATION TO FOLD h
+# INTO Phi. That was tried on the bench on 2026-08-20 AND IT IS A NEGATIVE
+# RESULT: cond 3.32 -> 9.41, chi2/dof 3.47 -> 844.70, and the run PUMPED. The
+# chi2 blow-up is a units artifact -- KALMAN_R is a variance in RAW volts, so
+# rescaling Phi's rows leaves the innovation covariance wrong -- which means
+# doing it properly needs the readings normalised AND R rescaled by h^2 in the
+# same change. That is an open item owned elsewhere. NOTHING IN THIS FILE APPLIES
+# h TO Phi, TO KALMAN_R OR TO THE READINGS: h appears only in the per-channel
+# DIAGONAL gains, where it is a scalar per channel and touches no covariance.
+
+
+def dissipation_eig(g, form="counts", phi=None, dc=None, h=None):
+    """Eigenvalues of sym(A diag(g) Phi). ALL MUST BE > 0 or some mode is pumped."""
+    phi = PHI_GEOM[:4] if phi is None else np.asarray(phi, float)
+    m = (DC_MATRIX_COUNTS_PER_V if dc is None else np.asarray(dc, float)).T
+    h = np.abs(SENSOR_GAIN_H if h is None else np.asarray(h, float))
+    g = np.asarray(g, float)[:phi.shape[0]]
+    if form == "physical":
+        a = np.linalg.pinv(phi) @ (np.diag(h) @ m)
+        s = a @ np.diag(g / h) @ phi
+    elif form == "counts":
+        s = (np.linalg.pinv(phi) @ m) @ np.diag(g) @ phi
+    else:
+        raise ValueError("form must be 'counts' or 'physical', got %r" % (form,))
+    return np.linalg.eigvalsh(0.5 * (s + s.T))
 # A channel with no Phi row watches an axis the in-band is not defined on, so its
 # in-band amplitude is small BY CONSTRUCTION and the cross-channel in-band floor
 # grades it blind whatever its health. Derived from the geometry rather than
@@ -574,13 +1385,33 @@ INBAND_EXEMPT = ~PHI_GEOM.any(axis=1)
 # geometry or the corner assignment is wrong. Warned, never a gate.
 PHI_COS_WARN = 0.90
 
-# STATIC rigid-body force per volt, counts/V, projected onto (T1, Z, T2) so the
-# rows are in F_MODE_HZ order. Coils 0-3 from data/20260817_194726_status_coils.csv,
-# coils 4/6/7 from data/20260817_215348_status_slopesign.csv. Coil 5 is a dead pin.
+# STATIC rigid-body force per volt, counts/V, one row per mode in F_MODE_HZ
+# order, one column per coil. All eight coils.
+#
+# RE-MEASURED AND RE-PROJECTED 2026-08-20, AND THE ROW LABELS WERE WRONG BEFORE
+# THAT. Two defects at once, the first the dangerous one:
+#
+# 1. THE PAIRING. That day's census swapped which tilt modes A and C are
+#    (0.7264 Hz -> T2 at 81.6 % of its power, 1.6665 Hz -> T1 at 89.9 %, where
+#    2026-08-17 had A -> T1 and C -> T2) and PHI_GEOM's tilt columns were swapped
+#    to match. THIS CONSTANT WAS NOT, so rows 0 and 2 were paired with the wrong
+#    Phi columns -- which does not attenuate the loop, it points the modal force
+#    at the wrong coordinate. Live whenever OSEM_MODAL_PROVISIONAL=1, which is how
+#    MIMO has been run. The labels below are read off `status.GEO_DOF`.
+# 2. THE DATA. The old numbers (data/20260817_194726_status_coils.csv and
+#    data/20260817_215348_status_slopesign.csv) predate the coils being re-seated,
+#    and that re-seat changed a3's slope sign outright, +81.08 -> -98.79 counts/V.
+#
+# So RECOMPUTED, not re-ordered: today's DC matrix (`slopesign.py`,
+# data/20260820_155638_status_slopesign.csv, all eight coils, 0.10 -> 0.40 V,
+# 12 s dwell) projected onto today's geometric Phi as
+# `A[m, j] = (Phi_m . d[:, j]) / (Phi_m . Phi_m)`, with d[:, j] coil j's measured
+# counts/V on a0-a3. Phi's columns are orthogonal with norm^2 = 4, so that is
+# exactly pinv(Phi) @ d and the divisor is not a normalisation choice.
 A_DC_COUNTS_PER_V = np.array([
-    [-7.97, +28.62, +29.35, +22.43, -3.30, 0.0, +2.93, -3.01],      # A  T1
-    [-1.22,  +8.03, -17.35, -16.18, +0.91, 0.0, -0.99, +0.42],      # B  Z
-    [-5.78,  -2.12,  -3.60,  +8.52, -1.14, 0.0, -0.75, -0.63]])     # C  T2
+    [+70.33, -60.28, -75.38, +58.52, +1.08, -11.02, +10.05, +1.45],   # A  T2 tilt
+    [+42.62, +14.68, -47.32, -21.23, +2.88,  -0.83,  +1.25, -0.95],   # B  Z normal
+    [-10.57, +28.43, +46.73,  +3.07, -3.13,  +2.82,  +0.05, +1.70]])  # C  T1 tilt
 # A DC measurement is the true A DIVIDED by omega_m^2: the static response of mode
 # m to a force is f/(m omega_m^2). Multiply it back, per mode. Modal unit-norms
 # each A row, so a positive per-mode factor cancels in today's allocation
@@ -593,8 +1424,9 @@ A_DC = A_DC_COUNTS_PER_V * (2.0 * np.pi * F_MODE_HZ[:, None]) ** 2
 # provisional and refused unless OSEM_MODAL_PROVISIONAL=1 -- which is also what
 # keeps the suite on the diagonal law and reproducible.
 A_DC_COILS = [0, 1, 2, 3]
-A_DC_PROVENANCE = ("DC static, geometry basis, data/20260817_194726 + "
-                   "data/20260817_215348; never closed-loop validated")
+A_DC_PROVENANCE = ("DC static, geometry basis, "
+                   "data/20260820_155638_status_slopesign.csv; "
+                   "never closed-loop validated")
 
 # ---------------------------------------------------------------------------
 # modal data and law
@@ -602,15 +1434,27 @@ A_DC_PROVENANCE = ("DC static, geometry basis, data/20260817_194726 + "
 MODAL_PATH = os.path.join(HERE, "data", "modal.json")
 MODAL_SCHEMA = "osem-modal-1"
 
-# PER MODE, and that is the point of a modal law. Ships FLAT: measured modal
-# velocity rms A 0.64 / B 2.61 / C 3.15 over 28775 samples says B and C are 4-5x
-# worse damped than A, but retuning needs the bench.
+# PER MODE, and that is the point of a modal law. Ships FLAT. Modal velocity rms
+# came out A 0.64 / B 2.61 / C 3.15 over 28775 samples, and READING THAT AS "B and
+# C are 4-5x worse damped" IS WITHDRAWN (CLAUDE.md Sec 6): the run behind it was in
+# FAULT for 1085 of 1168 s, and a residual with no open-loop reference cannot tell
+# a badly-damped mode from a hard-driven one. Against a control it is B and C that
+# modal wins on. Retuning per mode needs the bench, not this number.
 MODAL_KP = np.array([0.035, 0.035, 0.035])
 MODAL_GAIN_SCALE = 0.5         # start at half the diagonal ceiling
+# AN ABSOLUTE VOLT, deliberately, where MODAL_TOTAL_HEADROOM below is a fraction.
+# NO MEASUREMENT HERE HAS EVER SHOWN THIS CAP BINDING: CLAUDE.md Sec 2 is the one
+# recorded run where a coil clipped with the modal law live, and it is explicit
+# that "the modal allocation stayed inside its own 0.20 V cap the whole time"
+# while the TOTAL on coil 3 reached 0.4229 V, 169 % of the 0.250 V half-window.
+# What saturated was the TOTAL, which is what MODAL_TOTAL_HEADROOM bounds. Raise
+# this when a run reports the allocation actually pressing against it --
+# `Modal.allocate` scales the whole vector uniformly, so a run that hits it says so.
 MODAL_DEMAND_CAP_V = 0.20      # per-vector, uniform: direction preserved
 MODAL_TOTAL_HEADROOM = 0.90    # of BIAS_SWING, on the TOTAL output not the modal
                                # part: the old cap let coil 3 reach 0.4229 V
-                               # against a 0.250 V half-window
+                               # against a 0.250 V half-window. A FRACTION, so it
+                               # tracks BIAS_SWING rather than being retyped.
 MODAL_COND_MAX = 12.0
 ALLOC_BALANCE = (12, 0.5, 1.05)     # iters, step, row-norm tolerance
 MODAL_MIN_SENSORS = 2        # per mode; the estimate is a scalar LS, not an inverse
@@ -645,16 +1489,31 @@ def _modal(path, phi=PHI_GEOM, basis=PHI_BASIS, a=A_DC, a_coils=A_DC_COILS,
 #
 #     BUDGET_V = MODAL_TOTAL_HEADROOM * BIAS_SWING = 0.900 * 0.250 = 0.225 V
 #
-# THE LEDGER, so the whole set is in one place:
-#     BIAS_SWING             0.2500 V  the half-window (VMIN/VMAX). There is NO
-#                                      recorded justification for it anywhere and
-#                                      the coil driver is not in this repo -- do
-#                                      not raise it here (CLAUDE.md Sec 11).
+# THE LEDGER, so the whole set is in one place. EVERY LINE IN IT IS A FRACTION OF
+# THE ONE ABOVE IT RATHER THAN A RETYPED VOLT, except MODAL_DEMAND_CAP_V, which is
+# an absolute volt deliberately (see its comment in the modal block).
+#     BIAS_SWING             0.2500 V  the half-swing about each channel's OWN
+#                                      bias, NOT the DAC window: VMIN/VMAX are
+#                                      0.0/2.5 V and BIAS is 0.50 V, so the
+#                                      commanded range is 0.25-0.75 V. The
+#                                      measured case for widening it, the
+#                                      unmeasured 1.75 V ceiling that is why it
+#                                      has not been, and the 3 A supply that is
+#                                      the real constraint are all on BIAS_SWING.
 #     BUDGET_V               0.2250 V  90 % of it, on the TOTAL output, SOLVED by
-#                                      `sl.cap_scale` rather than estimated.
+#                                      `sl.cap_scale` rather than estimated -- and
+#                                      solved only over `modal_cols` plus a
+#                                      burst's own coil. On the per-channel term,
+#                                      and on any run where the modal law is
+#                                      refused, the binding number is BIAS_SWING
+#                                      above, 11 % higher. Both scale with the
+#                                      swing, so that 11 % is fixed. See the
+#                                      docstring, "WHERE THE BUDGET IS ENFORCED".
 #     MODAL_DEMAND_CAP_V     0.2000 V  a per-vector cap inside `Modal.allocate`,
 #                                      i.e. 89 % of the budget, uniform so the
-#                                      allocation direction is preserved.
+#                                      allocation direction is preserved. No run
+#                                      on this rig has ever reported the
+#                                      allocation reaching it.
 #     BUDGET_MOTION_FLOOR_V  0.0089 V  the bottom of the ramp: the actuator's own
 #                                      residual, 0.5 mV deadband plus the 10 ms
 #                                      throttle (0.0089 / 0.0087 / 0.0094 V at
@@ -681,22 +1540,34 @@ BUDGET_CLAIMS = NMODE + 1
 # somebody measures that, and the knob is here so the change is a number rather
 # than a new control law written under bench pressure.
 BUDGET_TILT = 0.0
-BUDGET_TILT_HARD_CAP = 1.0     # past this a claimant's weight could go negative,
-                               # which is not a reallocation, it is a sign flip
+BUDGET_TILT_HARD_CAP = 1.0     # FULLY need-proportional: at tilt 1 a claimant
+                               # holding all the need takes the whole tilted
+                               # share and one holding none sits on the floor.
+                               # IT IS NOT THE SIGN-FLIP BOUND. The lowest weight
+                               # is 1 - tilt * (1 - BUDGET_SHARE_FLOOR), which
+                               # only reaches zero at 1/(1 - floor) = 1.333 at
+                               # today's 0.25 floor, so this cap sits 1.33x
+                               # inside it. THAT MARGIN IS DERIVED FROM THE FLOOR
+                               # and lowering the floor eats it -- at a floor of 0
+                               # the two coincide exactly. The selftest asserts
+                               # the cap against the floor rather than trusting
+                               # either number here.
 
-# THE RAMP TIME CONSTANT, and it is derived. The slowest mode is 0.72194 Hz, a
-# 1.385 s period, and CLAUDE.md Sec 17 asks for "order 10 s or more" because
-# anything faster modulates the loop gain inside the control band and is itself a
-# disturbance source. 20 s is 14.4 periods of that mode and 2x that floor. The
-# modulation corner 1/(2 pi tau) = 0.0080 Hz is 1.1 % of the slowest mode
-# frequency, and at Q > 433 the mode half-width is 0.72194/(2 x 433) = 0.00083 Hz,
-# so the sidebands a time-varying gain produces sit about 9.5 half-widths OFF
-# resonance rather than on it. That is arithmetic on a measured Q, not a
-# measurement of this loop.
+# THE RAMP TIME CONSTANT, and it is derived. The slowest mode is 0.71519 Hz, a
+# 1.398 s period (re-measured 2026-08-20,
+# data/20260820_162534_status_sensors.csv), and CLAUDE.md Sec 17 asks for "order
+# 10 s or more" because anything faster modulates the loop gain inside the control
+# band and is itself a disturbance source. 20 s is 14.3 periods of that mode and
+# 2x that floor. The modulation corner 1/(2 pi tau) = 0.0080 Hz is 1.1 % of the
+# slowest mode frequency, and at Q > 433 the half-width is 0.71519/(2 x 433) =
+# 0.00083 Hz, so the sidebands a time-varying gain produces sit about 9.6
+# half-widths OFF resonance. That is arithmetic on a measured Q, not a measurement
+# of this loop -- and arithmetic on F_MODE_HZ, which went stale once already, so
+# the selftest recomputes the per-period slew from `F_MODE_HZ.min()`.
 BUDGET_TAU_S = 20.0
 # Belt and braces on top of the lag: no weight may move faster than this. A unit
 # change therefore takes at least BUDGET_TAU_S, and a weight moves at most
-# 0.05 x 1.385 = 0.069 -- 6.9 % of nominal -- in one period of the slowest mode.
+# 0.05 x 1.398 = 0.070 -- 7.0 % of nominal -- in one period of the slowest mode.
 BUDGET_W_SLEW_PER_S = 1.0 / BUDGET_TAU_S
 # Nobody is starved. Shares are mixed with the flat share before they become
 # weights, so a claimant keeps at least this fraction of an equal share whatever
@@ -704,11 +1575,12 @@ BUDGET_W_SLEW_PER_S = 1.0 / BUDGET_TAU_S
 # tau > 138 s (analysis/ringdown.md), and no measurement says that is ever right.
 # At tilt = 1 and 4 claimants this bounds the weights to [0.25, 3.25].
 BUDGET_SHARE_FLOOR = 0.25
-# The per-channel block may GIVE budget up and may not take any. Its gain is
-# HYBRID_KP x SLOPE_SIGN x the MEASURED coherent fraction, which is the
-# Wiener-optimal cap on a noisy channel (see HYBRID_COHERENT); scaling it past 1
-# would spend budget on a number nothing justifies. The surplus goes back into the
-# pot and is redivided among the modes, so the pot is still conserved.
+# The per-channel block may GIVE budget up and may not take any. Read HYBRID_GAIN
+# for what its gain is -- restating the expression here is how it went stale
+# before. The coherent fraction in it is the Wiener-optimal cap on a noisy channel
+# (see HYBRID_COHERENT), so scaling it past 1 would spend budget on a number
+# nothing justifies. The surplus goes back into the pot and is redivided among the
+# modes, so the pot is conserved.
 BUDGET_W_DIAG_MAX = 1.0
 # Below this the allocation cannot matter: it is the actuator's own floor, not the
 # sensing floor. SIMULATOR number.
@@ -722,19 +1594,26 @@ BUDGET_HOLD_SAY_S = 60.0
 def _parse_budget_tilt(spec):
     """OSEM_BUDGET_TILT=x -> a float in [0, cap], or None.
 
-    ATTENDED ONLY, same pattern as OSEM_GAIN_RAMP: the
-    bench can reach it without a diff, and it cannot reach a value that would take
-    a claimant's weight negative.
+    ATTENDED ONLY, same pattern as OSEM_GAIN_RAMP: the bench can reach it without
+    a diff, and it cannot reach a value past BUDGET_TILT_HARD_CAP -- which is full
+    need-proportional division, and is itself 1/(1 - BUDGET_SHARE_FLOOR) = 1.33x
+    inside the tilt at which a weight could go negative.
     """
     if not spec:
         return None
     tilt = float(spec)
     if not 0.0 <= tilt <= BUDGET_TILT_HARD_CAP:
         raise ValueError(
-            "OSEM_BUDGET_TILT %r wants 0 <= tilt <= %.1f. Past the cap a claimant's "
-            "weight can go negative, which is not a reallocation -- it is a sign "
-            "flip, and a wrong-signed term PUMPS (CLAUDE.md, the sign of A)."
-            % (spec, BUDGET_TILT_HARD_CAP))
+            "OSEM_BUDGET_TILT %r wants 0 <= tilt <= %.2f. The cap is FULLY "
+            "need-proportional division, not the sign-flip bound: at the cap the "
+            "lowest weight is 1 - tilt x (1 - %.2f) = %.3f, and a weight only "
+            "reaches zero at tilt %.3f. Going past the cap is a control law "
+            "nothing here has measured, and a wrong-signed term PUMPS (CLAUDE.md, "
+            "the sign of A) -- raise it in a diff, with a reason, not from the "
+            "environment."
+            % (spec, BUDGET_TILT_HARD_CAP, BUDGET_SHARE_FLOOR,
+               1.0 - BUDGET_TILT_HARD_CAP * (1.0 - BUDGET_SHARE_FLOOR),
+               1.0 / (1.0 - BUDGET_SHARE_FLOOR)))
     return tilt
 
 
@@ -746,44 +1625,40 @@ class BudgetAllocator:
         share_k  need_k / sum(need), one-poled at BUDGET_TAU_S
         w_k      1 + tilt * (K share'_k - 1),  sum_k w_k = K  (the pot is conserved)
 
+    WHICH j THE PER-CHANNEL NEED SUMS OVER, stated because the two sets are not
+    the same one and a reader will assume they are. `Controller._damping` sums it
+    over `diag_on` -- every channel whose diagonal p term was actually applied
+    last step, which includes a0-a3 on any step the modal allocator dropped their
+    coil -- while `w_d` scales ONLY `_hyb_arm`, i.e. a4/a6/a7, because a0-a3's
+    diagonal gains belong to the capture/steady schedule and this file refuses to
+    have two allocators on one knob. So on a step where a Phi coil falls back to
+    diagonal, the block CLAIMS on a term the weight cannot reach. THE ERROR IS
+    ONE-SIDED AND CONSERVATIVE: an over-claim drives w_d above BUDGET_W_DIAG_MAX,
+    where it is clipped to 1.0 and the surplus is redivided among the modes in
+    proportion, so the modes' relative split is untouched and the block lands
+    exactly on eta's weight. Only an UNDER-claim moves anything, and that direction
+    hands the modes more, which is the direction the whole rung is arguing for.
+    Unobservable at the shipped tilt. Recorded rather than changed, because
+    narrowing the sum is a change to an allocator no measurement has graded.
+
     AT tilt = 0 EVERY WEIGHT IS EXACTLY 1.0. Not approximately: the tilt term is
     forced finite before it is multiplied, so `1.0 + 0.0 * finite` is the identity
     for every need vector this can be handed, including all-zero, all-nan and one
     infinity. That is why the shipped file is eta bit for bit, and the selftest
     asserts it with `==` over pathological inputs rather than with a tolerance.
 
-    WHY NEED IS A DISSIPATION RATE AND NOT AN AMPLITUDE -- the whole reason this
-    rung is not dangerous. `ratio` is amplitude over a ZERO-GAIN baseline, so it
-    measures the loop's own success: measured 2026-08-18 the same physical quiet
-    reads 0.117 under the modal law and 1.449-1.832 under the diagonal one, 13x for
-    the same plate. An allocator keyed on it hands budget to whoever is already
-    winning, which is positive feedback through the measurement. A dissipation rate
-    is the power leaving the mode, and in a steady state that equals the power the
-    ROOM is injecting, which no gain of ours changes. The cancellation is not exact
-    -- the plant takes its own 0.0072 /s share -- and the residual is bounded:
-    across the full [0.25, 2.5] weight range the retained fraction runs 82.1 % to
-    97.9 %, so the statistic moves at most 1.19x from the weight itself against
-    `ratio`'s 13x. Simulated end to end in the selftest: 2.90x in rms motion
-    against 1.24x in need, over a 10x range of loop gain.
-
     IT CANNOT LATCH. When the statistic is not available -- not DAMPING, the modal
     law not engaged, every gain at zero, need not finite, or motion at or under
     BUDGET_MOTION_FLOOR_V -- the shares are ramped BACK TOWARD FLAT at the same
     time constant instead of frozen where they were. Flat is eta's split, the only
-    one with any measurement behind it, so a statistic that stops arriving returns
-    the loop to the known configuration rather than pinning it wherever the last
-    good sample left it. CLAUDE.md Sec 1 is the reason that is a requirement and not
-    a nicety: `ratio` froze at 3.59 for 1085 s on 2026-08-17, and a ramp keyed on a
-    statistic that can freeze is a ramp that can latch.
+    one with any measurement behind it. CLAUDE.md Sec 1 is why that is a
+    requirement: `ratio` froze at 3.59 for 1085 s on 2026-08-17, and a ramp keyed on
+    a statistic that can freeze is a ramp that can latch.
 
-    DIVISION BY PROPORTION IS A CHOICE. The shape is the rig owner's Talmud
-    reading -- one declared pot, division by need, nobody sitting on authority they
-    are not using. The formula is not: the contested-garment rule divides a FIXED
-    estate among STATIC known claims, and here the estate's usable size depends on
-    what is already being demanded, the claims are noisy real-time estimates, and
-    paying one claimant changes every other claim. Proportional-with-a-floor is
-    justified only by reducing EXACTLY to the flat split at equal need and by being
-    closed form inside a 10 ms step.
+    Why need is a DISSIPATION RATE and not `ratio`, why the bound on its residual
+    gain-dependence is 1.19x against `ratio`'s measured 13x, and why proportional
+    division with a floor is a CHOICE rather than the Talmud rule: module docstring,
+    "WHAT NEED IS" and "WHAT THE TALMUD ANALOGY GIVES". Not restated here.
     """
 
     def __init__(self, k, tilt, tau_s, floor, w_diag_max, slew_per_s,
@@ -961,7 +1836,6 @@ BASELINE_MAX_AGE_S = 300.0
 BASELINE_PATH = os.path.join(HERE, "data", "baseline.json")
 BASELINE_FILE_SCHEMA = 1
 BASELINE_FILE_MAX_AGE_S = 1800.0
-WIRE_RATE_TOL = 1.5
 BASELINE_SANITY_RATIO = 3.0
 MAX_BASELINE_REFUSALS = 3
 BASELINE_WARMUP_S = 2.0
@@ -1125,6 +1999,390 @@ class GainRamp:
 GAIN_RAMP = _parse_gain_ramp(os.environ.get("OSEM_GAIN_RAMP", "").strip())
 
 # ---------------------------------------------------------------------------
+# the commanded self-kick
+# ---------------------------------------------------------------------------
+# WHY IT EXISTS. Every decay rate in this repo was measured off a HAND kick: a
+# person shoves the table when jerk.py asks. Three kicks per law, one session,
+# and the two sets are comparable only because their peaks happened to overlap --
+# modal 3.96-4.70 against diagonal 3.66-4.44 (CLAUDE.md). A commanded burst is
+# the SAME excitation every time and costs nobody's attention, which is what makes
+# an unattended sweep -- five configurations x three kicks -- possible at all.
+#
+# OFF BY DEFAULT, armed only by OSEM_SELF_KICK, the same pattern as
+# OSEM_GAIN_RAMP and OSEM_MODAL_PROVISIONAL. Unset -> `SELF_KICK` is None ->
+# `Controller.kick` is None -> not one line of this executes and a `make run` is
+# bit-identical to what shipped. Asserted in the selftest.
+#
+#     OSEM_SELF_KICK=3                    3 bursts, everything else default
+#     OSEM_SELF_KICK=3:2:10:0.05          3 bursts, mode C, 10 cycles, 0.05 V
+#
+# AMPLITUDE. 0.028 V peak on one coil. PROVENANCE: the 2026-08-17 19:47 coil pass
+# drove coil 0 at 0.02796 V and coil 1 at 0.02743 V at mode A
+# (data/20260817_194726_status_coils.csv, `phase` = drive, column `amp_v`), and
+# status.py derived those rather than typing them -- amp = TARGET_SWING_COUNTS /
+# (g * pi * f * DWELL_S) is the constant-amplitude drive that reaches 200 counts
+# peak-to-peak on the loudest sensor after DWELL_S = 30 s on resonance.
+# SO THIS IS NOT A HAND KICK AND MUST NOT BE READ AS ONE. On resonance a
+# constant-amplitude drive builds LINEARLY, swing_pp(T) = 2 g amp pi f T, so at
+# coil 1's measured mode-A authority of -60.28 counts/V (A_DC_COUNTS_PER_V,
+# re-measured 2026-08-20) the default 0.028 V buys 7.6 counts p2p per second --
+# about 64 counts over a 6-cycle 8.4 s burst, against the 868 counts p2p five
+# sensors saw from ONE hand kick (CLAUDE.md REQUEST 1). Closed loop it is smaller
+# again: the amplitude tops out at rate/decay, 54 counts p2p against the measured
+# modal 0.1393 /s. THESE NUMBERS DOUBLED WHEN A_DC_COUNTS_PER_V WAS RECOMPUTED on
+# 2026-08-20 and they are still an eighteenth of a hand kick.
+# WHAT A BURST ACTUALLY REACHES ON THIS RIG IS NOT ESTABLISHED. `banner()` prints
+# that arithmetic before the run and `summary()` prints the peak envelope each
+# burst really produced, so the next session raises `cycles` or `amp_v` against a
+# measurement instead of a guess.
+SELF_KICK_AMP_V = 0.028
+# HARD CAP, refused past it whatever is asked. status.py's own AMP_MAX -- the
+# largest coil drive this repo has commanded on this rig in a measured pass, and
+# 80 % of the 0.25 V half-window. Its provenance is that MEASURED pass and not a
+# fraction of the window, so a wider window would not be a reason to move it.
+# Raising it is CLAUDE.md 11 and is not free: the coil driver between the DAC and
+# the coil is not in this repo and 0.25 V may encode a real current limit.
+SELF_KICK_AMP_CAP_V = 0.20
+# COIL 1, AND THE JUSTIFICATION FOR IT IS PARTLY STALE. It was picked as the
+# strongest-but-one coil into mode A; on the 2026-08-20 A_DC_COUNTS_PER_V it is
+# THIRD of the four (coil 2 -75.38, coil 0 +70.33, coil 1 -60.28, coil 3 +58.52),
+# and |rigid| is now 82.9 / 68.3 / 100.5 / 62.3 counts/V, so "coil 0 is 3x weaker
+# than 1/2/3" is gone too. Coil 1 remains defensible -- not the coil that saturated
+# (0), not the one that clipped in 2026-08-18's modal run (3), not the one whose
+# sensor is 3.37x a0's (2) -- and is left rather than re-argued from a desk:
+# which coil to fire a bench instrument from is a bench question.
+SELF_KICK_COIL = 1
+# MODE A: where the 0.028 V provenance above was measured (F_MODE_HZ[0], not a
+# literal -- it has moved twice on 2026-08-20 alone). Which mode is easiest to
+# measure a decay on is NOT established here -- see MODAL_KP -- which is why the
+# mode is a spec field rather than a fixed choice.
+SELF_KICK_MODE = 0
+# WHOLE CYCLES, so the burst starts and ends at exactly zero volts: no step at
+# either edge, only a slope, and 2 pi f amp = 0.13 V/s against the actuator's
+# 2.0 V/s slew limit.
+SELF_KICK_CYCLES = 6
+# THE FIRE GATE, and every number in it is one this file already uses.
+#   * state DAMPING. Never CALIBRATING -- that window measures the floor at zero
+#     gain and a commanded burst inside it would BE the floor -- and never FAULT.
+#   * the loop's OWN running quiet must exist. `QuietLevel.level()` is None until
+#     80 % of its 30 s window is closed-loop time, and reads 0.0 for a channel
+#     without its own evidence, so those are excluded rather than treated as quiet.
+#   * the envelope must be under SELF_KICK_QUIET_MULTIPLE of that level on every
+#     channel allowed to vote on a runaway, held for SELF_KICK_QUIET_SUSTAIN_S.
+# 1.4 is FAULT_CLEAR_RATIO's number and its argument -- the line this repo already
+# uses for "the amplitude has come down", on the same envelope statistic -- and
+# 5.0 s is FAULT_CLEAR_SUSTAIN_S, the hold that gate already requires. NO NEW
+# THRESHOLD. (jerk.py reads its pre-kick level as a median over 5.0 s ending 1.0 s
+# before the crossing, so this hold covers all but the last second of that window;
+# that second is the burst's own first second, and `ratio` is a 1.0 s sliding RMS
+# which has not risen yet.)
+SELF_KICK_QUIET_MULTIPLE = FAULT_CLEAR_RATIO
+SELF_KICK_QUIET_SUSTAIN_S = FAULT_CLEAR_SUSTAIN_S
+# HOW LONG THE RUNAWAY TEST MAY STAY BLIND after the burst ends.
+# FAULT_CLEAR_MAX_HOLD_S's number and its derivation: 1.7x the slowest re-quiet
+# this rig has measured (17.4 s under the diagonal law), far under the 138 s
+# intrinsic ringdown. Reaching it means the ringdown did NOT come back, and that
+# stops the schedule -- do not keep exciting a rig that is not recovering.
+SELF_KICK_BLIND_MAX_S = FAULT_CLEAR_MAX_HOLD_S
+# Say out loud, once, if the gate has not opened after a full quiet window of
+# DAMPING. A schedule that silently never fires is CLAUDE.md's dead-stream lesson.
+SELF_KICK_WAIT_NOTE_S = QUIET_WINDOW_S
+SELF_KICK_MAX_KICKS = 20        # parse ceiling; three per configuration is the use
+
+
+def _parse_self_kick(spec):
+    """OSEM_SELF_KICK=n[:mode:cycles:amp_v] -> constructor kwargs, or None."""
+    if not spec:
+        return None
+    parts = spec.split(":")
+    if len(parts) not in (1, 4):
+        raise ValueError("OSEM_SELF_KICK wants n_kicks, or "
+                         "n_kicks:mode:cycles:amp_v, got %r" % spec)
+    n = int(parts[0])
+    mode = int(parts[1]) if len(parts) == 4 else SELF_KICK_MODE
+    cycles = int(parts[2]) if len(parts) == 4 else SELF_KICK_CYCLES
+    amp = float(parts[3]) if len(parts) == 4 else SELF_KICK_AMP_V
+    if not 1 <= n <= SELF_KICK_MAX_KICKS:
+        raise ValueError("OSEM_SELF_KICK wants 1..%d bursts, got %d"
+                         % (SELF_KICK_MAX_KICKS, n))
+    if not 0 <= mode < NMODE:
+        raise ValueError("OSEM_SELF_KICK mode must be 0..%d (%s Hz), got %d"
+                         % (NMODE - 1, np.round(F_MODE_HZ, 5).tolist(), mode))
+    if cycles < 1:
+        raise ValueError("OSEM_SELF_KICK wants at least one WHOLE cycle so the "
+                         "burst starts and ends at zero volts, got %r" % (parts[2],))
+    if not 0.0 < amp <= SELF_KICK_AMP_CAP_V:
+        raise ValueError("OSEM_SELF_KICK amp %r V is outside (0, %.3f]. That cap is "
+                         "status.py's AMP_MAX, the largest coil drive ever commanded "
+                         "on this rig in a measured pass; raise SELF_KICK_AMP_CAP_V "
+                         "deliberately, in a diff, with a reason."
+                         % (amp, SELF_KICK_AMP_CAP_V))
+    return dict(n_kicks=n, mode=mode, cycles=cycles, amp_v=amp)
+
+
+class SelfKick:
+    """A commanded, repeatable excitation: one coil, one mode, N bursts.
+
+    THE POINT IS REPEATABILITY, NOT SIZE. A hand kick is whatever the person at
+    the table did; this is the same voltage into the same coil at the same
+    frequency for the same whole number of cycles every time, so two
+    configurations can be compared without waiting for their peaks to match. It is
+    NOT a substitute for a hand kick's energy -- see SELF_KICK_AMP_V, where the
+    arithmetic says 30 counts p2p against a hand kick's 868.
+
+    THE RUNAWAY BREAKER IS BLIND TO THE WINDOW THIS OPENS, AND ONLY TO IT. The
+    breaker exists to catch the LOOP adding energy on its own; a disturbance the
+    controller commanded is by definition not that, and the controller is the one
+    thing on the rig that knows it caused it. So from the first sample of the
+    burst until the envelope is back under the quiet line -- or
+    SELF_KICK_BLIND_MAX_S after the burst ends, whichever is first -- the breaker's
+    `judge` mask is empty and `run_trip` cannot fire. EVERY OTHER INTERLOCK STAYS
+    LIVE: the rail fault, the saturation trip, the dead-pin demotion, the in-band
+    floor, the healthy quorum and the fault-clear gate are untouched, and a FAULT
+    from any of them stops the schedule.
+
+    WHAT THE SUPPRESSION COSTS, stated rather than hidden: an empty judge mask
+    clears `Breaker`'s `excess_since` latch to inf every step, so a genuine runaway
+    beginning inside the window needs a fresh RUNAWAY_SUSTAIN_S = 5.0 s of
+    `high & growing` AFTER the re-arm before it trips. That is why the window is
+    bounded at both ends, why reaching the bound stops the schedule instead of
+    kicking again, and why the re-arm is announced with its time.
+
+    NOT ESTABLISHED, and nothing here pretends otherwise: what amplitude a burst
+    reaches on this rig, whether a commanded kick and a hand kick decay the same
+    way, and whether 6 cycles at 0.028 V is enough for jerk.py to grade. The first
+    two are bench questions; the third this class measures and reports.
+    """
+
+    def __init__(self, n_kicks, mode=SELF_KICK_MODE, cycles=SELF_KICK_CYCLES,
+                 amp_v=SELF_KICK_AMP_V, coil=SELF_KICK_COIL, n=N):
+        self.n_kicks, self.mode = int(n_kicks), int(mode)
+        self.f = float(F_MODE_HZ[self.mode])
+        self.cycles = int(cycles)
+        self.burst_s = self.cycles / self.f
+        self.amp, self.coil, self.n = float(amp_v), int(coil), int(n)
+        self.u = np.zeros(self.n)
+        self.phase = "waiting"          # waiting | burst | ringdown | done
+        self.fired = 0
+        self.t0 = self.t1 = self.quiet_since = self.t_damping = None
+        self.quiet_v = None             # the quiet LEVEL this burst fired against
+        self.peak = self.peak_v = 0.0   # x quiet, and volts, since the burst began
+        self.history = []               # (n, t0, t1, t_rearm, how, peak, peak_v)
+        self.stopped = None
+        self._said_wait = self._said_coil = False
+
+    # -- what the rest of the loop asks it ----------------------------------
+    @property
+    def suppressed(self):
+        """True exactly while the runaway TEST is blind: bursting or ringing down."""
+        return self.phase in ("burst", "ringdown")
+
+    @property
+    def code(self):
+        """The `kick` CSV column: 0 nothing, 1 burst driving, 2 suppressed ringdown."""
+        return {"burst": 1, "ringdown": 2}.get(self.phase, 0)
+
+    def command(self, t):
+        """Volts to ADD to the raw demand this control step. Zero unless bursting.
+
+        A whole number of cycles of a sine started at zero, so the command leaves
+        and returns to exactly 0.000 V with no step at either edge.
+        """
+        self.u[:] = 0.0
+        if self.phase == "burst" and self.t0 is not None:
+            s = t - self.t0
+            if 0.0 <= s <= self.burst_s:
+                self.u[self.coil] = self.amp * np.sin(2.0 * np.pi * self.f * s)
+        return self.u
+
+    # -- the schedule -------------------------------------------------------
+    def on_engage(self, t):
+        """A new engagement: the quiet window was reset with it, so re-gate."""
+        self.quiet_since, self.t_damping = None, t
+        if self.phase == "burst":
+            self.t1 = t
+            self.phase = "ringdown"
+
+    def stop(self, why):
+        if self.phase == "done":
+            return None
+        self.phase, self.stopped = "done", why
+        return ("[self-kick] STOPPED after %d of %d burst(s): %s. No further "
+                "excitation will be commanded this run." % (self.fired, self.n_kicks, why))
+
+    def abort(self, t, why):
+        """A FAULT. Kill the drive; stop the schedule only if a burst was in flight."""
+        if self.phase == "done":
+            return None
+        if not self.suppressed:
+            self.quiet_since = None     # merely waiting: re-gate after recovery
+            return None
+        self.t1 = t if self.t1 is None else self.t1
+        return self.stop("the rig FAULTED with burst %d in flight (%s). A commanded "
+                         "excitation is not a runaway, but a fault during one is a "
+                         "fault, and nothing unattended should answer it by kicking "
+                         "again" % (self.fired, why))
+
+    def _track(self, env, quiet, m):
+        if quiet is None or not m.any():
+            return
+        e, q = np.asarray(env, float)[m], np.asarray(quiet, float)[m]
+        self.peak_v = max(self.peak_v, float(np.max(e)))
+        self.peak = max(self.peak, float(np.max(e / q)))
+
+    def _rearm(self, t, how):
+        self.history.append((self.fired, self.t0, self.t1, t, how,
+                             self.peak, self.peak_v))
+        blind = t - self.t0
+        self.phase, self.quiet_since = "waiting", None
+        return ("[self-kick] runaway trip RE-ARMED at t=%.1fs -- %s. Blind for "
+                "%.1fs (burst %.1fs + ringdown %.1fs). Peak envelope %.2fx the "
+                "loop's own quiet level (%.4f V). The breaker's latch was held "
+                "clear throughout, so it now needs a fresh %.1fs of sustained "
+                "growth to trip."
+                % (t, how, blind, self.burst_s, t - self.t1, self.peak,
+                   self.peak_v, RUNAWAY_SUSTAIN_S))
+
+    def update(self, t, env, quiet, vote, coil_live):
+        """One DAMPING control step, after the breaker. Returns a line, or None."""
+        if self.phase == "done":
+            return None
+        if self.t_damping is None:
+            self.t_damping = t
+        m = np.asarray(vote, bool).copy()
+        if quiet is not None:
+            m &= np.asarray(quiet, float) > 0.0        # 0.0 means "no evidence"
+        under = bool(quiet is not None and m.any()
+                     and (np.asarray(env, float)[m]
+                          <= SELF_KICK_QUIET_MULTIPLE * np.asarray(quiet, float)[m]).all())
+
+        if self.phase == "burst":
+            self._track(env, quiet, m)
+            if t - self.t0 < self.burst_s:
+                return None
+            self.t1, self.phase = t, "ringdown"
+            return None
+        if self.phase == "ringdown":
+            self._track(env, quiet, m)
+            if under:
+                return self._rearm(t, "the envelope came back under the "
+                                      "%.2fx quiet line" % SELF_KICK_QUIET_MULTIPLE)
+            if t - self.t1 >= SELF_KICK_BLIND_MAX_S:
+                msg = self._rearm(t, "the %.0fs CEILING, not the envelope"
+                                     % SELF_KICK_BLIND_MAX_S)
+                return msg + "\n" + self.stop(
+                    "the ringdown from burst %d did not come back under %.2fx the "
+                    "loop's own quiet level within %.0fs of the burst ending (peak "
+                    "%.2fx, still %.2fx at the ceiling). The breaker is armed again "
+                    "and the loop keeps damping; it is the EXCITATION that stops"
+                    % (self.fired, SELF_KICK_QUIET_MULTIPLE, SELF_KICK_BLIND_MAX_S,
+                       self.peak,
+                       (float(np.max(np.asarray(env, float)[m]
+                                     / np.asarray(quiet, float)[m]))
+                        if (quiet is not None and m.any()) else float("nan"))))
+            return None
+
+        # waiting
+        if self.fired >= self.n_kicks:
+            return self.stop("all %d commanded bursts fired" % self.n_kicks)
+        if not coil_live:
+            if not self._said_coil:
+                self._said_coil = True
+                return ("[self-kick] holding: coil %d is not enabled, healthy and "
+                        "un-demoted, so nothing would reach the optic. Waiting for "
+                        "it rather than kicking a coil that is held at bias."
+                        % self.coil)
+            return None
+        if not under:
+            self.quiet_since = None
+        elif self.quiet_since is None:
+            self.quiet_since = t
+        if self.quiet_since is None or t - self.quiet_since < SELF_KICK_QUIET_SUSTAIN_S:
+            if (not self._said_wait and self.fired == 0
+                    and t - self.t_damping >= SELF_KICK_WAIT_NOTE_S):
+                self._said_wait = True
+                return ("[self-kick] %.0fs of DAMPING and the gate has not opened: "
+                        "the loop has not held under %.2fx its own quiet level for "
+                        "%.0fs together%s. Still waiting -- nothing fires until it "
+                        "does." % (t - self.t_damping, SELF_KICK_QUIET_MULTIPLE,
+                                   SELF_KICK_QUIET_SUSTAIN_S,
+                                   " (the running quiet is not measured yet)"
+                                   if quiet is None else ""))
+            return None
+        self.fired += 1
+        self.t0, self.t1 = t, None
+        self.peak = self.peak_v = 0.0
+        self.quiet_v = (float(np.max(np.asarray(quiet, float)[m]))
+                        if (quiet is not None and m.any()) else float("nan"))
+        self.phase = "burst"
+        return ("[self-kick] BURST %d/%d at t=%.1fs -- coil %d, mode %s %.5f Hz, "
+                "%.4f V peak, %d whole cycles (%.2fs).\n"
+                "[self-kick] THE RUNAWAY TRIP IS SUPPRESSED from this sample until "
+                "the envelope is back under %.2fx the loop's own quiet level "
+                "(%.4f V) or %.0fs after the burst ends, whichever is first. The "
+                "loop commanded this disturbance, so it is not the loop running "
+                "away. Rails, saturation, dead-pin, the healthy quorum and the "
+                "fault-clear gate all stay LIVE."
+                % (self.fired, self.n_kicks, t, self.coil, "ABC"[self.mode], self.f,
+                   self.amp, self.cycles, self.burst_s, SELF_KICK_QUIET_MULTIPLE,
+                   self.quiet_v, SELF_KICK_BLIND_MAX_S))
+
+    # -- reporting ----------------------------------------------------------
+    def banner(self):
+        g = float(A_DC_COUNTS_PER_V[self.mode, self.coil])
+        rate = 2.0 * abs(g) * self.amp * np.pi * self.f     # counts p2p per second
+        return [
+            "[self-kick] ARMED: %d burst(s), coil %d, mode %s %.5f Hz, %.4f V peak, "
+            "%d whole cycles = %.2fs each." % (self.n_kicks, self.coil,
+                                               "ABC"[self.mode], self.f, self.amp,
+                                               self.cycles, self.burst_s),
+            "[self-kick] PREDICTED SIZE, from measured numbers and NOT from a bench "
+            "run: coil %d gives %+.2f counts/V into mode %s (A_DC_COUNTS_PER_V), and "
+            "a constant-amplitude resonant drive builds 2 g amp pi f = %.2f counts "
+            "p2p per second, so this burst reaches about %.0f counts p2p OPEN LOOP. "
+            "Closed loop it cannot exceed rate/decay = %.0f counts p2p at the "
+            "measured modal 0.1393 /s. ONE HAND KICK MOVED 868 counts p2p."
+            % (self.coil, g, "ABC"[self.mode], rate, rate * self.burst_s,
+               rate / 0.1393),
+            "[self-kick] THE RUNAWAY TRIP IS SUPPRESSED for the burst and its "
+            "ringdown, and ONLY the runaway trip -- every other interlock stays "
+            "live. Each suppression and each re-arm is printed with its time and "
+            "marked in the CSV (`kick` 1 = burst, 2 = suppressed ringdown; "
+            "`kick_n`, `kick_ch`, `kick_v`).",
+        ]
+
+    def summary(self):
+        out = ["", "=" * 68, "  COMMANDED SELF-KICK", "=" * 68,
+               "  coil %d, mode %s %.5f Hz, %.4f V peak, %d cycles (%.2fs)"
+               % (self.coil, "ABC"[self.mode], self.f, self.amp, self.cycles,
+                  self.burst_s),
+               "   #    t0      burst   ringdown  blind   peak/quiet   peak V   re-armed by"]
+        for (i, t0, t1, tr, how, pk, pv) in self.history:
+            out.append("  %2d  %7.1f  %6.2f   %7.2f  %6.2f   %8.2fx  %8.4f   %s"
+                       % (i, t0, t1 - t0, tr - t1, tr - t0, pk, pv, how))
+        if not self.history:
+            out.append("  no burst completed.")
+        out += ["", "  fired %d of %d." % (self.fired, self.n_kicks)]
+        if self.stopped:
+            out.append("  stopped because: %s" % self.stopped)
+        out += ["",
+                "  `peak/quiet` is the envelope this burst produced against the "
+                "loop's own",
+                "  20th-percentile quiet level -- the first measurement anyone here "
+                "has of",
+                "  what a commanded burst is worth. A hand kick reached 3.7-4.7x "
+                "its own",
+                "  baseline. If these are far under that, raise `cycles` or `amp_v` "
+                "-- the",
+                "  spec is OSEM_SELF_KICK=n:mode:cycles:amp_v and the cap is %.2f V."
+                % SELF_KICK_AMP_CAP_V, ""]
+        return "\n".join(out)
+
+
+SELF_KICK = _parse_self_kick(os.environ.get("OSEM_SELF_KICK", "").strip())
+
+
+# ---------------------------------------------------------------------------
 # the CSV
 # ---------------------------------------------------------------------------
 _LOG = (("bp", ".5f"), ("vel", ".5f"), ("out", ".4f"), ("gain", ".5f"),
@@ -1140,6 +2398,20 @@ def csv_cols():
     cols += [(f"mres{m}", ".5f") for m in range(NMODE)]
     cols += [("chi2", ".5f"), ("ndof", None)]
     cols += [(f"qls{m}", ".6f") for m in range(NMODE)]
+    # THE COMMANDED SELF-KICK, so an offline tool can find the window the
+    # controller itself excited. Kept in the fixed prefix, ahead of the
+    # per-channel block, so the per-channel columns stay contiguous.
+    #   kick     0 nothing, 1 the burst is DRIVING, 2 the burst is over and the
+    #            runaway trip is still suppressed while the ringdown comes down
+    #   kick_n   1-based burst index, 0 before the first
+    #   kick_ch  the coil being driven, -1 when the feature is off
+    #   kick_v   volts added to that coil at the last control step, signed
+    # Present on every run and identically zero when OSEM_SELF_KICK is unset.
+    # AT EXACTLY eta's POSITION, so the budget block stays what theta appended
+    # to the END of the modal block and every column eta writes keeps its name,
+    # its meaning and its neighbours.
+    cols += [("kick", None), ("kick_n", None), ("kick_ch", None),
+             ("kick_v", ".5f")]
     # THE ALLOCATION IS LOGGED, and that is not taste: the declared budget is
     # constant for a run and goes in the banner, while the weights MOVE during a
     # run and are the only record of what was actually applied. "Always stream the
@@ -1158,7 +2430,6 @@ def csv_cols():
 
 
 CSV_COLS = csv_cols()
-CSV_HEADER = ",".join(name for name, _ in CSV_COLS)
 
 # Per-channel view names, for the harness and the simulator.
 _VIEW = dict(zip("enabled healthy bias steady_gain capture_gain ki kd bp_out vel out "
@@ -1194,9 +2465,12 @@ class Controller(sl.Loop):
 
     def __init__(self, dac, dac_channels=None, enable=None, steady=None,
                  capture=None, ki=None, kd=None, bias=None, baseline_file=None,
-                 modal_path=None):
+                 modal_path=None, self_kick=None):
         # modal_path defaults to None so the suite is reproducible; only main()
         # passes the real path.
+        # self_kick: None reads the environment (and is None unless OSEM_SELF_KICK
+        # is set), False forces it off, or pass a SelfKick. The suite constructs
+        # its own; nothing is armed by default.
         sl.Loop.__init__(self)
         f = lambda v, d: np.array(d if v is None else v, dtype=float)
         self.enabled = np.array(ENABLE_CHANNEL if enable is None else enable, bool)
@@ -1287,6 +2561,7 @@ class Controller(sl.Loop):
         self.counts_mean = np.full(N, MID_COUNTS)
         self.locked = np.zeros(N, bool)
         self.locked_since = np.full(N, np.inf)
+        self.bias = np.array(self.bias, float)
         self.vmin, self.vmax = self.bias - BIAS_SWING, self.bias + BIAS_SWING
 
         self.channels = [Channel(self, i) for i in range(N)]
@@ -1306,10 +2581,25 @@ class Controller(sl.Loop):
         self.ramp = GainRamp(*GAIN_RAMP, nominal=self.steady) if GAIN_RAMP else None
         self.base_steady, self.base_capture = self.steady.copy(), self.capture.copy()
 
+        # The commanded self-kick. None unless OSEM_SELF_KICK is set, and every
+        # line it adds to `_damping` and `_actuate` is behind `is not None`, so an
+        # unarmed run executes exactly what shipped. `kick_v` exists either way
+        # because `csv_row` reads it at the wire rate.
+        self.kick = ((SelfKick(**SELF_KICK) if SELF_KICK else None)
+                     if self_kick is None else (self_kick or None))
+        self.kick_v = np.zeros(N)
+
         self.trim_steps = np.zeros(N, int)
         self.trim_frozen = np.zeros(N, bool)
         self.trim_last = self.trim_step_t = self.trim_pending = self.trim_ref = None
         self.trim_budget_said = False
+        self.trim_reach_said = np.zeros(N, bool)
+        # WHERE THE BIAS IS GOING, as against where it IS. `_moved` sets this and
+        # `_bias_ramp` walks `self.bias` towards it at BIAS_RAMP_PER_S. Nothing
+        # else may write `self.bias`: a bias step is a force step (see BIAS_RAMP_S)
+        # and every path that changes it -- a trim, a revert, a fault revert --
+        # has to be adiabatic, not just the ones somebody remembered.
+        self.bias_target = self.bias.copy()
 
         self.file_baseline = self.file_floor = None
         if baseline_file is not None:
@@ -1325,14 +2615,6 @@ class Controller(sl.Loop):
     @property
     def wire_hz(self):
         return self.dec.wire_hz
-
-    @property
-    def trusted_baseline(self):
-        return self.base.trusted
-
-    @property
-    def refusals(self):
-        return self.base.refusals
 
     @staticmethod
     def _who(m):
@@ -1390,11 +2672,40 @@ class Controller(sl.Loop):
         only mean anything against the zero-gain window -- see `_damping`.
         """
         q = self.quiet.level()
-        return self.baseline if q is None else np.maximum(self.baseline, q)
+        ref = self.baseline if q is None else np.maximum(self.baseline, q)
+        # AND FLOORED ACROSS CHANNELS. A relative excursion only means something
+        # against a reference that itself means something. Measured on the rig
+        # 2026-08-18 02:31: ch4's baseline came out 0.0038 V against ch0's
+        # 0.2141 V and a driven median near 0.28 V -- 56x smaller, because a4
+        # senses an axis ORTHOGONAL to the three damped modes, so its in-band
+        # level is small by construction rather than because it is quiet. Any
+        # motion at all is then a huge ratio, and `!! ch4 runaway` faulted the
+        # run twice within 25 s.
+        #
+        # This is NOT the same as dropping low-baseline channels from the
+        # evidence set, which `_driven` explains costs a real detection: a
+        # genuinely pumped resonance still crosses a floored reference, because
+        # the floor is a fraction of what the loud channels are doing. It only
+        # stops a channel whose reference is an artefact from voting on a ratio
+        # against that artefact.
+        drv = self._driven()
+        if drv.any():
+            med = float(np.median(ref[drv]))
+            if med > 0:
+                ref = np.maximum(ref, BREAKER_REF_FLOOR_FRAC * med)
+        return ref
 
     # -- faults -------------------------------------------------------------
     def _fault(self, t, msg, railed=False, amp=False):
         self.say("!! " + msg)
+        if self.kick is not None:
+            # A commanded burst is not a runaway, but a rig that faults DURING one
+            # is a rig that faulted, and nothing running unattended should answer
+            # that by kicking again. Only aborts if a burst was actually in
+            # flight; a fault while merely waiting just re-gates.
+            m = self.kick.abort(t, msg)
+            if m:
+                self.say(m)
         if self.trim_pending is not None:
             i, was = self.trim_pending
             self.trim_pending = None
@@ -1543,6 +2854,8 @@ class Controller(sl.Loop):
         self.quiet.reset()
         self._quiet_said = False
         self.locked_announced = False
+        if self.kick is not None:
+            self.kick.on_engage(t)
 
     def _warm_from_file(self, t):
         """Adopt a stored floor only if the first BASELINE_WARMUP_S agree with it."""
@@ -1587,17 +2900,14 @@ class Controller(sl.Loop):
                  + ". Measured over the warm-up: "
                  + ", ".join(f"ch{i}={seen[i]:.4f}V" for i in np.nonzero(m)[0])
                  # A PLAIN FACTOR, not a log. Measured 2026-08-18 this printed
-                 # "0.72 in log", which is 2.05x and reads as small. It is not:
-                 # the breaker, the fault-clear gate and the lock detector all
-                 # scale off this number, so a 2x error here is a simultaneous 2x
-                 # error in all three. NOT TIGHTENED, and not overridden by the
-                 # warm-up either -- the warm-up is 2.0s with the first 40 %
-                 # dropped, about 1.2s of data, and the 20s calibration length
+                 # "0.72 in log", which is 2.05x and reads as small. It is not: the
+                 # breaker, the fault-clear gate and the lock detector all scale off
+                 # this number. NOT TIGHTENED, and not overridden by the warm-up
+                 # either -- that is ~1.2 s of data, and the 20 s calibration length
                  # exists precisely because a short window cannot be trusted
-                 # (measured worst-channel skew from one 6 V/s kick: 74.3 % at 5s
-                 # against 20.1 % at 20s, CLAUDE.md). The 1.2s number is the LESS
-                 # reliable of the two, so it stays a check and not a replacement.
-                 # Which of the two was right on 2026-08-18 is NOT ESTABLISHED.
+                 # (worst-channel skew from one 6 V/s kick: 74.3 % at 5 s against
+                 # 20.1 % at 20 s, CLAUDE.md). So the warm-up stays a check, not a
+                 # replacement. Which was right on 2026-08-18 is NOT ESTABLISHED.
                  + f" -- worst disagreement {np.exp(np.abs(np.log(ratio[m])).max()):.2f}x, "
                    f"inside the {BASELINE_SANITY_RATIO:.1f}x window. Every amplitude "
                    f"threshold scales off this floor, so that factor is inherited by "
@@ -1622,7 +2932,13 @@ class Controller(sl.Loop):
         # measured 2026-08-18, a4/a6/a7 were demoted at engage in BOTH runs
         # ("in-band 0.0027 / 0.0000 / 0.0026 / 0.0024V, under 10% of the 0.0834V
         # median") and their |gain| was exactly 0.0000 for 100 % of every DAMPING
-        # sample. Their bias-corrected coherence with the optic is 0.46/0.26/0.50.
+        # sample. Their bias-corrected coherence with the optic was RE-MEASURED
+        # 2026-08-20 after the coils were re-seated and it reshuffled completely:
+        # a4/a5/a6/a7 are 0.09 / 0.70 / 0.12 / 0.05, not the 0.46/0.26/0.50 that
+        # stood here for a4/a6/a7 (data/20260820_162534_status_sensors.csv, 105 013
+        # samples, 300 s). Their in-band rms is 0.03-0.12 counts, at or under ADC
+        # dither, so those four numbers are Wiener weights and not a verdict on
+        # the wiring. See HYBRID_COHERENT.
         bad, med, witness = self.health.floor(x, self.enabled,
                                               exempt=INBAND_EXEMPT,
                                               motion=self.health.rail_std)
@@ -1686,6 +3002,23 @@ class Controller(sl.Loop):
         # its own success. See BudgetAllocator.
         # `modal_on` and `diag_on` are last step's -- `_actuate` sets them after
         # this -- which is one control step of lag on a 20 s ramp.
+        # A COMMANDED BURST FEEDS `need` LIKE ANY OTHER TRANSIENT, by decision.
+        # The docstring's "TRANSIENTS" limit was written for a HAND kick and a
+        # commanded burst is the same physics -- the plate really is moving in that
+        # mode and the loop really is removing that power -- so freezing only the
+        # commanded one would make the two kinds of kick non-comparable, and
+        # jerk.py fits both with the same estimator. THE ALTERNATIVE IS WORSE:
+        # `usable=False` does not freeze, it ramps BACK TOWARD FLAT over
+        # BUDGET_TAU_S = 20 s, while a burst plus ringdown runs 8.3 s + up to
+        # SELF_KICK_BLIND_MAX_S = 30 s -- so an armed run would spend its whole
+        # measured decay window un-tilting the very allocation it exists to
+        # measure. `quiet` IS frozen during a burst and this is not, because they
+        # are different kinds of number: `quiet` is a REFERENCE interlocks scale
+        # off, so contaminating it moves thresholds; `need` only divides one fixed
+        # pot, which is conserved either way.
+        # UNOBSERVABLE AT THE SHIPPED TILT: at BUDGET_TILT = 0.0 every weight is
+        # exactly 1.0 for every need vector, asserted in the selftest, so this
+        # choice is recorded for the first armed run rather than exercised today.
         need = np.zeros(self.budget.k)
         need[:self.nmode] = self.mode_gain * self.qdot ** 2
         dmask = self.diag_on & live
@@ -1751,19 +3084,51 @@ class Controller(sl.Loop):
         # trip on their incoherent motion now costs one FAULT_CLEAR_SUSTAIN_S, not a
         # deadlock.
         ref = self._amp_ref()
-        # `judge` is NOT narrowed to the lock quorum here, and that was tried.
-        # Restricting the trip to coherent channels looks right -- a `ratio` on a
-        # channel that is half not-the-optic is weak evidence -- but `_driven`'s
-        # docstring already records the measurement that kills it: the channel
-        # which crosses first in the pumped-resonance case is not the obvious one,
-        # and narrowing the evidence set loses that detection outright (simulator,
-        # peak ch2 ratio 2.58 against the 1.8 line, 0 faults). The breaker keeps
-        # every driven channel as evidence.
-        got = self.brk.sample(t, self.bp, self.healthy, self._driven(),
-                              ref, self.sat)
+        # WHO MAY VOTE ON A RUNAWAY: the Phi rows, and this is a HARDWARE verdict
+        # over a simulator one. `_driven` keeps every driven channel as EVIDENCE
+        # because a small baseline crosses first, which is what catches a pumped
+        # resonance in the simulator (peak ch2 ratio 2.58 against the 1.8 line,
+        # 0 faults if the evidence set is narrowed) -- so `judge` is deliberately
+        # not narrowed to the lock quorum either. On the rig the same property
+        # does the opposite: a4's reference came out 56x under ch0's because it
+        # senses an orthogonal axis (`_amp_ref` has the measurement), and
+        # `!! ch4 runaway` then ended three consecutive runs within 40 s of
+        # engaging, every time on a deliberate hand kick. Flooring the reference
+        # was tried first and is NOT enough -- the floor that keeps a4 quiet is far
+        # below what a kick moves it. A channel may only vote on a RATIO if the
+        # denominator means something, and for a Phi-less axis it does not. They
+        # stay driven, watched, railed-checked and demotable; they simply do not
+        # get to fault the rig.
+        # FROM THE GEOMETRY, not from whether a file loaded. `PHI_GEOM` is always
+        # available; `modal.rowok` needs data/modal.json, so keying on it left the
+        # DIAGONAL configuration with no mask at all -- measured 2026-08-18 02:58,
+        # the first diagonal run after this fix faulted on `!! ch4 runaway` within
+        # 40 s for exactly that reason. Which axes a mode can reach is a property
+        # of the rig, not of which control law happens to be running.
+        vote = self._driven() & PHI_GEOM_ROWS
+        if not vote.any():
+            vote = self._driven()
+        # THE ONE INTERLOCK A COMMANDED BURST TURNS OFF, AND IT IS THE ONLY ONE.
+        # `judge` names who may TRIP on amplitude; emptying it makes `run_trip`
+        # unreachable and holds `Breaker`'s `excess_since` latch clear, while
+        # `drives` still carries the whole evidence set, so the envelope and the
+        # SATURATION trip are computed exactly as before. Scope and cost are in
+        # SelfKick's docstring; every other interlock is untouched.
+        # STILL THE RIGHT PLACE UNDER THE 2026-08-20 BREAKER, checked rather than
+        # assumed: `~receded` now VETOES inside `run_trip` instead of restarting
+        # the sustain, but `judge` gates BOTH halves -- the `Health.hold` latch and
+        # the trip itself (stdlib.Breaker) -- so an empty mask still reaches both.
+        judge = vote
+        if self.kick is not None and self.kick.suppressed:
+            judge = np.zeros(N, bool)
+        got = self.brk.sample(t, self.bp, self.healthy, vote, ref, self.sat,
+                              judge=judge)
         # Fed ONLY here, so the window holds closed-loop time and a FAULT freezes
-        # it rather than filling it with the open-loop plant.
-        self.quiet.add(t, got["env"], live)
+        # it rather than filling it with the open-loop plant. A commanded burst is
+        # frozen out for the same reason: this number is where the LOOP lives, and
+        # a disturbance the controller ordered is not that.
+        if self.kick is None or not self.kick.suppressed:
+            self.quiet.add(t, got["env"], live)
         if self.quiet.ready() and not self._quiet_said:
             self._quiet_said = True
             q = self.quiet.level()
@@ -1785,25 +3150,32 @@ class Controller(sl.Loop):
                                   f"rail, still demanding more, and not winning -- "
                                   f"freezing all channels, entering FAULT.")
 
+        # The self-kick schedule, after both trips so a fault this step ends it
+        # rather than being kicked into. It fires only from DAMPING, only once the
+        # loop has held under its own running quiet level, and it is the thing
+        # that sets `suppressed` for the NEXT step -- so no sample is ever driven
+        # with the runaway trip still armed.
+        if self.kick is not None:
+            msg = self.kick.update(t, got["env"], self.quiet.level(), vote,
+                                   bool(live[self.kick.coil]))
+            if msg:
+                self.say(msg)
+
         # AGAINST THE ZERO-GAIN BASELINE, ON PURPOSE, and it is the one place in
-        # this file where that is the right reference. LOCKED is the deliverable
-        # (README 4) and its definition is a statement about the loop's EFFECT:
-        # the motion is under LOCK_RMS_FACTOR of what it was with the gain off.
-        # Re-pointing it at the running quiet would make it self-referential --
-        # that quiet IS a low percentile of the loop's own envelope, so "near its
-        # own floor" is true by construction about a fifth of the time whatever
-        # the loop is doing. A measurement would become a tautology.
+        # this file where that is the right reference. LOCKED's definition is a
+        # statement about the loop's EFFECT -- motion under LOCK_RMS_FACTOR of what
+        # it was with the gain off -- and re-pointing it at the running quiet would
+        # make it self-referential, since that quiet IS a low percentile of the
+        # loop's own envelope. The measurement would become a tautology.
         # NOT A FALSE POSITIVE TODAY, measured: under modal the driven channels
         # read 1.98/1.52/1.07/1.30 at t=5 s and 0.26/0.12/0.37/0.33 at t=15 s, and
         # LOCKED was announced at 20.7 s against a settled floor of 0.117 -- the
-        # 0.35 line sat 3x above the floor and the announced time tracked real
-        # settling (data/20260818_002207_jerk_eta.log).
-        # NOT ESTABLISHED: whether 0.35 stays a real bar if the loop improves
-        # further. It is a fixed fraction of a fixed reference, so a loop that
-        # holds 0.01 would clear it instantly and the lock TIME would stop meaning
-        # anything. The LOCKED line therefore reports the margin against the
-        # running quiet when one exists -- logged, acted on by nothing, which is
-        # what this repo does with a number it has not yet measured a threshold for.
+        # 0.35 line sat 3x above the floor (data/20260818_002207_jerk_eta.log).
+        # NOT ESTABLISHED: whether 0.35 stays a real bar if the loop improves. It is
+        # a fixed fraction of a fixed reference, so a loop holding 0.01 clears it
+        # instantly and the lock TIME stops meaning anything. So the LOCKED line
+        # reports its margin against the running quiet -- logged, acted on by
+        # nothing, as this repo does with a threshold it has not measured.
         quiet = live & (self.rms_lock.update(t, self.bp, live)
                         < self.baseline * LOCK_RMS_FACTOR)
         self.locked_since = sl.Health.hold(quiet, self.locked_since, t)
@@ -1962,13 +3334,45 @@ class Controller(sl.Loop):
 
     # -- bias trim ----------------------------------------------------------
     def _moved(self, t, i, new):
-        self.bias[i] = new
-        self.vmin[i], self.vmax[i] = new - BIAS_SWING, new + BIAS_SWING
+        """AIM the bias at `new`. `_bias_ramp` is what actually gets it there.
+
+        This used to assign `self.bias[i]` directly, which put a 0.25 V force
+        step into an undamped plant and threw the modal residual 7-8x for about
+        10 s every time it fired (BIAS_RAMP_S has the measurement). Setting a
+        TARGET instead means every caller ramps, including the two revert paths,
+        without any of them having to know that.
+        """
+        self.bias_target[i] = new
         self.trim_step_t = t
         self.brk.hist.clear()
         self.excess_since[:] = np.inf
         self.health.sat_hist.clear()
         self.sat_sum[:] = 0.0
+
+    def _bias_ramp(self, dt):
+        """Walk the commanded bias towards its target at BIAS_RAMP_PER_S. Adiabatic.
+
+        Runs in EVERY state, from `_actuate`, so a target set just before a fault
+        still arrives rather than freezing half way. The window moves with the
+        live bias, not with the target, so saturation accounting stays honest
+        while the ramp is in flight.
+        """
+        step = BIAS_RAMP_PER_S * max(dt, 0.0)
+        d = self.bias_target - self.bias
+        moving = np.abs(d) > 1e-12
+        if not moving.any():
+            return
+        # IN PLACE, deliberately. `self.bias`, `self.vmin` and `self.vmax` are
+        # handed out by reference (Channel, the CSV row, the console line), so
+        # rebinding the name here would leave every one of those holding the
+        # array from before the first trim.
+        self.bias += np.clip(d, -step, step)
+        self.vmin[:] = self.bias - BIAS_SWING
+        self.vmax[:] = self.bias + BIAS_SWING
+
+    def _bias_settled(self):
+        """True when nothing is ramping. A trim never starts on top of a trim."""
+        return bool(np.abs(self.bias_target - self.bias).max() <= 1e-9)
 
     def _trim(self, t):
         """One coarse bias step per TRIM_PERIOD_S, judged on total offset, quiet only."""
@@ -2006,14 +3410,39 @@ class Controller(sl.Loop):
         err = self.counts_mean - MID_COUNTS
         if not quiet:
             return              # never START a step on a moving optic either
+        if not self._bias_settled():
+            return              # and never on top of a ramp that is still running
         step_all = -np.sign(err) * SLOPE_SIGN * BIAS_QUANTUM
         nxt = np.clip(self.bias + step_all, BIAS_MIN, BIAS_MAX)
         movable = np.abs(nxt - self.bias) > 1e-9
-        affordable = (np.abs(self.bias - BIAS).sum() - np.abs(self.bias - BIAS)
-                      + np.abs(nxt - BIAS)) <= TRIM_MAX_TOTAL_EXCURSION_V
-        elig = (watch & ~self.trim_frozen & movable & affordable
+        room = TRIM_MAX_TOTAL_EXCURSION_V - (np.abs(self.bias - BIAS).sum()
+                                             - np.abs(self.bias - BIAS))
+        affordable = np.abs(nxt - BIAS) <= room
+        # CAN IT EVEN GET THERE? The furthest this channel could still be taken,
+        # with the step budget, the excursion budget and the BIAS_MIN/BIAS_MAX
+        # clamps all applied, converted to counts through its MEASURED slope. A
+        # step costs real motion (BIAS_RAMP_S), so one that cannot close the
+        # offset is a disturbance bought for nothing.
+        left = np.maximum(TRIM_MAX_STEPS - self.trim_steps, 0)
+        far = np.clip(self.bias + np.sign(step_all) * left * BIAS_QUANTUM,
+                      BIAS_MIN, BIAS_MAX)
+        far = np.clip(far, BIAS - room, BIAS + room)
+        reach = np.abs(far - self.bias) * np.abs(SENSOR_SLOPE_COUNTS_PER_V)
+        reachable = reach >= TRIM_MIN_REACHABLE_FRAC * np.abs(err)
+        want = (watch & ~self.trim_frozen & movable & affordable
                 & (self.trim_steps < TRIM_MAX_STEPS)
                 & (np.abs(err) > TRIM_DEADBAND_COUNTS))
+        for i in np.nonzero(want & ~reachable & ~self.trim_reach_said)[0]:
+            self.trim_reach_said[i] = True
+            self.say(f"[trim] ch{i} NOT TRIMMED and it is not a fault: it rests "
+                     f"{err[i]:+.0f} counts off mid-scale and everything the trim "
+                     f"has left -- {np.abs(far[i] - self.bias[i]):.2f}V at its "
+                     f"measured {SENSOR_SLOPE_COUNTS_PER_V[i]:+.1f} counts/V -- is "
+                     f"worth {reach[i]:.0f} counts, {100 * reach[i] / abs(err[i]):.0f}% "
+                     f"of the offset against a {100 * TRIM_MIN_REACHABLE_FRAC:.0f}% "
+                     f"line. A step costs about 10s of lock, so it is not spent on "
+                     f"a correction that cannot converge.")
+        elig = want & reachable
         if not elig.any():
             if (movable & ~affordable).any() and not self.trim_budget_said:
                 self.trim_budget_said = True
@@ -2038,11 +3467,23 @@ class Controller(sl.Loop):
 
     # -- the output ---------------------------------------------------------
     def _actuate(self, t, dt):
+        # BEFORE anything reads `self.bias`, `self.vmin` or `self.vmax` this step.
+        # A bias step is a force step, so the bias only ever ARRIVES, over
+        # BIAS_RAMP_S; see `_bias_ramp` and BIAS_RAMP_S.
+        self._bias_ramp(dt)
         live = self.enabled & self.healthy & (self.state == "DAMPING")
         self.modal_on = False
         self.modal_u[:] = 0.0
         self.modal_cols[:] = False
         self.diag_on[:] = False
+
+        # THE COMMANDED SELF-KICK, computed here so the modal cap below can see it
+        # and yield to it rather than the two of them overrunning the window
+        # together. DAMPING only: a fault zeroes the drive on the same control
+        # step, without waiting for the schedule to notice.
+        if self.kick is not None:
+            self.kick_v[:] = (self.kick.command(t) if self.state == "DAMPING"
+                              else 0.0)
 
         if self.modal.ok and self.state == "DAMPING":
             # SENSE_OK is "this sensor's opinion counts"; DRIVE_OK is "this coil is
@@ -2092,31 +3533,57 @@ class Controller(sl.Loop):
             # clip is not. The diagonal channels are colocated and stay dissipative
             # under their own clip, so they do not scale the modal vector.
             #
-            # SOLVED, not estimated. The previous form measured the peak of the
-            # total and then scaled the MODAL part by that ratio, which only
-            # reaches the cap when the modal part is the whole demand. It is not:
-            # the D term is added after, and it is what took coil 3 to 0.4229 V
-            # against a 0.250 V half-window -- 169 % -- while the allocation stayed
-            # inside its own 0.20 V cap for the entire run (CLAUDE.md 2). Once a
-            # coil clips the realised force is no longer A_C^+ f and the
-            # dissipation guarantee is void; the 5x was measured with that
-            # happening. `cap_scale` returns the largest scale for which the TOTAL
-            # is inside the cap, exactly.
+            # SOLVED, not estimated: `cap_scale` returns the largest scale for
+            # which the TOTAL is inside the cap. The previous form scaled the MODAL
+            # part by the total's peak ratio, which only reaches the cap when the
+            # modal part is the whole demand -- and it is not. The D term is added
+            # after, and it is what took coil 3 to 0.4229 V against a 0.250 V
+            # half-window (169 %) while the allocation stayed inside its own 0.20 V
+            # cap for the entire run (CLAUDE.md 2). Once a coil clips the realised
+            # force is no longer A_C^+ f and the dissipation guarantee is void; the
+            # 5x was measured with that happening.
             #
-            # THE ALTERNATIVE IS TO RAISE THE WINDOW, AND IT IS NOT FREE: that is
-            # CLAUDE.md 11. `VMIN, VMAX = 0.0, 0.5` and `BIAS = 0.25` have NO
-            # recorded justification anywhere, the coil driver between the DAC and
-            # the coil is not in this repo, and 0.25 V may encode a real current
-            # limit. Capping the total costs authority; guessing the window costs
-            # hardware.
+            # THE ALTERNATIVE IS TO RAISE THE WINDOW, AND IT IS NOT FREE: the
+            # binding constraint is the 3 A supply, not the DAC, and the coil
+            # driver between the DAC and the coil is not in this repo. See BIAS
+            # and BIAS_SWING. Capping the total costs authority; guessing the
+            # window costs hardware.
             # THE DECLARED BUDGET. One number, quoted from one place.
             cap = BUDGET_V
-            self.modal_scaled = sl.cap_scale(self.modal_u, self.pid.i + self.pid.d,
+            # The burst counts as fixed demand here for the same reason the D
+            # term does: it is added after the allocation, and CLAUDE.md 2 is what
+            # happens when the cap is measured on the allocation alone.
+            fixed = self.pid.i + self.pid.d
+            if self.kick is not None and self.kick_v.any():
+                fixed = fixed + self.kick_v
+            self.modal_scaled = sl.cap_scale(self.modal_u, fixed,
                                              cap, self.modal_cols)
             if self.modal_scaled < 1.0:
                 self.modal_u = self.modal_u * self.modal_scaled
                 self.pid.p = np.where(self.modal_cols, self.modal_u, self.pid.p)
                 raw = self.bias + self.pid.p + self.pid.i + self.pid.d
+
+        if self.kick is not None and self.kick_v.any():
+            # Added to the RAW demand, so it goes through the same clip, the same
+            # slew limit and the same saturation accounting as every other volt
+            # this loop commands -- and the total on the kicked coil is held
+            # inside BUDGET_V, the one declared budget the modal allocation
+            # already respects. A commanded excitation must not be the thing that
+            # takes a coil past the window.
+            # INSIDE THE BUDGET, NOT AFTER IT, and CLAUDE.md 2 is the precedent:
+            # the D term was added after the cap and took coil 3 to 0.4229 V
+            # against the 0.250 V half-window -- 169 % -- while the allocation sat
+            # inside its own 0.20 V cap for the whole run. A burst is a second
+            # term added after the allocation, so it is the same defect waiting to
+            # be repeated: it enters `cap_scale` as fixed demand above, and the
+            # clip here bounds the total on the kicked coil whatever the
+            # allocator did. `budget.spend` then sees the burst in `out`, so a
+            # commanded excitation is counted as spent budget and not hidden.
+            raw = raw + self.kick_v
+            j = self.kick.coil
+            room = BUDGET_V
+            raw[j] = self.bias[j] + float(np.clip(raw[j] - self.bias[j],
+                                                  -room, room))
 
         out = self.pid.drive(raw, self.bias, self.vmin, self.vmax, live, dt)
         # What was actually spent, against what was declared. Observation only --
@@ -2145,6 +3612,10 @@ class Controller(sl.Loop):
         rate = (f"{self.wire_hz:.0f}/{CONTROL_HZ:.0f}Hz avg{self.n_avg:d}"
                 if self.wire_hz == self.wire_hz else f"--/{CONTROL_HZ:.0f}Hz")
         bad = f" bad{self.bad_samples}" if self.bad_samples else ""
+        if self.kick is not None and self.kick.code:
+            bad += (" KICK%d %s RUNAWAY-TRIP-SUPPRESSED"
+                    % (self.kick.fired,
+                       "driving" if self.kick.code == 1 else "ringdown"))
         if self.modal.ok:
             mode = ("MIMO" if self.modal_on else "diag") + (
                 "" if self.budget.flat else "+bud") + (
@@ -2163,6 +3634,11 @@ class Controller(sl.Loop):
                str(self.modal_rank), str(int(sl.Modal.mask_of(self.diag_on)))]
         row += list(self.qdot) + list(self.mode_gain) + list(self.modal_res)
         row += [self.chi2, str(int(self.chi2_dof))] + list(self.qls)
+        k = self.kick
+        row += [str(0 if k is None else k.code),
+                str(0 if k is None else k.fired),
+                str(-1 if k is None else k.coil),
+                0.0 if k is None else float(self.kick_v[k.coil])]
         row += list(self.budget.w[:self.nmode])
         row += [float(self.budget.w[self.budget.k - 1]),
                 "1" if self.budget.holding else "0"]
@@ -2658,8 +4134,7 @@ def _selftest():
           and np.allclose(np.delete(f1, 1), np.delete(f2, 1)),
           "K %s -> %s, f %s -> %s" % (np.round(K, 4), np.round(K2, 4),
                                       np.round(f1, 5), np.round(f2, 5)))
-    check("...and ships FLAT, as measured modal rms A 0.64 / B 2.61 / C 3.15 says "
-          "it should not stay",
+    check("...and ships FLAT -- per-mode retuning is a bench job (MODAL_KP)",
           len(MODAL_KP) == nm and np.allclose(MODAL_KP, MODAL_KP[0])
           and bool(np.all(MODAL_KP >= 0)),
           "MODAL_KP %s" % np.round(MODAL_KP, 4))
@@ -2730,16 +4205,248 @@ def _selftest():
           bool(np.all(zero <= 1e-15)),
           "max f.qdot %+.3e with both hybrid gains zeroed" % zero.max())
 
-    check("HYBRID_GAIN is HYBRID_KP x SLOPE_SIGN x the measured coherent fraction",
-          np.allclose(HYBRID_GAIN, HYBRID_KP * SLOPE_SIGN * HYBRID_COHERENT)
-          and abs(abs(HYBRID_GAIN[4]) / HYBRID_KP - 0.46) < 1e-12
-          and abs(abs(HYBRID_GAIN[6]) / HYBRID_KP - 0.26) < 1e-12
-          and abs(abs(HYBRID_GAIN[7]) / HYBRID_KP - 0.50) < 1e-12,
+    check("HYBRID_GAIN is HYBRID_KP x DAMP_SIGN x the measured coherent fraction",
+          np.allclose(HYBRID_GAIN, HYBRID_KP * DAMP_SIGN * HYBRID_COHERENT
+                      * np.array(HYBRID_CHANNEL, float))
+          and abs(abs(HYBRID_GAIN[4]) / HYBRID_KP - 0.09) < 1e-12
+          and abs(abs(HYBRID_GAIN[6]) / HYBRID_KP - 0.12) < 1e-12
+          and abs(abs(HYBRID_GAIN[7]) / HYBRID_KP - 0.05) < 1e-12,
           "a4 %.5f a6 %.5f a7 %.5f against a full %.5f"
           % (HYBRID_GAIN[4], HYBRID_GAIN[6], HYBRID_GAIN[7], HYBRID_KP))
-    check("a5 has coherent fraction 0 and can never actuate",
-          HYBRID_COHERENT[5] == 0.0 and HYBRID_GAIN[5] == 0.0
-          and not HYBRID_CHANNEL[5] and not ENABLE_CHANNEL[5])
+    # THE DISSIPATION CONDITION, asserted as algebra rather than as a remembered
+    # sign. p = gain x (-vel), so the demand about bias is -gain x vel, the force
+    # goes as slope x (u - bias), and the power delivered is
+    #     slope x (u - bias) x vel = -slope x gain x vel^2
+    # which is negative -- dissipating -- if and only if slope x gain > 0.
+    # This shipped INVERTED until 2026-08-20 and every driven channel pumped:
+    # dissipating on 5.4 / 11.0 / 22.6 / 12.3 % of steps on a0-a3
+    # (data/20260820_173738_fast_lock.csv, evaluated at the control clock).
+    check("slope x gain > 0 on every driven channel -- the dissipation condition",
+          bool(np.all(SLOPE_SIGN[:4] * np.sign(STEADY_GAIN[:4]) > 0))
+          and np.array_equal(DAMP_SIGN, SLOPE_SIGN),
+          "slope %s x gain %s = %s (all must be +1)"
+          % (SLOPE_SIGN[:4].astype(int), np.sign(STEADY_GAIN[:4]).astype(int),
+             (SLOPE_SIGN[:4] * np.sign(STEADY_GAIN[:4])).astype(int)))
+    check("...and the hybrid channels use the SAME rule, not the opposite one",
+          bool(np.all(SLOPE_SIGN[[4, 6, 7]] * np.sign(HYBRID_GAIN[[4, 6, 7]]) > 0)),
+          "a4/a6/a7 slope %s x hybrid gain %s -- these carried the OPPOSITE "
+          "convention to a0-a3 until 2026-08-20, which is the two-conventions bug"
+          % (SLOPE_SIGN[[4, 6, 7]].astype(int),
+             np.sign(HYBRID_GAIN[[4, 6, 7]]).astype(int)))
+
+
+    # ---- the sensor calibration, and the gain vector built on it -----------
+    # SIGNS ARE NOT ENOUGH ON THIS RIG. The block above says each channel pushes
+    # the right way against its OWN sensor; that argument is colocation and
+    # colocation does not hold here. What follows asserts the thing that actually
+    # has to be true -- that the MODAL damping matrix is positive definite, so
+    # every mode loses energy -- and it asserts it for the shipped vector, for
+    # the flat vector it replaced, and against a vector known to pump.
+    print()
+    m_dc = DC_MATRIX_COUNTS_PER_V.T                 # [sensor][coil]
+    check("DC_MATRIX's diagonal IS the measured own-coil slope, not a transpose",
+          bool(np.all(np.abs(np.diag(DC_MATRIX_COUNTS_PER_V)
+                             - SENSOR_SLOPE_COUNTS_PER_V[:4])
+                      <= SENSOR_SLOPE_SIGMA[:4])),
+          "diag %s against slopes %s, worst gap %.2f counts/V inside sigma %s"
+          % (np.round(np.diag(DC_MATRIX_COUNTS_PER_V), 1),
+             np.round(SENSOR_SLOPE_COUNTS_PER_V[:4], 1),
+             float(np.abs(np.diag(DC_MATRIX_COUNTS_PER_V)
+                          - SENSOR_SLOPE_COUNTS_PER_V[:4]).max()),
+             np.round(SENSOR_SLOPE_SIGMA[:4], 1)))
+    # A RIGID PLATE CANNOT WARP. This is the whole basis of SENSOR_GAIN_H, and it
+    # is over-determined -- one equation per coil, four unknowns -- so it is a
+    # real test and not a fit that always succeeds. Coils 0-3 only, because that
+    # is the part of the pass this file keeps; the published solve used all eight.
+    warp_raw = PHI_WARP[:4] @ m_dc
+    warp_cal = PHI_WARP[:4] @ (np.diag(SENSOR_GAIN_H) @ m_dc)
+    check("h nulls the warp a rigid plate cannot have -- 4 unknowns, 4 equations "
+          "here and 8 in the published solve",
+          float(np.abs(warp_cal).max()) < 0.06 * float(np.abs(warp_raw).max()),
+          "per coil %s -> %s counts, worst |warp| %.1f -> %.1f"
+          % (np.round(warp_raw, 1), np.round(warp_cal, 1),
+             float(np.abs(warp_raw).max()), float(np.abs(warp_cal).max())))
+    hcorr = float(np.corrcoef(np.abs(SENSOR_GAIN_H),
+                              1.0 / np.abs(SENSOR_SLOPE_COUNTS_PER_V[:4]))[0, 1])
+    check("...and h agrees with 1/|own-coil slope|, which it never saw",
+          hcorr > 0.95,
+          "corr %.4f: h is fitted from the OFF-diagonal warp constraint, the "
+          "slopes are the DIAGONAL, and neither entered the other" % hcorr)
+
+    # THE CONSTRAINT. sym(A diag(g) Phi) positive definite, in both forms, for
+    # the shipped vector AND for the flat one it replaced. Numbers measured
+    # 2026-08-20; see the gain block for where each comes from.
+    flat_g = KP_REF * np.concatenate([DAMP_SIGN_A0A3, np.zeros(N - 4)])
+    for form, want_flat, want_ship in (("counts", 1.9393, 0.7593),
+                                       ("physical", 2.0343, 1.2797)):
+        e_ship = dissipation_eig(STEADY_GAIN, form)
+        e_flat = dissipation_eig(flat_g, form)
+        check("EVERY MODE DISSIPATES under the shipped gains -- sym(S) is "
+              "positive definite, %s form" % form,
+              bool(np.all(e_ship > 0.0)),
+              "eig %s (all must be > 0); the flat vector this replaced gives %s"
+              % (np.round(e_ship, 4), np.round(e_flat, 4)))
+        check("...and the reference numbers have not drifted (%s)" % form,
+              abs(float(e_flat.min()) - want_flat) < 5e-3
+              and abs(float(e_ship.min()) - want_ship) < 5e-3,
+              "worst mode flat %.4f (recorded %.4f), shipped %.4f (recorded "
+              "%.4f) -- a factor %.2f, which is what normalisation COSTS"
+              % (e_flat.min(), want_flat, e_ship.min(), want_ship,
+                 e_ship.min() / e_flat.min()))
+    # The check has to be able to FAIL, or it asserts nothing. Inverting one
+    # channel is the 2026-08-20 sign bug in miniature, and it must show up here.
+    bad_g = STEADY_GAIN.copy()
+    bad_g[0] = -bad_g[0]
+    e_bad = dissipation_eig(bad_g, "counts")
+    check("...and the test can fail: inverting ONE channel's gain pumps a mode",
+          bool(np.any(dissipation_eig(-STEADY_GAIN, "counts") < 0.0))
+          and bool(np.any(e_bad < 0.0)),
+          "gain vector negated -> eig %s; ch0 alone inverted -> eig %s"
+          % (np.round(dissipation_eig(-STEADY_GAIN, "counts"), 3),
+             np.round(e_bad, 3)))
+
+    # WHAT NORMALISATION IS FOR, asserted as the property rather than as four
+    # literals: equal coil demand per unit PHYSICAL velocity of the plate. The
+    # flat vector was 3.37x out on a2, which is the whole reason coil 2 clipped
+    # and spent 34.41 % of the 18:15 DAMPING block at the 2.0 V/s slew cap.
+    phys_ship = np.abs(STEADY_GAIN[:4]) / np.abs(SENSOR_GAIN_H)
+    phys_flat = np.abs(flat_g[:4]) / np.abs(SENSOR_GAIN_H)
+    check("the shipped gains are FLAT IN PHYSICS -- g/h equal on all four",
+          float(phys_ship.max() / phys_ship.min() - 1.0) < 1e-9,
+          "g/h %s (spread %.2e); the flat vector spread %s, a factor %.2f"
+          % (np.round(phys_ship, 6), float(phys_ship.max() / phys_ship.min() - 1.0),
+             np.round(phys_flat, 4), float(phys_flat.max() / phys_flat.min())))
+    check("normalisation only ever REDUCES a gain -- nothing goes past KP_REF",
+          bool(np.all(np.abs(STEADY_GAIN) <= KP_REF + 1e-15))
+          and bool(np.all(np.abs(STEADY_GAIN[:4]) <= np.abs(flat_g[:4]) + 1e-15))
+          and bool(np.all(np.abs(KD_GAIN) <= KD_REF + 1e-15)),
+          "max |steady| %.5f of a %.5f ceiling, max |kd| %.6f of %.6f"
+          % (float(np.abs(STEADY_GAIN).max()), KP_REF,
+             float(np.abs(KD_GAIN).max()), KD_REF))
+    check("...even if a re-measured h says otherwise: the clamp holds",
+          float(np.abs(slope_gain(KP_REF, h=[0.01, 1.0, 1.0, 1.0])).max())
+          <= KP_REF + 1e-15,
+          "an h with a 100x outlier still gives max |g| %.5f"
+          % float(np.abs(slope_gain(KP_REF, h=[0.01, 1.0, 1.0, 1.0])).max()))
+    check("P and D are normalised by the SAME factor, so P/D per channel is flat",
+          np.allclose(STEADY_GAIN[:4] / KP_REF, KD_GAIN[:4] / KD_REF, atol=1e-15)
+          and np.array_equal(STEADY_GAIN, CAPTURE_GAIN),
+          "steady/KP_REF %s == kd/KD_REF %s"
+          % (np.round(STEADY_GAIN[:4] / KP_REF, 6),
+             np.round(KD_GAIN[:4] / KD_REF, 6)))
+    check("the normalised channels are exactly Phi's rows, and nothing else moved",
+          list(GAIN_NORM_CHANNELS) == list(np.nonzero(PHI_GEOM_ROWS)[0])
+          and not STEADY_GAIN[4:].any() and not KD_GAIN[4:].any(),
+          "normalised %s, Phi rows %s, a4-a7 gains %s"
+          % (list(GAIN_NORM_CHANNELS), list(np.nonzero(PHI_GEOM_ROWS)[0]),
+             np.round(STEADY_GAIN[4:], 6)))
+    check("DAMP_SIGN_A0A3 is DAMP_SIGN[:4] -- the two cannot drift apart",
+          np.array_equal(DAMP_SIGN_A0A3, DAMP_SIGN[:4])
+          and np.array_equal(np.sign(STEADY_GAIN[:4]), DAMP_SIGN_A0A3),
+          "gain signs %s, DAMP_SIGN[:4] %s"
+          % (np.sign(STEADY_GAIN[:4]).astype(int), DAMP_SIGN[:4].astype(int)))
+    check("GAIN_NORMALISE=False puts the flat law back EXACTLY, for a null test",
+          np.array_equal(slope_gain(KP_REF, normalise=False), flat_g),
+          "flat %s" % np.round(slope_gain(KP_REF, normalise=False)[:4], 4))
+    # h is per SENSOR and appears only in the per-channel diagonal gains. Folding
+    # it into Phi was tried on the bench on 2026-08-20 and PUMPED (cond 3.32 ->
+    # 9.41, chi2/dof 3.47 -> 844.70) because KALMAN_R is a variance in raw volts.
+    # Assert the separation, so that change cannot arrive here by accident.
+    check("h touches the diagonal gains ONLY -- Phi is still exactly +-1",
+          bool(np.all(np.abs(PHI_GEOM[:4]) == 1.0))
+          and np.allclose(PHI_GEOM.T @ PHI_GEOM, 4.0 * np.eye(NMODE)),
+          "PHI_GEOM rows %s -- normalising the READINGS by h needs KALMAN_R "
+          "rescaled by h^2 in the same change, and that is not this change"
+          % np.abs(PHI_GEOM[:4]).max())
+
+    # ---- a bias step is a force step: the trim must RAMP -------------------
+    # 2026-08-20, data/20260820_185657_fast_lock.csv: every stepped trim threw
+    # the T2 modal residual 7-8x (1.85 -> 15.28 counts rms) and took about 10 s
+    # to recover, and 0.02-0.30 Hz band power over the DAMPING block was 2950x
+    # its CALIBRATING level while the mode band was 8.5x DOWN. See BIAS_RAMP_S.
+    print()
+    check("the ramp is ten periods of the slowest mode, like status.park_ramped",
+          BIAS_RAMP_S / (1.0 / F_MODE_HZ[0]) > 9.0
+          and abs(BIAS_RAMP_PER_S - BIAS_QUANTUM / BIAS_RAMP_S) < 1e-15,
+          "%.1f s = %.1f periods of %.5f Hz, %.4f V/s -- %.0fx under the %.1f V/s "
+          "slew limit that used to be the only thing slowing a step"
+          % (BIAS_RAMP_S, BIAS_RAMP_S * F_MODE_HZ[0], F_MODE_HZ[0],
+             BIAS_RAMP_PER_S, MAX_SLEW_PER_S / BIAS_RAMP_PER_S, MAX_SLEW_PER_S))
+    check("...and the period leaves the ramp AND a full quiet window to settle",
+          TRIM_PERIOD_S >= BIAS_RAMP_S + QUIET_WINDOW_S,
+          "%.0f s >= %.0f s ramp + %.0f s window; it was 15.0 s, shorter than the "
+          "10 s recovery it caused, so steps stacked"
+          % (TRIM_PERIOD_S, BIAS_RAMP_S, QUIET_WINDOW_S))
+
+    cr = Controller(_NoDac())
+    cr._moved(0.0, 2, float(cr.bias[2]) + BIAS_QUANTUM)
+    seen, dtc, tgt = [], CONTROL_PERIOD_S, float(cr.bias_target[2])
+    for k in range(int(3.0 * BIAS_RAMP_S / dtc)):
+        prev = float(cr.bias[2])
+        cr._bias_ramp(dtc)
+        seen.append((abs(float(cr.bias[2]) - prev) / dtc, float(cr.bias[2])))
+        if abs(float(cr.bias[2]) - tgt) < 1e-9:
+            arrived = (k + 1) * dtc
+            break
+    else:
+        arrived = float("inf")
+    fastest = max(r for r, _ in seen)
+    check("A TRIM NEVER MOVES THE BIAS FASTER THAN BIAS_RAMP_PER_S",
+          fastest <= BIAS_RAMP_PER_S + 1e-12,
+          "fastest %.5f V/s against the %.5f V/s limit, over %d control steps"
+          % (fastest, BIAS_RAMP_PER_S, len(seen)))
+    check("...and it does arrive, in about BIAS_RAMP_S rather than never",
+          abs(arrived - BIAS_RAMP_S) < 0.5 * BIAS_RAMP_S
+          and abs(float(cr.bias[2]) - tgt) < 1e-9,
+          "reached %.4f V after %.2f s (BIAS_RAMP_S %.1f s)"
+          % (cr.bias[2], arrived, BIAS_RAMP_S))
+    check("...and the window follows the LIVE bias, not the target",
+          abs(float(cr.vmin[2]) - (float(cr.bias[2]) - BIAS_SWING)) < 1e-12
+          and abs(float(cr.vmax[2]) - (float(cr.bias[2]) + BIAS_SWING)) < 1e-12,
+          "vmin %.4f vmax %.4f about bias %.4f -- saturation accounting stays "
+          "honest while a ramp is in flight" % (cr.vmin[2], cr.vmax[2], cr.bias[2]))
+    # The arrays are handed out by reference, so a rebind here would leave every
+    # holder on the pre-trim array. Assert identity, not just value.
+    b0, v0 = cr.bias, cr.vmin
+    cr._moved(0.0, 1, float(cr.bias[1]) - BIAS_QUANTUM)
+    cr._bias_ramp(dtc)
+    check("...and the ramp mutates in place, so no holder goes stale",
+          cr.bias is b0 and cr.vmin is v0,
+          "bias and vmin are the same arrays Channel and csv_row were given")
+
+    # A step costs about 10 s of lock, so it is not spent where it cannot converge.
+    cq2 = Controller(_NoDac())
+    cq2.counts_mean = np.full(N, MID_COUNTS)
+    cq2.counts_mean[2] = 860.0                 # as measured on the 18:56 run
+    cq2.counts_mean[4] = MID_COUNTS + 34.0     # a4's documented drift
+    # a1 BELOW mid-scale, deliberately: from BIAS 0.50 the trim has three
+    # quanta of room UP to BIAS_MAX 1.25 and only one DOWN to BIAS_MIN 0.25, so
+    # a downward correction of the same size is refused as unreachable. That
+    # asymmetry is real and this is where it is visible.
+    cq2.counts_mean[1] = MID_COUNTS - 100.0
+    err2 = cq2.counts_mean - MID_COUNTS
+    step2 = -np.sign(err2) * SLOPE_SIGN * BIAS_QUANTUM
+    room2 = TRIM_MAX_TOTAL_EXCURSION_V - (np.abs(cq2.bias - BIAS).sum()
+                                          - np.abs(cq2.bias - BIAS))
+    far2 = np.clip(cq2.bias + np.sign(step2)
+                   * np.maximum(TRIM_MAX_STEPS - cq2.trim_steps, 0) * BIAS_QUANTUM,
+                   BIAS_MIN, BIAS_MAX)
+    far2 = np.clip(far2, BIAS - room2, BIAS + room2)
+    frac2 = (np.abs(far2 - cq2.bias) * np.abs(SENSOR_SLOPE_COUNTS_PER_V)
+             / np.maximum(np.abs(err2), 1e-9))
+    check("a trim it cannot finish is REFUSED -- a2 and a4, on measured slopes",
+          frac2[2] < TRIM_MIN_REACHABLE_FRAC and frac2[4] < TRIM_MIN_REACHABLE_FRAC,
+          "a2 reaches %.0f%% of a %+.0f-count offset at %+.1f counts/V, a4 %.0f%% "
+          "of %+.0f at %+.1f, against a %.0f%% line"
+          % (100 * frac2[2], err2[2], SENSOR_SLOPE_COUNTS_PER_V[2],
+             100 * frac2[4], err2[4], SENSOR_SLOPE_COUNTS_PER_V[4],
+             100 * TRIM_MIN_REACHABLE_FRAC))
+    check("...while a channel it CAN finish is untouched by the new gate",
+          frac2[1] >= TRIM_MIN_REACHABLE_FRAC,
+          "a1 reaches %.0f%% of a %+.0f-count offset at %+.1f counts/V -- three "
+          "quanta UP to BIAS_MAX; the same offset the other way has one quantum "
+          "DOWN to BIAS_MIN and would be refused"
+          % (100 * frac2[1], err2[1], SENSOR_SLOPE_COUNTS_PER_V[1]))
 
     carm = Controller(_NoDac())
     check("the hybrid arms a4/a6/a7 on the shipped enable vector",
@@ -2846,9 +4553,20 @@ def _selftest():
           and np.allclose(cok.mkf.phi, cok.modal.phi)
           and np.allclose(cok.modal.phi[:4], PHI_GEOM[:4] / 2.0),
           "%d states, Phi columns unit-norm" % (cok.mkf.nx if cok.mkf else 0))
-    check("ENABLE_CHANNEL[5] is False -- a5 is a disconnected pin, 0.0 counts and "
-          "variance exactly zero over 236387 samples",
-          not ENABLE_CHANNEL[5] and not HYBRID_CHANNEL[5])
+    # a5 came back on 2026-08-20 (std 9.16 counts, 36 distinct values, where it
+    # had been exactly 0.0 with zero variance over 236 387 samples). So it is
+    # enabled as a SENSOR. What must stay true is that it never actuates: its own
+    # coil does not move it (-0.39 +-0.93 counts/V, 0.4 sigma), and its coherent
+    # fraction has not been re-measured since the recovery.
+    check("a5 is enabled as a sensor but still cannot actuate -- coherent 0.70, "
+          "yet its own coil moves it only 0.4 sigma, so the loop is NOT colocated",
+          ENABLE_CHANNEL[5] and not HYBRID_CHANNEL[5]
+          and HYBRID_COHERENT[5] == 0.70 and HYBRID_GAIN[5] == 0.0
+          and STEADY_GAIN[5] == 0.0 and CAPTURE_GAIN[5] == 0.0,
+          "enabled %s, hybrid %s, coherent %.2f but gain %.5f (masked), "
+          "steady %+.4f"
+          % (ENABLE_CHANNEL[5], HYBRID_CHANNEL[5], HYBRID_COHERENT[5],
+             HYBRID_GAIN[5], STEADY_GAIN[5]))
 
     # ---- dead pins, as measured on the rig ----------------------------------
     print()
@@ -2959,14 +4677,21 @@ def _selftest():
         rg = np.random.default_rng(31337)
         base_c = np.array([600.0, 620.0, 640.0, 660.0, 580.0, 0.0, 590.0, 570.0])
 
+        # THE QUIET PHASE MUST OUTLAST THE ARMING, and until 2026-08-20 it did
+        # not. CALIBRATION_S is 20 s and `Breaker.arm` is blind for a further
+        # ENVELOPE_WINDOW_S, so nothing before t = 22 s can latch; a ramp starting
+        # at 16 s put only 4 s of its 10 s growth in front of an armed breaker and
+        # tripped a 4.0 s sustain with ZERO margin -- the same zero margin
+        # CLAUDE.md 1 is about, in the fixture rather than on the rig. The ramp now
+        # starts at 26 s, which leaves 10 s of growth against a 5.0 s sustain.
         def fn(t):
             c = base_c.copy()
-            if t < 16.0:
+            if t < 26.0:
                 amp = 3.0                                     # quiet: calibrates
-            elif t < 26.0:
-                amp = 3.0 * np.exp(0.55 * (t - 16.0))         # grows: trips
+            elif t < 36.0:
+                amp = 3.0 * np.exp(0.55 * (t - 26.0))         # grows: trips
             else:
-                amp = (720.0 * np.exp(-0.7 * (t - 26.0)) if decay else 720.0)
+                amp = (720.0 * np.exp(-0.7 * (t - 36.0)) if decay else 720.0)
             c[:5] += amp * np.sin(2.0 * np.pi * F_MODE_HZ[1] * t) + 1.0 * rg.normal(size=5)
             c[6] += 1.0 * rg.normal()
             c[7] += 1.0 * rg.normal()
@@ -3030,10 +4755,17 @@ def _selftest():
           "%.0fs + %.0fs against the SHORTER of the two faults measured on "
           "2026-08-18 (94.5s and 118.7s, both under the old 120s ceiling)"
           % (FAULT_CLEAR_MAX_HOLD_S, FAULT_CLEAR_SUSTAIN_S))
-    check("a DISABLED railed pin cannot veto the clear -- ch5 sat at 0.0 counts and "
-          "held FAULT for 1085 s",
-          bool(cd.rail[5]) and not ENABLE_CHANNEL[5] and cleared_d is not None,
-          "ch5 railed %s, enabled %s" % (bool(cd.rail[5]), ENABLE_CHANNEL[5]))
+    # ch5 sat at 0.0 counts and held FAULT for 1085 s. That used to be prevented
+    # by ENABLE_CHANNEL[5] = False, which is no longer available -- a5 came back
+    # on 2026-08-20 and is enabled. The protection now has to come from `dead-pin`
+    # demoting it on VARIANCE, which is the general fix and does not depend on
+    # anyone having disabled the right channel in advance.
+    check("A RAILED, MOTIONLESS PIN CANNOT VETO THE CLEAR -- on variance now, "
+          "not on ENABLE_CHANNEL, because a5 is enabled again",
+          bool(cd.rail[5]) and ENABLE_CHANNEL[5] and cleared_d is not None,
+          "ch5 railed %s, enabled %s, cleared %s"
+          % (bool(cd.rail[5]), ENABLE_CHANNEL[5],
+             "never" if cleared_d is None else "%.1fs" % cleared_d))
 
     # ---- THE ACCEPTANCE TEST: one hand kick must not end a run --------------
     print()
@@ -3045,14 +4777,20 @@ def _selftest():
     def kick_run(quiet_ratio, peak_ratio, decay, seconds=90.0, wire_hz=400.0,
                  t_kick=30.0):
         rg = np.random.default_rng(4711)
-        base_c = np.array([600.0, 620.0, 640.0, 660.0, 580.0, 0.0, 590.0, 570.0])
+        # Mid-scale, because the modal excursion is 40x: off-centre resting points
+        # would rail at the peak and the rail interlock, not the breaker, would
+        # answer. a5 stays at ground -- it is a dead pin and must stay demoted.
+        base_c = np.array([511.5] * 5 + [0.0] + [511.5] * 2)
         c, dt = Controller(_NoDac()), 1.0 / wire_hz
         # The EXCURSION is what the breaker sees, and it is the measured quantity:
         # 0.117 -> 4.73 is 40.4x under the modal law, 1.240 -> 4.73 is 3.8x under
         # the diagonal. Stepping the amplitude at engage instead would model the
         # loop changing the motion instantly, which it does not, and the step
         # itself reads as sustained growth.
-        a_cal, states, ex = 20.0, set(), peak_ratio / quiet_ratio
+        # Beat DERIVED, not typed: F_MODE_HZ moved twice on 2026-08-20 and a
+        # hand-copied 0.26999 would have gone on rippling at the old spacing.
+        beat = float(F_MODE_HZ[1] - F_MODE_HZ[0])
+        a_cal, states, ex = 10.0, set(), peak_ratio / quiet_ratio
         for k in range(int(seconds * wire_hz)):
             t = k * dt
             if t < t_kick:
@@ -3060,22 +4798,27 @@ def _selftest():
             else:
                 # Ring up over ONE PERIOD of the dominant mode -- what an impulse
                 # does to a resonator -- then decay at the measured re-quiet rate,
-                # with the beat ripple three modes produce
-                # (0.99193 - 0.72194 = 0.26999 Hz).
+                # with the beat ripple three modes produce.
                 s, rise = t - t_kick, 1.0 / F_MODE_HZ[1]
                 env = (min(1.0, s / rise) if s < rise
                        else np.exp(-decay * (s - rise)))
                 amp = a_cal * (1.0 + (ex - 1.0) * env)
-                amp *= 1.0 + 0.10 * np.sin(2 * np.pi * 0.26999 * s)
+                amp *= 1.0 + 0.10 * np.sin(2 * np.pi * beat * s)
             cts, band = base_c.copy(), amp * np.sin(2.0 * np.pi * F_MODE_HZ[1] * t)
             cts[:4] += band + 1.0 * rg.normal(size=4)
-            # The orthogonal axes see only their MEASURED coherent fraction of the
-            # band (a4 0.46, a6 0.26, a7 0.50), on top of their own broadband
-            # motion. Giving them the whole kick is what a4 does not do, and a
-            # synthetic that does it trips the breaker on a channel the rig would
-            # not have tripped.
+            # The kick goes to the sensors that CARRY the modes, which is where
+            # both measured trips happened (ch0/ch2 modal, ch3 diagonal). The
+            # orthogonal axes carry their own broadband motion so they survive the
+            # floor and are driven, but no in-band content -- this check is about
+            # the breaker, not about them.
+            # A RISK THIS EXPOSES AND DOES NOT COVER: with in-band content added to
+            # a4/a6/a7 as well, ch6 trips the breaker about 1 s after the kick, and
+            # its latch starts BEFORE the kick -- its `bp` is still converging
+            # because KALMAN_K's row 6 is fitted to a6's own (tiny) measured noise.
+            # Keeping those channels healthy is new, so nothing on the bench has
+            # ever exercised it. Watch for a ch4/ch6/ch7 runaway on the next run.
             for j in (4, 6, 7):
-                cts[j] += HYBRID_COHERENT[j] * band + 5.0 * rg.normal()
+                cts[j] += 5.0 * rg.normal()
             c.step(np.clip(cts, 0, ADC_MAX_COUNTS),
                    np.clip(cts, 0, ADC_MAX_COUNTS) * (A_VCC / ADC_MAX_COUNTS), t, dt)
             if t > t_kick:
@@ -3215,8 +4958,9 @@ def _selftest():
     # median") and their |gain| was exactly 0.0000 for 100 % of every DAMPING
     # sample, so the hybrid law has never once run. Their axes are orthogonal to
     # the three damped modes, so a small in-band amplitude is what they are
-    # SUPPOSED to have; their bias-corrected coherence with the optic is
-    # 0.46 / 0.26 / 0.50.
+    # SUPPOSED to have; their bias-corrected coherence with the optic, re-measured
+    # 2026-08-20, is 0.09 / 0.70 / 0.12 / 0.05 for a4/a5/a6/a7 -- it was
+    # 0.46 / 0.26 / 0.50 for a4/a6/a7 before the coils were re-seated.
     check("the exemption is derived from Phi, not listed by hand",
           list(np.nonzero(INBAND_EXEMPT)[0]) == [4, 5, 6, 7]
           and not INBAND_EXEMPT[:4].any(),
@@ -3260,7 +5004,7 @@ def _selftest():
           "raw std %.2f/%.2f/%.2f counts, under the %.2f-count dead-pin line"
           % (dead_c.health.rail_std[4], dead_c.health.rail_std[6],
              dead_c.health.rail_std[7], DEAD_PIN_STD_COUNTS))
-    dith_c = floor_run(2.0)       # dither only: over the pin line, far under a0-a3
+    dith_c = floor_run(1.5)       # dither only: over the pin line, far under a0-a3
     check("...and so is one that returns only DITHER -- an absolute line misses it",
           dith_c.floor_bad[4] and dith_c.floor_bad[6] and dith_c.floor_bad[7],
           "raw std %.2f counts, over the %.2f-count pin line but under %.0f%% of "
@@ -3289,6 +5033,23 @@ def _selftest():
           "of it; floor %.4f V"
           % (BUDGET_V, 100 * BUDGET_V / BIAS_SWING, BIAS_SWING, MODAL_DEMAND_CAP_V,
              100 * MODAL_DEMAND_CAP_V / BUDGET_V, BUDGET_MOTION_FLOOR_V))
+    # AND WHAT THE DECLARATION DOES NOT REACH. `cap_scale` is called with
+    # `mask = modal_cols`, inside `if self.modal_on and self.modal_cols.any()`, so
+    # BUDGET_V binds the total on the modal coils and on a burst's own coil and
+    # NOTHING ELSE. The per-channel term, and every coil on a run where the modal
+    # law is refused, are bounded by `pid.drive` at BIAS_SWING instead. That is
+    # eta's behaviour inherited unchanged -- closing it would diverge the two laws
+    # on the diagonal path, which is the one property this rung may not spend --
+    # but the file's own law block claimed "on every coil" until 2026-08-20 and it
+    # was not true. Pinned here so the size of the gap is a number.
+    check("...and the gap it does NOT reach is BIAS_SWING, %.0f %% wider"
+          % (100.0 * (BIAS_SWING / BUDGET_V - 1.0)),
+          BIAS_SWING > BUDGET_V and MODAL_TOTAL_HEADROOM < 1.0,
+          "the modal path is solved at %.4f V; the per-channel term and a "
+          "modal-refused run are clipped at %.4f V, so a DIAGONAL run declares "
+          "this budget and does not enforce it -- `budget.spend` reports the peak "
+          "and the steps at or past it rather than hiding the difference"
+          % (BUDGET_V, BIAS_SWING))
     check("the capture/steady schedule is INERT -- one live allocator, not two",
           SCHEDULE_INERT and bool(np.array_equal(STEADY_GAIN, CAPTURE_GAIN)),
           "endpoints equal, so steady + frac*(capture - steady) cannot move")
@@ -3349,6 +5110,38 @@ def _selftest():
           bounds[0] >= lo - 1e-12 and bounds[1] <= hi + 1e-12 and lo > 0.0,
           "w in [%.3f, %.3f] against the derived [%.2f, %.2f] at tilt 1"
           % (bounds[0], bounds[1], lo, hi))
+    # THE CAP AND THE FLOOR ARE ONE ARITHMETIC FACT, AND IT WAS WRITTEN DOWN
+    # WRONG. BUDGET_TILT_HARD_CAP's comment said "past this a claimant's weight
+    # could go negative", which is the arithmetic at a share floor of ZERO: the
+    # lowest weight is 1 - tilt x (1 - floor), so it reaches 0 at
+    # tilt = 1/(1 - floor) = 1.333 at today's 0.25 floor, not at 1.0. The cap is
+    # full need-proportional division and sits 1.33x inside the sign-flip bound.
+    # Asserted here rather than argued in a comment, because the margin is DERIVED
+    # FROM THE FLOOR and lowering BUDGET_SHARE_FLOOR silently eats it -- the same
+    # hand-copied-derived-constant defect that put the wrong mode frequencies and
+    # the wrong coherence numbers into this file's comments.
+    zero_at = 1.0 / (1.0 - BUDGET_SHARE_FLOOR)
+    check("the tilt cap is inside the sign-flip bound the share floor sets",
+          BUDGET_TILT_HARD_CAP <= zero_at and lo > 0.0 and BUDGET_SHARE_FLOOR > 0.0,
+          "cap %.2f against 1/(1 - %.2f) = %.3f, so the lowest reachable weight is "
+          "%.3f and never 0; a wrong-signed term PUMPS, so the bound is not the "
+          "thing to approach"
+          % (BUDGET_TILT_HARD_CAP, BUDGET_SHARE_FLOOR, zero_at, lo))
+    tilt_took = []
+    for tilt_spec in ("-0.1", "%.3f" % (BUDGET_TILT_HARD_CAP + 0.001), "2.0"):
+        try:
+            _parse_budget_tilt(tilt_spec)
+            tilt_took.append(tilt_spec)
+        except ValueError:
+            pass
+    check("...and OSEM_BUDGET_TILT REFUSES anything outside [0, %.2f]"
+          % BUDGET_TILT_HARD_CAP,
+          not tilt_took and _parse_budget_tilt("") is None
+          and _parse_budget_tilt("0") == 0.0
+          and _parse_budget_tilt("%.2f" % BUDGET_TILT_HARD_CAP)
+          == BUDGET_TILT_HARD_CAP,
+          "accepted %s -- attended only, and the refusal quotes the floor the cap "
+          "is derived against" % (tilt_took,))
 
     # The ramp is SLOW, and the bound is on the weight itself rather than on the
     # filter alone -- the filter sets the shape, the slew cap sets the worst case.
@@ -3401,6 +5194,28 @@ def _selftest():
           "claiming the whole pot leaves it at w %.3f and the surplus went back to "
           "the modes (%s)" % (ad.w[BUDGET_CLAIMS - 1],
                               " ".join("%.3f" % x for x in ad.w[:BUDGET_CLAIMS - 1])))
+
+    # ...AND ITS NEED IS NO LONGER ZERO BY CONSTRUCTION. This file's docstring said
+    # "its need is therefore 0 today whatever the room is doing", on the strength
+    # of both 2026-08-18 runs demoting ch4/ch6/ch7 at engage: |gain| exactly 0.0000
+    # for 100 % of DAMPING samples, because `inband-floor` graded them at the three
+    # HORIZONTAL mode frequencies while a4 senses X and a6/a7 sense Y. That is
+    # fixed -- INBAND_EXEMPT takes exactly the rows Phi does not span out of the
+    # band test -- so the claimant is live and the sentence is withdrawn. Asserted
+    # here because a claim about the allocator's own INPUT is the kind that goes
+    # stale silently.
+    hyb_arm_ch = (np.array(ENABLE_CHANNEL, bool) & np.array(HYBRID_CHANNEL, bool)
+                  & (HYBRID_GAIN != 0.0) & (STEADY_GAIN == 0.0)
+                  & (CAPTURE_GAIN == 0.0))
+    check("the per-channel claimant is REACHABLE: its channels escape the band test",
+          bool(hyb_arm_ch.any()) and bool(INBAND_EXEMPT[hyb_arm_ch].all())
+          and list(np.nonzero(hyb_arm_ch)[0]) == [4, 6, 7]
+          and float(np.abs(HYBRID_GAIN[hyb_arm_ch]).min()) > 0.0,
+          "ch%s arm at |gain| %s, all exempt from `inband-floor` and graded on "
+          "their own count motion against DEAD_PIN_STD_COUNTS = %.2f instead"
+          % (np.nonzero(hyb_arm_ch)[0].tolist(),
+             np.round(np.abs(HYBRID_GAIN[hyb_arm_ch]), 5).tolist(),
+             DEAD_PIN_STD_COUNTS))
 
     # ---- and the part that makes the statistic safe -------------------------
     # `ratio` is amplitude over a ZERO-GAIN baseline, so it reads the loop's own
@@ -3456,6 +5271,182 @@ def _selftest():
           "two allocators on two references would fight, and the older one is "
           "anchored to `ratio`")
 
+    # ---- the commanded self-kick, ported from osem.eta.py ------------------
+    # WHAT THESE ARE FOR. osem.eta.py ships SelfKick with no checks of its own, and
+    # the property this rung must not lose is the NO-OP: unarmed it is exactly
+    # nothing, the same way BUDGET_TILT = 0.0 is -- which is what lets the twin
+    # below report max |du| 0.000e+00 V against eta.
+    check("OSEM_SELF_KICK unset -> no SelfKick at all",
+          _parse_self_kick("") is None
+          and _parse_self_kick("3") == dict(n_kicks=3, mode=SELF_KICK_MODE,
+                                            cycles=SELF_KICK_CYCLES,
+                                            amp_v=SELF_KICK_AMP_V)
+          and _parse_self_kick("3:2:10:0.05") == dict(n_kicks=3, mode=2, cycles=10,
+                                                      amp_v=0.05),
+          "n[:mode:cycles:amp_v]; the default is %d cycles of %.4f V on mode %s"
+          % (SELF_KICK_CYCLES, SELF_KICK_AMP_V, "ABC"[SELF_KICK_MODE]))
+
+    sk_took = []
+    for sk_spec in ("0", "21", "3:9:6:0.028", "3:0:0:0.028", "3:0:6:0.500",
+                    "3:0:6:0.0", "3:0:6", "3:0"):
+        try:
+            _parse_self_kick(sk_spec)
+            sk_took.append(sk_spec)
+        except ValueError:
+            pass
+    check("...and a spec outside its measured limits is REFUSED", not sk_took,
+          "accepted %s -- the amplitude cap is SELF_KICK_AMP_CAP_V = %.2f V, "
+          "status.py's AMP_MAX" % (sk_took, SELF_KICK_AMP_CAP_V))
+
+    sk_ctl = Controller(_NoDac(), self_kick=False)
+    sk_idx = [i for i, (nm_, _f) in enumerate(CSV_COLS)
+              if nm_ in ("kick", "kick_n", "kick_ch", "kick_v")]
+    sk_row = sk_ctl.csv_row(0.0, np.full(N, MID_COUNTS))
+    sk_cells = [sk_row[i] for i in sk_idx]
+    check("an UNARMED self-kick is EXACTLY a no-op",
+          sk_ctl.kick is None and float(np.abs(sk_ctl.kick_v).max()) == 0.0
+          and len(sk_idx) == 4 and sk_cells == ["0", "0", "-1", 0.0],
+          "kick columns %s, and every line of the feature is behind `is not None`"
+          % (sk_cells,))
+
+    sk = SelfKick(1)
+    sk.phase, sk.t0 = "burst", 0.0
+    sk_u0 = sk.command(0.0).copy()
+    sk_um = sk.command(0.25 / sk.f).copy()
+    sk_u1 = sk.command(sk.burst_s).copy()
+    sk.phase = "waiting"
+    sk_uw = sk.command(0.5 / sk.f).copy()
+    check("the burst is WHOLE cycles on ONE coil, 0 V at both edges",
+          float(np.abs(sk_u0).max()) == 0.0 and float(np.abs(sk_u1).max()) < 1e-12
+          and abs(float(sk_um[sk.coil]) - sk.amp) < 1e-12
+          and int((np.abs(sk_um) > 0.0).sum()) == 1
+          and float(np.abs(sk_uw).max()) == 0.0,
+          "%d cycles of %.5f Hz = %.2fs, %.4f V peak on coil %d; no step at either "
+          "edge, only 2 pi f amp = %.2f V/s against MAX_SLEW_PER_S = %.1f V/s"
+          % (sk.cycles, sk.f, sk.burst_s, sk.amp, sk.coil,
+             2.0 * np.pi * sk.f * sk.amp, MAX_SLEW_PER_S))
+
+    sk_vote = np.zeros(N, bool)
+    sk_vote[:4] = True
+    sk_q = np.full(N, 0.10)
+    sk_lo = np.full(N, 0.05)                       # 0.5x quiet: under the 1.4 line
+    sk_hi = np.full(N, 0.30)                       # 3.0x quiet: over it
+    sk_loud = SelfKick(1)
+    for k in range(0, 3001):
+        sk_loud.update(k * 0.01, sk_hi, sk_q, sk_vote, True)
+    check("the fire gate holds shut while the loop is NOT quiet",
+          sk_loud.fired == 0 and sk_loud.phase == "waiting",
+          "30s at %.1fx the loop's own quiet level against the %.2fx line -- "
+          "%d burst(s)" % (sk_hi[0] / sk_q[0], SELF_KICK_QUIET_MULTIPLE,
+                           sk_loud.fired))
+
+    sk_run = SelfKick(2)
+    sk_fired_at, sk_codes = None, set()
+    for k in range(0, 4001):
+        tt = k * 0.01
+        sk_run.update(tt, sk_lo, sk_q, sk_vote, True)
+        sk_codes.add(sk_run.code)
+        if sk_fired_at is None and sk_run.fired:
+            sk_fired_at = tt
+    check("...and opens only after %.0fs of held quiet" % SELF_KICK_QUIET_SUSTAIN_S,
+          sk_fired_at is not None
+          and SELF_KICK_QUIET_SUSTAIN_S <= sk_fired_at < SELF_KICK_QUIET_SUSTAIN_S + 0.05,
+          "first burst at t=%s against SELF_KICK_QUIET_SUSTAIN_S = %.1fs, which is "
+          "FAULT_CLEAR_SUSTAIN_S -- no new threshold"
+          % ("never" if sk_fired_at is None else "%.2fs" % sk_fired_at,
+             SELF_KICK_QUIET_SUSTAIN_S))
+    check("...and the suppressed window CLOSES on its own, both bursts",
+          sk_codes == {0, 1, 2} and len(sk_run.history) == 2
+          and sk_run.phase == "done" and not sk_run.suppressed,
+          "%d burst(s) fired and re-armed, phase %r, stopped because: %s"
+          % (len(sk_run.history), sk_run.phase, sk_run.stopped))
+
+    sk_fa = SelfKick(3)
+    sk_fa.phase, sk_fa.t0, sk_fa.fired = "burst", 0.0, 1
+    sk_fa_msg = sk_fa.abort(1.0, "ch0 railed")
+    sk_wa = SelfKick(3)
+    sk_wa.quiet_since = 0.0
+    sk_wa_msg = sk_wa.abort(1.0, "ch0 railed")
+    check("a FAULT with a burst in flight STOPS the schedule",
+          sk_fa.phase == "done" and sk_fa_msg is not None
+          and sk_wa.phase == "waiting" and sk_wa_msg is None
+          and sk_wa.quiet_since is None,
+          "in flight -> done; merely waiting -> re-gated, not stopped")
+
+    # THE SUPPRESSION STILL REACHES THE TRIP UNDER THE 2026-08-20 BREAKER. That
+    # breaker moved `~receded` out of the latch and into `run_trip` as a veto, so
+    # `judge` now has to gate two separate expressions instead of one. Asserted
+    # against stdlib.Breaker itself rather than argued from the source.
+    def sk_brk(judged):
+        b = sl.Breaker(N, ENVELOPE_WINDOW_S, RUNAWAY_MULTIPLE, RUNAWAY_SUSTAIN_S,
+                       RUNAWAY_TREND_LAG_S, RUNAWAY_GROWTH_FRAC, SAT_DECAY_FRAC,
+                       MIN_HEALTHY_CHANNELS)
+        b.arm(0.0)
+        hh, dd = np.ones(N, bool), sk_vote.copy()
+        base, sat = np.full(N, 0.01), np.zeros(N, bool)
+        trip, latched = None, False
+        for k in range(1, 3001):
+            tt = k * 0.01
+            x = np.full(N, 0.02 * float(np.exp(0.30 * tt)))
+            g = b.sample(tt, x, hh, dd, base, sat,
+                         judge=dd if judged else np.zeros(N, bool))
+            latched = latched or bool(np.isfinite(b.excess_since[dd]).any())
+            if trip is None and bool(g["run_trip"].any()):
+                trip = tt
+        return trip, latched
+    sk_t_on, sk_l_on = sk_brk(True)
+    sk_t_off, sk_l_off = sk_brk(False)
+    check("an EMPTY `judge` makes the runaway trip unreachable",
+          sk_t_on is not None and sk_l_on
+          and sk_t_off is None and not sk_l_off,
+          "30s of monotone growth: judged trips at t=%s, suppressed trips %s and "
+          "the latch never leaves inf -- so the re-arm costs a fresh "
+          "RUNAWAY_SUSTAIN_S = %.1fs"
+          % ("never" if sk_t_on is None else "%.2fs" % sk_t_on,
+             "never" if sk_t_off is None else "at %.2fs" % sk_t_off,
+             RUNAWAY_SUSTAIN_S))
+
+    # THE BURST IS INSIDE THE DECLARED BUDGET, NOT ADDED AFTER IT, and CLAUDE.md 2
+    # is the precedent this reproduces on purpose: the D term was added after the
+    # cap and took coil 3 to 0.4229 V against a 0.250 V half-window -- 169 % --
+    # while the allocation stayed inside its own 0.20 V cap for the whole run.
+    # SIZED AS FRACTIONS OF THE BUDGET, not as absolute volts. These were 0.10 /
+    # 0.05 / 0.12 V, chosen against a BUDGET_V of 0.225; when BIAS_SWING was tried
+    # at 0.75 on 2026-08-20 the budget became 0.675 V, the same three numbers
+    # summed to 40 % of it, and the test asserted nothing -- it passed vacuously in
+    # one direction and failed in the other. The swing has since been at 0.75, 0.50
+    # and back at 0.25, and this test does not care, which is the point: the
+    # PROPERTY under test is scale free, so the demands are too.
+    sk_m = np.array([0.444 * BUDGET_V, 0.0, 0.0, 0.0])
+    sk_id = np.array([0.222 * BUDGET_V, 0.0, 0.0, 0.0])
+    sk_kv = np.array([0.533 * BUDGET_V, 0.0, 0.0, 0.0])
+    sk_msk = np.array([True, False, False, False])
+    sk_after = sl.cap_scale(sk_m, sk_id, BUDGET_V, sk_msk)
+    sk_in = sl.cap_scale(sk_m, sk_id + sk_kv, BUDGET_V, sk_msk)
+    sk_tot_after = float(np.abs(sk_after * sk_m + sk_id + sk_kv)[0])
+    sk_tot_in = float(np.abs(sk_in * sk_m + sk_id + sk_kv)[0])
+    check("a burst counted as FIXED demand keeps the total inside the budget",
+          sk_tot_after > BUDGET_V + 1e-9 and sk_tot_in <= BUDGET_V + 1e-9,
+          "modal %.3f + I/D %.3f + burst %.3f V: solved WITHOUT the burst the total "
+          "is %.4f V (%.0f %% of the %.4f V budget), solved WITH it %.4f V"
+          % (sk_m[0], sk_id[0], sk_kv[0], sk_tot_after,
+             100.0 * sk_tot_after / BUDGET_V, BUDGET_V, sk_tot_in))
+
+    sk_b = BudgetAllocator(BUDGET_CLAIMS, BUDGET_TILT, BUDGET_TAU_S,
+                           BUDGET_SHARE_FLOOR, BUDGET_W_DIAG_MAX,
+                           BUDGET_W_SLEW_PER_S, BUDGET_MOTION_FLOOR_V)
+    sk_need = np.full(BUDGET_CLAIMS, 1e-6)
+    sk_need[SELF_KICK_MODE] = 1.0e3                # the burst's own mode, 1e9x
+    for k in range(4000):
+        sk_b.update(0.01, sk_need, 0.5, usable=True)
+    check("...and a burst-shaped `need` still leaves every weight EXACTLY 1.0",
+          bool(np.all(sk_b.w == 1.0)) and bool(np.all(sk_b.wmax == 1.0))
+          and bool(np.all(sk_b.wmin == 1.0)),
+          "40s of need spiked 1e9x on mode %s at BUDGET_TILT = %.2f: w = %s. The "
+          "burst FEEDS the allocator like any other transient -- unobservable at "
+          "the shipped tilt, recorded for the first armed run"
+          % ("ABC"[SELF_KICK_MODE], BUDGET_TILT, sk_b.w.tolist()))
+
     # ---- equivalence: against osem.eta.py itself, on one sensor history -----
     def _load_law(fname):
         import importlib.util
@@ -3476,8 +5467,9 @@ def _selftest():
     with open(twin, "w") as fh:
         json.dump(geodoc(PHI_GEOM.tolist()), fh)
 
-    def twin_stream(seconds=75.0, wire_hz=400.0):
-        """a0-a3 driven at all three modes in their geometric shapes, plus a rail.
+    def twin_stream(seconds=95.0, wire_hz=400.0):
+        """a0-a3 at all three modes in their geometric shapes, plus a rail AND a
+        RUNAWAY.
 
         The rail is deliberate and it is what makes this worth running: it faults
         the rig during CALIBRATING, so the twin walks CALIBRATING -> FAULT ->
@@ -3487,18 +5479,94 @@ def _selftest():
         of eta being changed. It is railed AND MOVING -- std ~2.1 counts against
         the 1.30-count dead-pin line -- so it is a whole-rig fault and not a
         demotion.
+
+        A RAIL WAS NOT ENOUGH, AND THAT IS MEASURED RATHER THAN ARGUED. With the
+        rail as the only route into FAULT this comparison reported max |du| 0.0 V
+        over 30000 samples while the two laws' breakers DISAGREED about who may
+        vote on a runaway -- eta masks the vote to PHI_GEOM_ROWS and this file did
+        not -- because the runaway path was simply never reached. So the stream now
+        also grows the in-band drive until the breaker trips.
+
+        THE RAMP IS ON ONE MODE, NOT ALL THREE, and that is the whole trick.
+        Ramping all three together fails: the 2.0 s envelope (ENVELOPE_WINDOW_S) of
+        a three-mode sum is beat-modulated at F_MODE_HZ[1] - F_MODE_HZ[0], which is
+        0.99231 - 0.71519 = 0.27712 Hz today and was 0.26999 Hz when the swing below
+        was measured (the frequencies were re-measured on 2026-08-20, so read the
+        difference as "about a quarter Hz" rather than as either literal), and it
+        swings 0.0478-0.0831 V on ch0 at nominal -- a factor 1.74 -- so the envelope
+        recedes more than SAT_DECAY_FRAC = 0.98 from its own peak once per beat.
+        Measured on this stream with all three ramped at 0.30 /s: longest continuous
+        latch 2.4 s against a RUNAWAY_SUSTAIN_S that was 4.0 s then and is 5.0 s
+        now, and nothing tripped in 33 s
+        of ramp. NOTE, 2026-08-20: that measurement was taken while a recession
+        CLEARED the latch. It no longer does -- it vetoes the trip and nothing more
+        (stdlib.Breaker) -- so a three-mode ramp is no longer certain to be missed,
+        and this stream stays on one mode because a MONOTONE envelope is what makes
+        the trip time reproducible, not because the other shape cannot be caught.
+        Ramping ONE tone makes the beat cross-term
+        grow as g while that tone's own power grows as g^2, so the modulation falls
+        as 1/g and the envelope becomes monotone. Mode B (Z, 0.99231 Hz) is the one
+        ramped: it is 1.98 cycles inside the 2.0 s window, the smoothest of the
+        three, and its Phi column is [+1,+1,+1,+1] so all four Phi rows grow
+        together. THE Z COLUMN IS STILL COLUMN 1 AFTER THE 2026-08-20 Phi SWAP --
+        that swap exchanged the two TILT columns, 0 and 2, and left Z alone -- so
+        RUN_MODE = 1 still means Z and still grows all four rows in step.
+
+          * RUN_RATE 0.22 /s. Over one ENVELOPE_WINDOW_S the envelope gains
+            e^0.44 = 1.55, far over RUNAWAY_GROWTH_FRAC = 1.02, and over the 1.80 s
+            falling half of the 0.27712 Hz beat it gains 1.49 against a residual
+            modulation that is already under that by g ~ 3.
+          * RUN_GAIN_MAX 20.0. Mode B is 11 counts, so 20x is 220, plus the 14 and 8
+            of the two un-ramped modes: 242 counts on rests of 585.4-699.6. Measured
+            2026-08-20 over the whole stream, the counts on the seven live channels
+            stay inside 436.6-810.5 outside the deliberate rail, against
+            RAIL_LOW_COUNTS/RAIL_HIGH_COUNTS = 12/1011. The
+            RAIL interlock must not be what answers a test aimed at the breaker.
+          * Measured result, RE-MEASURED 2026-08-20 against the current
+            F_MODE_HZ, Phi, gains and RUNAWAY_SUSTAIN_S: DAMPING is entered at
+            33.10 s, `high & growing` first latches at 66.74 s and the amplitude
+            fault fires at 73.16 s. That is longer than one RUNAWAY_SUSTAIN_S after
+            the latch because a recession now VETOES the trip without clearing the
+            latch, so the sustain is re-served rather than restarted. It leaves
+            21.8 s of FAULT before the 95 s stream ends -- under
+            FAULT_CLEAR_MAX_HOLD_S = 30 s, so the loop does not re-engage into it
+            and the comparison ends in FAULT. The check below asserts that a fault
+            fired, not when.
+
+        a4 IS RAMPED FASTER, AND THAT IS WHAT MAKES THE VOTE MASK VISIBLE. It has no
+        Phi row, so under eta's mask it may not vote however loud it gets, while an
+        UNMASKED breaker would latch on it first. Measured 2026-08-20 on this
+        stream, by running it twice with PHI_GEOM_ROWS replaced by all-True: the
+        unmasked breaker latches at 66.38 s and trips at 71.38 s, 1.78 s before the
+        masked one at 73.16 s. Its 6 counts capped
+        at 20x is 120 counts on a 558.6 rest, i.e. 439-679, inside the rails.
+
+        RUN_T0 = 62 s is inside DAMPING for this stream (DAMPING is entered at
+        33.1 s), but nothing here proves that from the constants, so the check below
+        ASSERTS that an amplitude fault actually fired: a schedule change that
+        pushes the ramp out of DAMPING fails loudly instead of silently testing
+        nothing.
         """
         rg = np.random.default_rng(20260818)
         dt = 1.0 / wire_hz
         rest = np.array([680.3, 585.4, 636.2, 699.6, 558.6, 0.0, 591.3, 566.0])
+        RUN_T0, RUN_RATE, RUN_GAIN_MAX, RUN_MODE = 62.0, 0.22, 20.0, 1
+        RUN_RATE_X, RUN_GAIN_MAX_X = 0.45, 20.0
         for k in range(int(seconds * wire_hz)):
             t = k * dt
+            g = (min(RUN_GAIN_MAX, float(np.exp(RUN_RATE * (t - RUN_T0))))
+                 if t >= RUN_T0 else 1.0)
+            gx = (min(RUN_GAIN_MAX_X, float(np.exp(RUN_RATE_X * (t - RUN_T0))))
+                  if t >= RUN_T0 else 1.0)
             c = rest.copy()
             for m, fm in enumerate(F_MODE_HZ):
-                c[:4] += ((14.0 - 3.0 * m) * PHI_GEOM[:4, m]
+                c[:4] += ((g if m == RUN_MODE else 1.0)
+                          * (14.0 - 3.0 * m) * PHI_GEOM[:4, m]
                           * np.sin(2.0 * np.pi * fm * t + 0.4 * m))
+            # The noise is NOT ramped -- it is the sensor, not the plant.
             c[:4] += rg.normal(size=4)
-            c[4] += 6.0 * np.sin(2.0 * np.pi * F_MODE_HZ[0] * t + 1.3) + rg.normal()
+            c[4] += (gx * 6.0 * np.sin(2.0 * np.pi * F_MODE_HZ[0] * t + 1.3)
+                     + rg.normal())
             c[6] += rg.normal()
             c[7] += rg.normal()
             if 5.0 <= t < 8.0:
@@ -3512,24 +5580,42 @@ def _selftest():
         ct = Controller(_NoDac(), modal_path=twin)
         ce = ref_mod.Controller(_NoDac(), modal_path=twin)
         dv, nstep, nmodal, states = 0.0, 0, 0, set()
-        lockstep = True
+        lockstep, amp_t, amp_t_e = True, None, None
         for c, v, tt, dd in twin_stream():
             ct.step(c, v, tt, dd)
             ce.step(c, v, tt, dd)
             ct.drain_events()
             ce.drain_events()
             dv = max(dv, float(np.abs(ct.out - ce.out).max()))
+            # `fault_amp` is in the lockstep test on purpose: it is the one bit
+            # that says the RUNAWAY BREAKER, rather than the rail interlock, is
+            # what put the rig in FAULT. Two laws can agree on the state and still
+            # have got there by different routes.
             lockstep = lockstep and (ct.state == ce.state
                                      and ct.modal_on == ce.modal_on
-                                     and ct.stepped == ce.stepped)
+                                     and ct.stepped == ce.stepped
+                                     and ct.fault_amp == ce.fault_amp)
+            if amp_t is None and ct.fault_amp:
+                amp_t = tt
+            if amp_t_e is None and ce.fault_amp:
+                amp_t_e = tt
             nstep += 1
             nmodal += int(ct.modal_on)
             states.add(ct.state)
-        check("the twin exercised the modal law AND a fault -- else it proves nothing",
+        check("the twin exercised the modal law, a RAIL fault AND a RUNAWAY trip",
               nmodal > 0 and states >= {"CALIBRATING", "DAMPING", "FAULT"}
-              and ct.modal.ok,
-              "%d of %d samples with the modal law engaged, states %s"
-              % (nmodal, nstep, sorted(states)))
+              and ct.modal.ok and amp_t is not None,
+              "%d of %d samples with the modal law engaged, states %s, amplitude "
+              "trip at t=%s"
+              % (nmodal, nstep, sorted(states),
+                 "NEVER -- the ramp never reached the breaker, so nothing here "
+                 "tests the runaway path" if amp_t is None else "%.2fs" % amp_t))
+        check("...and both laws' breakers tripped at the SAME sample",
+              amp_t is not None and amp_t == amp_t_e,
+              "theta t=%s, %s t=%s -- a vote mask, a reference floor or a "
+              "threshold that differs moves this"
+              % ("never" if amp_t is None else "%.3fs" % amp_t, LAW_SOURCE,
+                 "never" if amp_t_e is None else "%.3fs" % amp_t_e))
         check("theta and %s command IDENTICAL voltages on one sensor history"
               % LAW_SOURCE, dv == 0.0 and nmodal > 0,
               "max |du| %.3e V over %d samples on 8 channels" % (dv, nstep)
@@ -3558,10 +5644,24 @@ def _selftest():
         "  channel that total amplitude threw away, a frozen fault clears on decaying\n"
         "  motion and holds on persistent motion, and a channel with no vote can no\n"
         "  longer veto LOCKED.\n"
-        "  AND THE ACTUATOR BUDGET IS ONE DECLARED NUMBER, 0.225 V per coil about\n"
-        "  bias, divided among four claimants -- three modes and the per-channel\n"
+        "  AND THE PER-CHANNEL GAINS ARE NOT FLAT: they are scaled by the measured\n"
+        "  sensor gain h, which is fitted from a constraint a rigid plate cannot\n"
+        "  violate, and sym(A diag(g) Phi) is asserted POSITIVE DEFINITE in both the\n"
+        "  counts and the physical form -- so no mode is pumped, checked numerically\n"
+        "  rather than assumed from a colocation that does not hold here.\n"
+        # INTERPOLATED, NOT TYPED. Every number on the next four lines is derived
+        # from a constant above it, and typing them out is exactly the defect this
+        # session went looking for: the budget, the time constant and the
+        # per-period slew all moved on 2026-08-20 when BIAS_SWING and F_MODE_HZ
+        # did, and a hand-copied summary would have gone on printing the old ones.
+        f"  AND THE ACTUATOR BUDGET IS ONE DECLARED NUMBER, {BUDGET_V:.3f} V per "
+        f"coil about\n"
+        f"  bias, divided among {BUDGET_CLAIMS} claimants -- {NMODE} modes and the "
+        f"per-channel\n"
         "  block -- in proportion to each one's own DISSIPATION RATE, one-poled at\n"
-        "  20 s and slew-capped so a weight moves under 7 % of nominal in a period of\n"
+        f"  {BUDGET_TAU_S:.0f} s and slew-capped so a weight moves under "
+        f"{100.0 * BUDGET_W_SLEW_PER_S / float(F_MODE_HZ.min()):.0f} % of nominal "
+        f"in a period of\n"
         "  the slowest mode. Need is not `ratio`: `ratio` is referenced to a zero-gain\n"
         "  baseline and reads 13x apart for the same plate under the two laws, while a\n"
         "  dissipation rate is the power the ROOM injects and moves 1.2x over a 10x\n"
@@ -3616,6 +5716,10 @@ def main(argv=None):
         print(line)
     print()
 
+    for line in gain_report():
+        print(line)
+    print()
+
     pre = _modal(MODAL_PATH)
     for line in pre.report(MODAL_KP, MODAL_GAIN_SCALE):
         print(line)
@@ -3644,7 +5748,7 @@ def main(argv=None):
                  if outside else ""))
     print()
 
-    dac = sl.open_dac(PORT)
+    dac = sl.open_dac(PORT, binary=BINARY_TRANSPORT)
     sl.park(dac, DAC_CHANNELS, BIAS)
     if sys.stdin.isatty():
         input("DAC biases set. Press Enter to start fast-lock damping "
@@ -3672,6 +5776,15 @@ def main(argv=None):
     if KICK_CUE_S > 0:
         print(f"[kick-cue] speaking \"{KICK_CUE_PHRASE}\" every {KICK_CUE_S:.0f}s once "
               f"damping starts. Unset OSEM_KICK_CUE to silence it.\n")
+    if ctl.kick is not None:
+        for _line in ctl.kick.banner():
+            print(_line)
+        print("[self-kick] ATTENDED OR NOT, THIS DRIVES THE OPTIC ON PURPOSE. It "
+              "fires only from DAMPING and only\n"
+              "[self-kick] once the loop has held under its own quiet level; it "
+              "stops on any FAULT and on a\n"
+              "[self-kick] ringdown that does not come back. Unset OSEM_SELF_KICK "
+              "to disable.\n")
     if GAIN_RAMP:
         lv, dw = GAIN_RAMP
         print(f"[gain-ramp] {len(lv)} levels, |Kp| {lv[0]:.4f} -> {lv[-1]:.4f}, "
@@ -3681,7 +5794,7 @@ def main(argv=None):
               f"Ctrl+C.\n")
     try:
         while True:
-            sample = ctl.guard.read(dac.ser)
+            sample = ctl.guard.read(dac)
             if sample is None:
                 continue
             counts, volts = sample
@@ -3719,23 +5832,17 @@ def main(argv=None):
     finally:
         # PARK FIRST, AND LET NOTHING BEFORE IT FAIL. The order used to be
         # stop_stream -> park, and `stop_stream` raises on its 5 s deadline: one
-        # raise there skipped the park entirely and left every coil at whatever
-        # the loop last commanded. That is CLAUDE.md 15's outcome reached without
-        # a signal at all -- a plain Ctrl+C could do it. The coils were parked by
-        # hand three times on 2026-08-17/18. `stop_stream` does not merely raise on
-        # its deadline either: measured 2026-08-18, a controller survived 90 s of
-        # SIGINT delivered to both the process and its process group while blocked
-        # in it waiting for an ACK a busy board never sent, holding the port
-        # throughout.
-        # Parking needs the port OPEN, so it has to come before stop_stream and
-        # close: `Actuator.send` writes the same `SET` commands mid-stream on every
-        # control step of every run, so this is the proven path, not a new one.
-        # EACH STEP IN ITS OWN try/except, not one try around all of them -- a
-        # single wrapper has the identical defect, because the first raise still
-        # skips everything after it.
-        # The last-resort fallback, and it is NOT an excuse for a broken teardown:
-        # arduino.ino:363 zeroes all eight coils in setup(), and setup() runs when
-        # the port is opened, so whoever opens it next finds them at 0 V.
+        # raise there skipped the park entirely and left every coil at whatever the
+        # loop last commanded -- CLAUDE.md 15's outcome reached from a plain Ctrl+C.
+        # The coils were parked by hand three times on 2026-08-17/18. Measured
+        # 2026-08-18, `stop_stream` also survived 90 s of SIGINT to the process and
+        # its group while blocked waiting for an ACK a busy board never sent.
+        # Parking needs the port OPEN, so it comes before stop_stream and close;
+        # `Actuator.send` writes the same `SET` mid-stream every control step, so
+        # this is the proven path. EACH STEP IN ITS OWN try/except -- one wrapper
+        # round all of them has the identical defect. Last-resort fallback, and NOT
+        # an excuse for a broken teardown: arduino.ino zeroes all eight coils in
+        # setup(), which runs when the port is opened.
         print("Returning DAC outputs to bias voltages...")
         _step("park the coils", sl.park, dac, DAC_CHANNELS, BIAS)
         _step("flush the log", log.close)
@@ -3748,6 +5855,8 @@ def main(argv=None):
               f"wire {ctl.wire_hz:.0f} Hz.")
         if ctl.ramp is not None:
             print(ctl.ramp.summary())
+        if ctl.kick is not None:
+            print(ctl.kick.summary())
         print(ctl.budget.summary())
         if ctl.mkf is not None:
             print("\n" + "=" * 68)

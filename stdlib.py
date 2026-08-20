@@ -7,7 +7,12 @@ Contract (stable; other agents read it):
     filters     OnePole  SlidingRMS  RMSBank  InBand
     estimators  KalmanVelocity  ModalKalman  Chi2Log
     modal       Modal          (geometric or measured Phi, A, validate, sense,
-                                project, allocate)
+                                project, allocate, box_args)
+    allocation  cap_scale      one scalar on the whole modal vector: conservative,
+                               proven, and what every rung ships today
+                cap_box        the same total cap solved per coil as a box QP.
+                               NOT wired to anything -- a caller must ask for it
+                               and pass `Modal.box_args`'s metric
     interlocks  Health  Breaker
     law         PID
     floor       Baseline  fingerprint  same  baseline_payload
@@ -68,11 +73,20 @@ class Actuator:
 
 
 class SampleGuard:
-    """One ASCII row off the wire, range-checked.
+    """One row off the wire, range-checked. ASCII or binary.
 
-    The ASCII path does not range-check: v11's 240 s log carried ten rows with
-    counts outside 0..1023 (5659, 65690, 522676) and one is worth ~1500 V/s of
-    velocity into a loop whose whole scale is under 1 V/s.
+    THE RANGE CHECK IS THE POINT: the wire itself does not check. v11's 240 s log
+    carried ten rows with counts outside 0..1023 (5659, 65690, 522676), and one is
+    worth ~1500 V/s of velocity into a loop whose whole scale is under 1 V/s.
+
+    THE BINARY PATH WAS MISSING UNTIL 2026-08-20, AND THAT WAS A REAL BUG.
+    `FastDAC` has framed binary since 2026-08-06, but this class took a raw
+    `serial.Serial` and called `readline().decode("utf-8")`, so a binary transport
+    left the controller decoding frames as text: `read` returned None forever, the
+    CSV got a header and no rows, and the run printed nothing -- the fourth
+    header-only recording in this repo's history. The fix is DELEGATION, not a
+    second decoder: `read` takes the DAC and hands binary frames to
+    `FastDAC.read_sample`, so the transport cannot disagree with the reader again.
     """
 
     def __init__(self, n, vcc, max_counts):
@@ -83,8 +97,26 @@ class SampleGuard:
     def in_range(self, counts):
         return bool(np.all((counts >= 0) & (counts <= self.max)))
 
-    def read(self, ser):
-        """(counts, volts) or None. None is normal: acks, partial lines, junk."""
+    def read(self, dac):
+        """(counts, volts) or None. None is normal: acks, partial rows, junk.
+
+        Accepts a FastDAC, or a bare `serial.Serial` for the ASCII callers that
+        predate this -- `getattr(dac, "binary", False)` is the whole test, and a
+        Serial has no such attribute.
+        """
+        if getattr(dac, "binary", False):
+            row = dac.read_sample(self.n)
+            if row is None:
+                return None
+            counts = np.asarray(row, dtype=float)
+            # The frame checksum already rejects a torn frame; range-check anyway,
+            # because this guarantee must not depend on the transport in use.
+            if not self.in_range(counts):
+                self.rejected += 1
+                return None
+            return counts, counts * self.scale
+
+        ser = getattr(dac, "ser", dac)
         if not ser.in_waiting:
             return None
         try:
@@ -278,6 +310,78 @@ class InBand:
 # ===========================================================================
 # estimators
 # ===========================================================================
+def _osc_blocks(Phi, w, dt):
+    """Exact-ZOH 2x2 block per UNDAMPED mode, written into `Phi` in place.
+
+    The one piece of math `steady_state_k`, `KalmanVelocity` and `ModalKalman`
+    must agree on exactly; the selftest checks 1e5 steps conserve oscillator
+    energy, where Euler at the same dt drifts.
+    """
+    for m, wm in enumerate(w):
+        th = wm * dt
+        c, s = np.cos(th), np.sin(th)
+        Phi[2 * m:2 * m + 2, 2 * m:2 * m + 2] = [[c, s / wm], [-wm * s, c]]
+    return Phi
+
+
+def steady_state_k(R, Q, q_dc, f, dt, iters=5000, tol=1e-14):
+    """DIAGNOSTIC ONLY: steady-state Kalman gain for KalmanVelocity's model.
+
+    NOTHING IN THE CONTROL PATH CALLS THIS. The rungs ship `KALMAN_K` as literals;
+    this exists so a session can check them against the (R, Q, f, dt) they are
+    supposed to belong to -- a steady-state gain is correct for exactly one such
+    tuple, `F_MODE_HZ` is re-measured every session, and nothing in the loop
+    notices when the gain stops being correct: the filter keeps returning a
+    number, it is simply no longer velocity.
+
+    MEASURED 2026-08-20, AND OPEN: the derived gain disagrees with the shipped
+    literals by up to 51x, yet over 41 313 control steps of
+    data/20260820_173738_fast_lock.csv the two velocities correlate with a
+    zero-phase reference at 0.597/0.710/0.747/0.749 shipped against
+    0.519/0.723/0.706/0.748 derived. Do not "fix" either against the other.
+
+    The model, per mode: an UNDAMPED oscillator with continuous white-noise
+    acceleration of density q, discretised exactly, Q_d = [[dt^3/3, dt^2/2],
+    [dt^2/2, dt]] * q. The DC state is a random walk of variance q_dc per step;
+    the measurement is displacement plus DC. Iterates the Riccati recursion so it
+    needs no scipy; `iters` is a bound and the loop exits on `tol`.
+    """
+    R = np.atleast_1d(np.asarray(R, float))
+    Q = np.atleast_2d(np.asarray(Q, float))
+    q_dc = np.atleast_1d(np.asarray(q_dc, float))
+    f = np.asarray(f, float)
+    nm, n = len(f), len(R)
+    nx = 2 * nm + 1
+
+    Phi = _osc_blocks(np.zeros((nx, nx)), 2.0 * np.pi * f, dt)
+    Phi[-1, -1] = 1.0
+    H = np.zeros((1, nx))
+    H[0, 0:2 * nm:2] = 1.0
+    H[0, -1] = 1.0
+
+    K = np.zeros((n, nx))
+    for i in range(n):
+        Qd = np.zeros((nx, nx))
+        for m in range(nm):
+            q = Q[i, m]
+            Qd[2 * m, 2 * m] = q * dt ** 3 / 3.0
+            Qd[2 * m, 2 * m + 1] = Qd[2 * m + 1, 2 * m] = q * dt ** 2 / 2.0
+            Qd[2 * m + 1, 2 * m + 1] = q * dt
+        Qd[-1, -1] = q_dc[i]
+        P, k = np.eye(nx), np.zeros((nx, 1))
+        for _ in range(iters):
+            P = Phi @ P @ Phi.T + Qd
+            k_new = P @ H.T / float((H @ P @ H.T).ravel()[0] + R[i])
+            P = P - k_new @ H @ P
+            P = 0.5 * (P + P.T)
+            if np.max(np.abs(k_new - k)) < tol:
+                k = k_new
+                break
+            k = k_new
+        K[i] = k.ravel()
+    return K
+
+
 class KalmanVelocity:
     """Per-sensor velocity/displacement: one undamped oscillator per mode + a DC state.
 
@@ -302,11 +406,7 @@ class KalmanVelocity:
         self.primed = np.zeros(self.n, bool)
 
     def _transition(self, dt):
-        Phi = np.zeros((self.nx, self.nx))
-        for m, w in enumerate(self.w):
-            th = w * dt
-            c, s = np.cos(th), np.sin(th)
-            Phi[2 * m:2 * m + 2, 2 * m:2 * m + 2] = [[c, s / w], [-w * s, c]]
+        Phi = _osc_blocks(np.zeros((self.nx, self.nx)), self.w, dt)
         Phi[-1, -1] = 1.0
         return Phi
 
@@ -332,9 +432,6 @@ class KalmanVelocity:
 
     def displacement(self):
         return self.x[:, 0:2 * self.nm:2].sum(axis=1)
-
-    def acceleration(self):
-        return -(self.x[:, 0:2 * self.nm:2] * self.w ** 2).sum(axis=1)
 
     def modal_velocity(self):
         """n x nm: sensor i's velocity in mode m's band."""
@@ -410,12 +507,11 @@ class ModalKalman:
         if self._trans_dt is not None and abs(dt - self._trans_dt) < 1e-9:
             return
         nm, nx = self.nm, self.nx
-        Phi = np.eye(nx)
+        Phi = _osc_blocks(np.eye(nx), self.w, dt)
         Qd = np.zeros((nx, nx))
         for m, w in enumerate(self.w):
             th = w * dt
-            c, s, s2 = np.cos(th), np.sin(th), np.sin(2.0 * th)
-            Phi[2 * m:2 * m + 2, 2 * m:2 * m + 2] = [[c, s / w], [-w * s, c]]
+            s, s2 = np.sin(th), np.sin(2.0 * th)
             Qd[2 * m:2 * m + 2, 2 * m:2 * m + 2] = self.q_mode[m] * np.array(
                 [[(dt / 2.0 - s2 / (4.0 * w)) / w ** 2, s ** 2 / (2.0 * w ** 2)],
                  [s ** 2 / (2.0 * w ** 2), dt / 2.0 + s2 / (4.0 * w)]])
@@ -550,8 +646,8 @@ class Modal:
     opposed, three planes. Evidence it does not hold: two independent coil
     passes gave lambda signs (+,+,+,+) and (+,-,-,+), and a colocation-
     constrained rank-1 fit had sigma2/sigma1 = 0.67 where colocation gives ~0.
-    The check also rejected a good A. It is computed, logged loudly, and the
-    empirical arbiter is `signtest.py`.
+    The check also rejected a good A. It is computed and logged loudly, never a
+    gate.
     """
 
     def __init__(self, path, n, f, schema, min_sensors=2, min_coils=3,
@@ -719,6 +815,12 @@ class Modal:
                               "all over %.2f -- a confirmation, not an input"
                               % (line, self.phi_cos_warn))
 
+    def _refuse_provisional(self, what, provenance):
+        return self._refuse("%s (%s) and was never validated closed-loop. Set "
+                            "OSEM_MODAL_PROVISIONAL=1 to run on it anyway, which "
+                            "is a test configuration, not a bench one."
+                            % (what, provenance or "?"))
+
     def _take_a(self, d):
         """A from the file if there is one, else the caller's fallback."""
         a = (d or {}).get("a")
@@ -731,11 +833,9 @@ class Modal:
                                                  list(self.a_in_coils), "supplied")
             self.provisional_a = self.a_in_provisional
             if self.a_in_provisional and not self.allow_provisional:
-                return self._refuse("the only A here is the supplied fallback (%s), "
-                                    "never validated closed-loop. Set "
-                                    "OSEM_MODAL_PROVISIONAL=1 to run on it anyway, "
-                                    "which is a test configuration, not a bench one."
-                                    % (self.a_in_provenance or "?"))
+                return self._refuse_provisional(
+                    "the only A here is the supplied fallback",
+                    self.a_in_provenance)
             return True
         try:
             self.a = np.asarray(a["value"], float).reshape(self.nm, self.n)
@@ -755,10 +855,8 @@ class Modal:
                                 % (os.path.basename(self.path or "?"),
                                    fb or "measured", self.basis, self.basis))
         if a.get("provisional") and not self.allow_provisional:
-            return self._refuse("A is PROVISIONAL (%s) and was never driven. Set "
-                                "OSEM_MODAL_PROVISIONAL=1 to run on it anyway, "
-                                "which is a test configuration, not a bench one."
-                                % a.get("provenance", "?"))
+            return self._refuse_provisional("A in the file is PROVISIONAL",
+                                            a.get("provenance"))
         return True
 
     def _colocation(self):
@@ -778,8 +876,9 @@ class Modal:
                     "coil %d A/Phi SIGN DISAGREES across modes (%s). On a "
                     "colocated head that would mean Phi and A disagree; this rig "
                     "is not colocated (four coils one way, two opposed, three "
-                    "planes) so it is NOT a gate. `signtest.py` decides which "
-                    "sign pattern damps." % (j, ", ".join("%+.3f" % x for x in lam)))
+                    "planes) so it is NOT a gate. A's signs are settled by the DC "
+                    "and driven passes, 12 of 12 across three determinations that "
+                    "share no estimator." % (j, ", ".join("%+.3f" % x for x in lam)))
 
     @staticmethod
     def _age(created, now=None):
@@ -802,6 +901,9 @@ class Modal:
         self.gate = [False] * (1 << self.n)
         self.rank = [0] * (1 << self.n)
         self.balanced = [False] * (1 << self.n)
+        # The row-balancing scale D per mask, the tie-break metric `cap_box`
+        # needs to reproduce this allocator exactly when the box is slack.
+        self.bal = [None] * (1 << self.n)
         drivable = np.zeros(self.n, bool)
         drivable[self.a_coils] = True
         for mask in range(1 << self.n):
@@ -827,7 +929,7 @@ class Modal:
             # identity is VERIFIED numerically below -- an earlier version
             # silently dropped a singular direction -- and the unweighted
             # inverse is the fallback.
-            w, Pw = np.ones(len(cols)), None
+            w, Pw, Dw = np.ones(len(cols)), None, np.ones(len(cols))
             for _ in range(int(iters)):
                 D = 1.0 / w
                 try:
@@ -835,6 +937,7 @@ class Modal:
                 except np.linalg.LinAlgError:
                     Pw = None
                     break
+                Dw = D            # the D THIS Pw was built from: `w` moves below
                 rn = np.linalg.norm(Pw, axis=1)
                 if not np.all(np.isfinite(rn)) or rn.max() <= 0:
                     Pw = None
@@ -846,6 +949,9 @@ class Modal:
             if Pw is not None and np.allclose(Ac @ Pw, Uk @ Uk.conj().T,
                                               rtol=1e-7, atol=1e-10):
                 P, self.balanced[mask] = Pw, True
+                self.bal[mask] = np.real(Dw)
+            if self.bal[mask] is None:
+                self.bal[mask] = np.ones(len(cols))
             self.pinv[mask] = (cols, np.real(P), np.real(Uk @ Uk.conj().T))
             self.rank[mask] = keep
             self.gate[mask] = keep >= 1
@@ -904,6 +1010,45 @@ class Modal:
         if pk > self.demand_cap_v:
             u *= self.demand_cap_v / pk           # uniform: direction preserved
         return u, mask, cm, True
+
+    def box_args(self, mask, kp):
+        """(W, d) for `cap_box` on this coil mask, or (None, None) -- KEEP `cap_scale`.
+
+        W is the metric `cap_box`'s dissipation proof needs and nothing else:
+        W = pinv(Proj K Proj) with K = diag(kp) the per-mode gain ACTUALLY
+        applied this step. On a full-rank mask Proj = I, so W = diag(1/kp)
+        exactly.
+
+        Returns (None, None) -- meaning the caller must keep `cap_scale`, which
+        needs no metric -- in the two cases where the proof does not close:
+
+        * a RANK-DEFICIENT mask (`rank[mask] < nm`, which is 2 of the 3 modes
+          gone or worse). There the realised force can leave range(Proj) and the
+          projection argument only bounds `qdot' Proj p`, not `qdot' p`. Today's
+          allocator never realises an out-of-range force at all -- `A_C P` is
+          verified equal to Proj in `_build_tables` -- so scaling it by one
+          scalar cannot either, and `cap_scale` stays proven where this is not.
+        * a NON-POSITIVE per-mode gain, which is every mode a caller zeroed
+          (osem.eta.py zeroes a mode with too few determined sensors) and the
+          whole vector during the gain ramp's first step. K is then singular and
+          K^-1 does not exist.
+
+        `d` is the row-balancing scale `_build_tables` used, so that a slack box
+        returns today's allocation to floating point instead of a different
+        point of the same objective.
+        """
+        e = self.pinv[mask]
+        if e is None or not self.gate[mask] or self.rank[mask] < self.nm:
+            return None, None
+        k = np.asarray(kp, float).ravel()
+        if k.size != self.nm or not np.all(np.isfinite(k)) or np.any(k <= 0.0):
+            return None, None
+        cols = e[0]
+        d = np.ones(self.n)
+        b = self.bal[mask]
+        if b is not None:
+            d[cols] = b
+        return 1.0 / k, d
 
     def report(self, kp=None, scale=1.0):
         out = ["[modal] %s" % ("LOADED" if self.ok else "REFUSED -- running DIAGONAL"),
@@ -1061,39 +1206,35 @@ class Health:
         out-of-band interference, which is how a4 (good in-band SNR, 0.0030 V
         total against a 0.0953 V median) was demoted on 2026-08-17.
 
-        `exempt` NAMES CHANNELS THE BAND DOES NOT DESCRIBE, and this is the fix for
-        a fourth instance of the repo's longest-running error family. The band is
-        the three modes of the damped DOF. A sensor whose axis is ORTHOGONAL to
-        them has a small in-band amplitude BY CONSTRUCTION, not because it is
-        blind: measured 2026-08-18, a4/a6/a7 read 0.0027 / 0.0026 / 0.0024 V
-        against a 0.0834 V median and were demoted at engage in both runs, so
-        their gain was exactly 0.0000 for 100 % of every DAMPING sample and the
-        hybrid law never ran once. Their bias-corrected multiple coherence with
-        the optic over the same band is 0.46 / 0.26 / 0.50 (CLAUDE.md 6): they see
-        it. Compare "a4-a7 are not wired", "the flags are misaligned", and "a weak
-        driven response bounds the COILS, not the sensors".
+        `exempt` NAMES CHANNELS THE BAND DOES NOT DESCRIBE. The band is the three
+        modes of the damped DOF, so a sensor whose axis is ORTHOGONAL to them is
+        quiet in it BY CONSTRUCTION, not because it is blind: measured 2026-08-18,
+        a4/a6/a7 read 0.0027 / 0.0026 / 0.0024 V against a 0.0834 V median, were
+        demoted at engage in both runs, and so carried gain exactly 0.0000 for
+        100 % of every DAMPING sample -- the hybrid law never ran once -- while
+        their bias-corrected multiple coherence with the optic over that same band
+        is 0.46 / 0.26 / 0.50 (CLAUDE.md 6). That is the fourth instance of the
+        error family holding "a4-a7 are not wired", "the flags are misaligned" and
+        "a weak driven response bounds the COILS, not the sensors".
 
         An exempt channel is judged on `motion` -- its own BROADBAND activity --
-        under the SAME relative rule: `floor_frac` of the median broadband across
-        the channels that do carry the band. Same criterion, different statistic,
-        chosen so the statistic is one the channel's axis can actually produce.
-        On the rig that keeps them: a4/a6/a7 run 43.4 / 61.3 / 32.6 counts rms
-        against a0-a3's 57.9-96.0, i.e. 41-77 % of the median where their IN-BAND
-        amplitude is 3 % of it.
+        under the SAME relative rule, `floor_frac` of the median broadband across
+        the channels that do carry the band: same criterion, on a statistic the
+        channel's axis can actually produce. It keeps them because a4/a6/a7 run
+        43.4 / 61.3 / 32.6 counts rms against a0-a3's 57.9-96.0, i.e. 41-77 % of
+        the median where their IN-BAND amplitude is 3 % of it.
 
-        AN ABSOLUTE LINE IS NOT ENOUGH, and the simulator is what proves it: a
-        blind sensor there is modelled as zero sensor gain, which still returns
-        ADC dither, so "std over `dead_std`" passes a sensor that measures nothing.
-        The relative test demotes it, because dither is a fraction of a percent of
-        what a live channel moves. `dead_std` is still applied as a floor under the
-        relative one, so a hard-grounded pin goes either way: a5 has variance
-        EXACTLY zero over 236387 samples.
+        AN ABSOLUTE LINE IS NOT ENOUGH, and the simulator proves it: a blind
+        sensor there is zero sensor gain, which still returns ADC dither, so "std
+        over `dead_std`" passes a sensor that measures nothing. The relative test
+        demotes it. `dead_std` stays as a floor under the relative one, so a
+        hard-grounded pin goes either way: a5 has variance EXACTLY zero over
+        236387 samples.
 
-        With no `motion` given, nothing is exempted -- the caller has no evidence,
-        so it gets the old behaviour.
-
-        The median is taken over NON-exempt channels: letting an orthogonal axis
-        into it drags the line down and hides a genuinely blind in-band sensor.
+        With no `motion` given nothing is exempted -- the caller has no evidence,
+        so it gets the old behaviour. The median is taken over NON-exempt
+        channels: letting an orthogonal axis into it drags the line down and hides
+        a genuinely blind in-band sensor.
         """
         ex = (np.zeros(self.n, bool) if exempt is None or motion is None
               else np.asarray(exempt, bool))
@@ -1120,27 +1261,63 @@ class Breaker:
     separates a disturbance the loop is winning against from one it is not.
 
     `growing` ALONE IS NOT ENOUGH, AND THAT ENDED TWO RUNS. `past` is a maximum
-    over history entries at least `window_s` old, so when the envelope stops
-    rising `past` still needs that whole exclusion window -- plus whatever is left
-    of the ramp's shoulder -- to catch up. Until it does, a FLAT OR FALLING
-    envelope reads as growing. Reconstructed from the records, 2026-08-18: at the
-    modal trip ch0's envelope fell 0.5767 -> 0.5707 V while `past` climbed
-    0.3943 -> 0.4599 V and `growing` stayed true for 3.99 s, against a 4.0 s
-    sustain. Both runs that night died on the first hand kick, under both laws,
-    with zero margin (longest continuous `high & growing`: 4.00 s).
+    over history entries at least `window_s` old, so a flat or falling envelope
+    still reads as growing until `past` catches up. Reconstructed from the
+    records, 2026-08-18: at the modal trip ch0's envelope fell 0.5767 -> 0.5707 V
+    while `past` climbed 0.3943 -> 0.4599 V and `growing` stayed true for 3.99 s
+    against a 4.0 s sustain. Both runs that night died on the first hand kick,
+    under both laws, with zero margin (longest continuous `high & growing`
+    4.00 s). So the trip ALSO requires the envelope not to have RECEDED from its
+    own recent peak -- the peak INCLUDING the last `window_s`, which is the part
+    `past` cannot see. `decay_frac` is the recession test the saturation trip
+    already uses, so this adds no threshold.
 
-    So the trip also requires the envelope not to have RECEDED from its own recent
-    peak -- the peak INCLUDING the last `window_s`, which is the part `past`
-    cannot see. A kick sets a peak and falls away from it; a runaway keeps making
-    new ones. Measured on the same two records this cuts the longest latched run
-    from 4.00 s to 1.87-2.23 s, a 1.8x margin under the same 4.0 s sustain, and it
-    is free on a real runaway: against synthetic exponential growth at 0.0739 /s
-    (the worst-mode added decay, i.e. the slowest instability this loop's own gain
-    could produce), at 0.20 /s and at 0.468 /s, with and without the term, the
-    trip time is identical to the sample -- 17.0 / 12.0 / 10.3 s.
+    A RECESSION VETOES THE TRIP. IT DOES NOT CLEAR THE LATCH, AND THAT IS THE
+    WHOLE OF THIS CHANGE -- 2026-08-20. Until then `~receded` sat inside the
+    `Health.hold` conjunction, so one rippled sample restarted the sustain timer
+    and the breaker went BLIND ACROSS ITS WHOLE PURPOSE: the simulator's pumped
+    resonance reached ratio 3.43 with `env > 1.8 x ref` on 84.7 % of samples and
+    never tripped, and over 13 recorded bench runs the shipped 0.98 line fires on
+    19-61 % of the samples where the latch is trying to accumulate -- between the
+    MEDIAN (0.97-1.00) and the 10th percentile (0.82-0.98) of ordinary drawdown.
 
-    `decay_frac` is the same recession test the saturation trip already uses. No
-    new threshold.
+    NO THRESHOLD AND NO SUSTAIN CAN SEPARATE THE TWO POPULATIONS BY THEMSELVES,
+    which is why the fix is structural. From this class's own internals replayed
+    over data/2026081[78]_*_fast_lock.csv, channels a0-a3 in DAMPING:
+
+      * DEPTH does not separate. Deepest `env/peak` on latch-candidate samples is
+        0.778 over the hand-kick corpus and 0.760 over a bench-sourced runaway
+        (the 475 s quiet record 20260818_032243 multiplied by exp(g t)), so every
+        `decay_frac` from 0.80 to 0.98 vetoes both or neither.
+      * DURATION does not separate. Longest continuous `high & growing`: hand kick
+        5.28 s (20260818_024302 ch3, t=150.7-156.0, envelope 0.245 -> 0.630 V,
+        ratio 2.0 -> 5.2) against a bench-sourced runaway's 3.71-6.01 s at
+        0.05 /s and 4.21-7.16 s at 0.0739 /s -- and at `decay_frac = 0.98` the
+        order INVERTS, kick 2.41 s against runaway 1.38-2.83 s.
+      * WHY. The three-mode envelope beats at 0.99193 - 0.72194 = 0.26999 Hz, a
+        3.704 s period, and a 2 s RMS window is shorter than that, so the beat
+        passes into the envelope. The instabilities this loop's own gain can
+        produce are 0.05-0.0739 /s -- SLOWER than the beat -- while a hand kick
+        rings up at 0.27 /s, 3.7x faster. So it is the KICK whose envelope is
+        monotone and the RUNAWAY whose is not, and any test built on "keeps making
+        new peaks" ranks them backwards.
+
+    Vetoing separates them because it asks a different question at a different
+    time: the latch asks "has this been high and growing continuously for
+    `sustain_s`", the recession asks, ONLY once that is already true, "and is it
+    at a new peak right now". A kick past its own maximum can never answer yes;
+    a runaway makes a new peak every beat. Measured on 52 channel-instances --
+    13 bench runs x a0-a3, covering nine hand-kick runs, three quiet closed-loop
+    runs and the pumped run 20260817_191710 -- ZERO trips at `sustain_s` 5.0 and
+    one at 4.0 (20260818_024302 ch2 at t=39.1 s, the first hand kick of the valid
+    kick set). On the same bench-sourced runaway it trips on 2 of 4 channels at
+    0.05 /s, 3 of 4 at 0.0739 /s and 4 of 4 at 0.15 /s, where the shipped rule
+    tripped on NONE. That is why the rungs moved `RUNAWAY_SUSTAIN_S` 4.0 -> 5.0.
+
+    KNOWN LIMIT, and not fixed by any of this: the one recorded bench pumping
+    episode (20260817_191710, a wrong per-mode sign of A, median channel ratio
+    2.21-2.46 held for 148 s) is a SUSTAINED elevated state, not a ramp. A growth
+    test cannot see it by construction, and this one does not.
     """
 
     def __init__(self, n, window_s, multiple, sustain_s, lag_s, growth_frac,
@@ -1193,11 +1370,18 @@ class Breaker:
         high = env > baseline * self.multiple
         receded = env < peak * self.decay_frac
         self.peak, self.receded = peak, receded
-        # A recession RESETS the timer rather than merely vetoing the trip: one
-        # sample back at the peak must not re-arm four seconds of stale evidence.
-        self.excess_since = Health.hold(healthy & judge & high & growing & ~receded,
+        # THE LATCH DOES NOT SEE `receded`. A recession is evidence against
+        # tripping RIGHT NOW, not evidence that the last `sustain_s` never
+        # happened -- see the class docstring for the 52 channel-instances that
+        # says so. What still clears the latch is `high` or `growing` going false,
+        # which is what a kick does as soon as it stops rising.
+        self.excess_since = Health.hold(healthy & judge & high & growing,
                                         self.excess_since, t)
-        run_trip = healthy & judge & (t - self.excess_since >= self.sustain_s)
+        # ...and the recession VETOES: the trip needs the envelope to be within
+        # `decay_frac` of its own recent peak at the moment it fires. A kick past
+        # its own maximum cannot get back there; a runaway does it every beat.
+        run_trip = (healthy & judge & ~receded
+                    & (t - self.excess_since >= self.sustain_s))
         sat_trip = healthy & sat & ~(env < past * self.decay_frac)
         return dict(env=env, growing=growing, high=high, peak=peak,
                     receded=receded, run_trip=run_trip, sat_trip=sat_trip)
@@ -1207,28 +1391,28 @@ class QuietLevel:
     """The level the RUNNING loop holds, as against the level the plant sits at
     with the gain OFF.
 
-    `Baseline` measures during CALIBRATING, which is a ZERO-GAIN window by
-    construction, so every threshold scaled off it is a threshold against the
-    UNDAMPED plate. That is the right reference for "is the loop making this
-    worse" and it is not a description of the closed loop: measured 2026-08-18
-    against ONE calibration window, the modal law holds per-channel `ratio` 0.117
-    and the diagonal law 1.449 / 1.832 / 1.769 -- a factor of about 13 between two
-    laws sharing that window (data/20260818_002207_jerk_eta.log).
+    `Baseline` measures during CALIBRATING, a ZERO-GAIN window by construction, so
+    every threshold scaled off it is a threshold against the UNDAMPED plate --
+    the right reference for "is the loop making this worse", and not a description
+    of the closed loop: measured 2026-08-18 against ONE calibration window, the
+    modal law holds per-channel `ratio` 0.117 and the diagonal law
+    1.449 / 1.832 / 1.769, a factor of about 13 between two laws sharing that
+    window (data/20260818_002207_jerk_eta.log).
 
-    ROBUST TO BEING KICKED BY CONSTRUCTION. The answer is a low percentile of the
+    ROBUST TO BEING KICKED BY CONSTRUCTION: the answer is a low percentile of the
     recent envelope, so a disturbance occupying up to (100 - `percentile`) % of the
     window leaves it where it was. A mean would follow the kick, and the kick is
     exactly when the number is read.
 
     BLIND UNTIL THE WINDOW FILLS. `level()` returns None until `min_fill` of it is
-    in hand, and every caller falls back to the calibration baseline -- which is
-    the behaviour that shipped before this class existed. A rig that boots into an
-    untested threshold is worse than one that boots into a known one.
+    in hand and every caller falls back to the calibration baseline, which is what
+    shipped before this class existed: booting into an untested threshold is worse
+    than booting into a known one.
 
     FED ONLY WHILE DAMPING, AND PRUNED ONLY WHEN FED, so the window holds the last
-    `window_s` of CLOSED-LOOP time. A FAULT freezes it rather than ageing it out:
-    the actuators are off there, so what the sensors see is the open-loop plant and
-    says nothing about where this loop lives.
+    `window_s` of CLOSED-LOOP time. A FAULT freezes it rather than ageing it out --
+    the actuators are off there, so the sensors see the open-loop plant, which says
+    nothing about where this loop lives.
     """
 
     def __init__(self, n, window_s, percentile, keep_hz, min_fill):
@@ -1310,6 +1494,206 @@ def cap_scale(m, fixed, cap, mask):
     room = float(cap) - np.sign(mv) * fv        # distance to the rail s moves toward
     s = np.where(np.abs(mv) > 0.0, room / np.where(mv != 0.0, np.abs(mv), 1.0), 1.0)
     return float(np.clip(s, 0.0, 1.0).min())
+
+
+# ---------------------------------------------------------------------------
+# the box-constrained allocator -- SELECTABLE, and OFF unless a caller asks
+# ---------------------------------------------------------------------------
+# A memo, not a threshold: how many distinct (A_C, W, d) tables to keep. The
+# table depends only on the coil mask, the metric and the tie-break scale, all
+# of which are constant across a run in the shipping configuration, so one
+# entry per live coil mask is the steady state.
+_BOX_CACHE_MAX = 64
+_BOX_CACHE = {}
+
+
+def _box_metric(w, nm):
+    """(W, W^(1/2)) from `w`: None -> I, a vector -> diag, a matrix -> symmetrised."""
+    if w is None:
+        eye = np.eye(nm)
+        return eye, eye
+    W = np.asarray(w, float)
+    if W.ndim == 1:
+        W = np.diag(W)
+    lam, V = np.linalg.eigh(0.5 * (W + W.T))
+    lam = np.clip(lam, 0.0, None)
+    return (V * lam) @ V.T, (V * np.sqrt(lam)) @ V.T
+
+
+def _box_table(A, Wh, ds):
+    """One reduced solver per FREE SUBSET of the coils: 2^nc of them, built once.
+
+    For a free set S the reduced problem is min ||A_S u_S - r||^2_W with the
+    minimum-||u/d|| tie-break, whose solution is a fixed matrix times r. The
+    pinned coils only move `r`, so the 3^nc active-set patterns need 2^nc
+    matrices, not 3^nc.
+    """
+    nm, nc = A.shape
+    AW = Wh @ A
+    tab = []
+    for s in range(1 << nc):
+        S = np.array([j for j in range(nc) if (s >> j) & 1], int)
+        P = np.array([j for j in range(nc) if not (s >> j) & 1], int)
+        if S.size:
+            B = AW[:, S] * ds[S][None, :]
+            M = ds[S][:, None] * (np.linalg.pinv(B) @ Wh)      # (|S|, nm)
+        else:
+            M = np.zeros((0, nm))
+        corners = np.array([[bool((k >> i) & 1) for i in range(P.size)]
+                            for k in range(1 << P.size)],
+                           bool).reshape(1 << P.size, P.size)
+        tab.append((S, P, M, corners, A[:, P].T.copy()))
+    return tab
+
+
+def cap_box(m, fixed, cap, mask, a, w=None, d=None, kkt_tol=1e-9):
+    """Box-constrained control allocation: the same TOTAL cap as `cap_scale`, per coil.
+
+    Solves, exactly, per control step
+
+        minimise  || A_C u - g ||^2_W    subject to   lo_j <= u_j <= hi_j
+
+    where `g = A_C m` is the modal force today's uncapped allocation realises,
+    and the box is the same TOTAL window `cap_scale` enforces:
+
+        hi_j = max(0, cap - fixed_j)     lo_j = min(0, -cap - fixed_j)
+
+    Returns `(u, pinned)`: the allocation over `mask` (zero elsewhere) and which
+    coils came back sitting on a bound.
+
+    WHY, AND THE NUMBER. `cap_scale` shrinks the whole vector by ONE scalar, so
+    one coil near its rail throttles all four. The asymmetry is measured: static
+    rigid-body force per coil is 9.92 / 29.80 / 34.28 / 28.93 counts/V, i.e.
+    coil 0 is about 3x weaker than 1/2/3, and coil 0 is the one that saturated
+    (CLAUDE.md, "The geometry, and what it settled"). This spends each coil's
+    own remaining room instead.
+
+    WHY IT IS STILL DISSIPATIVE -- the whole reason the change is safe. The
+    reachable set C = {A_C u : u in box} is convex and contains 0 (the max/min
+    above), so the W-projection p = Proj_C(g) satisfies
+    (g - p)' W (c - p) <= 0 for every c in C; take c = 0 and it gives
+    g' W p >= p' W p >= 0. The commanded force is g = -K~ qdot with
+    K~ = Proj K Proj the projected per-mode gain (`Modal.project`: -Proj K Proj
+    qdot is symmetric PSD, -Proj K qdot is not), so with W = pinv(K~),
+
+        g' W p = -qdot' K~ pinv(K~) p = -qdot' p          (p is in range(K~))
+
+    hence   qdot' p <= -p' W p < 0 for p != 0: power always leaves the plant,
+    whatever the constraint does. THE METRIC IS LOAD-BEARING -- with W = I and a
+    non-scalar K the middle line does not go through and nothing here is proven.
+    `Modal.box_args` builds the right W; where it cannot it returns None, and the
+    caller must keep `cap_scale`. On a full-rank mask Proj = I and W = diag(1/kp)
+    exactly, so with `MODAL_KP` flat at [0.035, 0.035, 0.035] as it ships W is a
+    multiple of the identity and cannot change the answer. It matters the moment a
+    per-mode gain is not flat, which is CLAUDE.md 16's whole point.
+
+    HOW IT IS SOLVED: exactly, in bounded time, no iteration and no solver. Every
+    coil is free, pinned low or pinned high, so 3^nc patterns cover every KKT
+    point -- 81 at nc = 4. Each is a precomputed reduced least-squares, rejected
+    if a free coil lands outside its box or a pinned coil's gradient has the wrong
+    sign, and the lowest-objective feasible candidate wins. All-pinned-low is
+    always feasible, so a candidate always exists: no convergence risk at 100 Hz.
+
+    WHAT IT IS WORTH, MEASURED OFFLINE ON THE RECORDED RUNS. Every modal DAMPING
+    step of the 13 eta runs data/20260818_02*_fast_lock.csv and
+    data/20260818_03*_fast_lock.csv -- 315 024 steps -- re-solved from the logged
+    state, both allocators on the same inputs. THE BOX BINDS RARELY: 123 steps,
+    0.04 %, and on exactly the same steps `cap_scale` binds. Where it binds it
+    realises more force (||A_C u|| ratio median 1.067, p90 1.205, max 1.511, and
+    >= 1.000 on all 123) and both laws dissipated on all 314 996 steps where the
+    metric exists. On the 00:22 run CLAUDE.md 2 measured coil 3's 0.4229 V on,
+    9914 modal steps, it binds on 0.40 % at ratio median 1.048, max 1.086. Wall
+    time warm, 4 coils: median 0.30 ms, p99 0.38 ms against a 10 ms control step;
+    the first call builds the table and cost 22 ms. OPEN LOOP -- this is what the
+    two allocators would have COMMANDED on the same inputs, not what the plant
+    would have done. NOTHING HERE SAYS IT DAMPS BETTER; only the bench can.
+
+    TIES. The objective is strictly convex in the realised force p = A_C u, but
+    A_C is 3x4 here so u is not unique. Ties break by minimum ||u/d||; with `d`
+    from `Modal.box_args` that is the row-balancing metric `_build_tables` already
+    uses, so a slack box returns today's `A_C^+ f` to floating point rather than a
+    different point of the same objective. `d = None` is plain minimum norm.
+
+    DEGENERATE CASES, handled as `cap_scale` handles them. `fixed` alone past the
+    cap does not empty the box: it collapses to the interval between 0 and the
+    value that brings the coil back inside, so the allocator can pull that coil
+    toward the window and never push it further out. The invariant is
+
+        |u_j + fixed_j| <= max(cap, |fixed_j|)
+
+    -- never over the cap when `fixed` was inside it, never worse than doing
+    nothing when it was already outside, which is the case `cap_scale` answers
+    with a scale of 0.0 and leaves to `PID.drive`'s clip. An empty mask, a zero
+    `f`, a rank-deficient A_C and fewer than four drivable coils all fall out of
+    the same enumeration with no special case.
+    """
+    mask = np.asarray(mask, bool)
+    u = np.zeros(mask.size)
+    pinned = np.zeros(mask.size, bool)
+    cols = np.flatnonzero(mask)
+    if cols.size == 0:
+        return u, pinned
+    A = np.asarray(a, float)[:, cols]
+    nm, nc = A.shape
+    g = A @ np.asarray(m, float)[cols]
+    fx = np.asarray(fixed, float)[cols]
+    cap = float(cap)
+    hi = np.maximum(0.0, cap - fx)
+    lo = np.minimum(0.0, -cap - fx)
+    ds = np.ones(nc) if d is None else np.abs(np.asarray(d, float)[cols])
+    ds = np.where(ds > 0.0, ds, 1.0)
+    Wm, Wh = _box_metric(w, nm)
+
+    key = (A.tobytes(), Wh.tobytes(), ds.tobytes(), nm, nc)
+    tab = _BOX_CACHE.get(key)
+    if tab is None:
+        if len(_BOX_CACHE) >= _BOX_CACHE_MAX:
+            _BOX_CACHE.clear()
+        tab = _BOX_CACHE[key] = _box_table(A, Wh, ds)
+
+    U = np.zeros((3 ** nc, nc))
+    code = np.zeros((3 ** nc, nc), np.int8)     # 0 free, 1 pinned lo, 2 pinned hi
+    k = 0
+    for S, P, M, corners, Apt in tab:
+        nk = corners.shape[0]
+        blk = np.zeros((nk, nc))
+        if P.size:
+            blk[:, P] = np.where(corners, hi[P][None, :], lo[P][None, :])
+            r = g[None, :] - blk[:, P] @ Apt
+            code[k:k + nk, P] = np.where(corners, 2, 1)
+        else:
+            r = np.repeat(g[None, :], nk, axis=0)
+        if S.size:
+            blk[:, S] = r @ M.T
+        U[k:k + nk] = blk
+        k += nk
+
+    U, code = U[:k], code[:k]
+    resid = U @ A.T - g[None, :]
+    RW = resid @ Wm
+    obj = np.einsum("ij,ij->i", RW, resid)
+    grad = 2.0 * (RW @ A)                       # d/du of the objective
+    span = max(1.0, float(np.max(np.abs(hi - lo))))
+    tolb = 1e-9 * span
+    feas = np.all((U >= lo[None, :] - tolb) & (U <= hi[None, :] + tolb), axis=1)
+    gt = kkt_tol * max(1.0, float(np.max(np.abs(grad))) if grad.size else 1.0)
+    kkt = np.all(np.where(code == 2, grad <= gt,
+                          np.where(code == 1, grad >= -gt, True)), axis=1)
+    pool = feas & kkt
+    if not pool.any():
+        pool = feas                             # always non-empty: all-pinned-low
+    # Minimise the objective, THEN break the tie on ||u/d||. Two stages, not one
+    # perturbed objective: A_C is 3x4 here so ties are the normal case, not an
+    # edge, and a `f = 0` step must come back with u = 0 rather than with
+    # whichever corner the enumeration happened to visit first.
+    obj_pool = np.where(pool, obj, np.inf)
+    best = float(np.min(obj_pool))
+    tie = pool & (obj <= best + 1e-12 * max(1.0, float(g @ Wm @ g)))
+    nrm = np.einsum("ij,ij->i", U / ds[None, :], U / ds[None, :])
+    sol = np.clip(U[int(np.argmin(np.where(tie, nrm, np.inf)))], lo, hi)
+    u[cols] = sol
+    pinned[cols] = (sol <= lo + tolb) | (sol >= hi - tolb)
+    return u, pinned
 
 
 # ===========================================================================
@@ -1676,10 +2060,6 @@ class Loop:
         out, self.events = self.events, []
         return out
 
-    def dispatch(self, **handlers):
-        h = handlers.get(self.state)
-        return None if h is None else h()
-
     def clear_gate(self, t, blocked, sustain_s):
         """True once `blocked` has been continuously false for sustain_s."""
         if blocked:
@@ -1820,7 +2200,7 @@ def _selftest():
     drive = np.zeros(n, bool)
     drive[[0, 1, 2, 3]] = True
     fdem = -np.array([0.02, 0.01, 0.015])
-    u, mask, cm, gok = M.allocate(fdem, drive)
+    u, _mask, cm, gok = M.allocate(fdem, drive)
     got = M.a[:, [0, 1, 2, 3]] @ u[[0, 1, 2, 3]]
     check("allocation is exact at full row rank (A P = I)",
           gok and np.allclose(got, fdem, rtol=1e-8, atol=1e-12),
@@ -1881,12 +2261,11 @@ def _selftest():
           Mw.ok and Mw.phi_cos_bad and Mw.phi_cos[2] < 0.90
           and any(s.startswith("!!") for s in Mw.notes),
           "|cos| %s" % np.array2string(Mw.phi_cos, precision=3))
+    Mga = Modal(geo_file(near), n, f, "osem-modal-1")
     check("A and Phi are never paired across bases: geometric A, measured Phi",
-          not Modal(geo_file(near), n, f, "osem-modal-1").ok,
-          Modal(geo_file(near), n, f, "osem-modal-1").why[:56])
-    check("...nor measured A with a geometric Phi",
-          not Modal(geo_file(near, basis=""), n, f, "osem-modal-1", phi=G).ok,
-          Modal(geo_file(near, basis=""), n, f, "osem-modal-1", phi=G).why[:56])
+          not Mga.ok, Mga.why[:56])
+    Mma = Modal(geo_file(near, basis=""), n, f, "osem-modal-1", phi=G)
+    check("...nor measured A with a geometric Phi", not Mma.ok, Mma.why[:56])
 
     # ---- decimation ---------------------------------------------------------
     d = Decimator(100.0, n, mains_null=False)
@@ -1933,6 +2312,36 @@ def _selftest():
           and seen[2] is None and seen[3] is not None,
           "%d rejected" % g.rejected)
 
+    # THE BINARY PATH. Its absence was a silent bug on 2026-08-20 -- see the
+    # class docstring -- so it is covered here, not merely written.
+    class _BinDac:
+        """Quacks like FastDAC: `binary` True and a `read_sample(n)`."""
+
+        def __init__(self, rows):
+            self.binary = True
+            self.rows = list(rows)
+
+        def read_sample(self, ncols):
+            return self.rows.pop(0) if self.rows else None
+
+    gb = SampleGuard(n, 5.02, 1023)
+    bd = _BinDac([[1, 2, 3, 4, 5, 6, 7, 8], None,
+                  [1, 2, 3, 4, 5, 6, 7, 522676], [5] * 8])
+    bseen = [gb.read(bd) for _ in range(4)]
+    check("the sample guard reads the BINARY transport, not only ASCII",
+          bseen[0] is not None and bseen[3] is not None
+          and float(bseen[0][0][0]) == 1.0,
+          "a binary-mode DAC decoded as text returns None forever, which looks "
+          "exactly like a dead rig -- header-only CSV, no printed output")
+    check("...and still range-checks it: the guarantee is transport independent",
+          bseen[1] is None and bseen[2] is None and gb.rejected == 1,
+          "%d rejected out of one torn frame and one empty read" % gb.rejected)
+    check("...and a bare Serial still works, for the ASCII callers",
+          SampleGuard(n, 5.02, 1023).read(
+              _Ser([b"9,9,9,9,9,9,9,9\n"])) is not None,
+          "getattr(dac, 'binary', False) is the whole test, and Serial has no "
+          "such attribute")
+
     # ---- in-band floor ------------------------------------------------------
     ib = InBand(f, n)
     tt = np.arange(0, 20.0, 0.01)
@@ -1950,7 +2359,14 @@ def _selftest():
     check("...and does not see a DC offset at all", amp[2] < 1e-6, "%.2e" % amp[2])
 
     # ---- health / breaker ---------------------------------------------------
-    h = Health(n, 12, 1011, 0.5, 0.8, 1.3, 0.8, 1.3, 2.0, 0.10)
+    # stdlib holds no constants, so every threshold is spelled out here once.
+    def health(nn=n):
+        return Health(nn, 12, 1011, 0.5, 0.8, 1.3, 0.8, 1.3, 2.0, 0.10)
+
+    def breaker(nn=n, sustain=4.0):
+        return Breaker(nn, 2.0, 1.8, sustain, 10.0, 1.02, 0.98, 1)
+
+    h = health()
     rgen = np.random.default_rng(3)
     for k in range(1200):
         c = np.full(n, 600.0) + 5.0 * rgen.normal(size=n)
@@ -1962,7 +2378,7 @@ def _selftest():
           dead[6] and not dead[7] and witness,
           "ch6 std %.3f, ch7 std %.1f, line %.2f"
           % (h.rail_std[6], h.rail_std[7], h.dead_std))
-    h2 = Health(n, 12, 1011, 0.5, 0.8, 1.3, 0.8, 1.3, 2.0, 0.10)
+    h2 = health()
     for k in range(1200):
         h2.rails(np.zeros(n), k / 400.0)
     dead2, witness2 = h2.dead_pin(np.ones(n, bool))
@@ -1975,7 +2391,7 @@ def _selftest():
     bad2, _, wit2 = h.floor(np.full(n, 1.0), np.zeros(n, bool))
     check("...and refuses to run with nothing enabled", not bad2.any() and wit2)
 
-    b = Breaker(n, 2.0, 1.8, 4.0, 10.0, 1.02, 0.98, 1)
+    b = breaker()
     b.arm(0.0)
     base_v = np.full(n, 0.01)
     tripped = None
@@ -1988,7 +2404,7 @@ def _selftest():
             tripped = t
     check("the breaker trips on GROWTH sustained past the line",
           tripped is not None, "at t=%.1fs" % (tripped or -1))
-    b2 = Breaker(n, 2.0, 1.8, 4.0, 10.0, 1.02, 0.98, 1)
+    b2 = breaker()
     b2.arm(0.0)
     hot = False
     for k in range(4000):
@@ -2080,16 +2496,15 @@ def _selftest():
 
     # ---- the breaker: a kick that plateaus is not a runaway -----------------
     print()
-    # `past` is a max over entries at least window_s old, so when the envelope
-    # stops rising it reads as growing until `past` catches up. Reconstructed from
-    # data/20260818_002229_fast_lock.csv, that held `growing` true for 3.99 s
-    # against a 4.0 s sustain and ended the run on the first hand kick.
-    # sustain 4.0 is what osem.eta.py ships; stdlib holds no constants, so the
-    # behavioural checks below name it explicitly.
+    # `growing` lags the envelope by `past`'s exclusion window: on
+    # data/20260818_002229_fast_lock.csv it held true for 3.99 s against a 4.0 s
+    # sustain and ended the run on the first hand kick. sustain 5.0 is what
+    # osem.eta.py ships as of 2026-08-20 (4.0 while the recession CLEARED the
+    # latch), named explicitly here because stdlib holds no constants.
     def envelope_run(shape, secs=40.0, hz=100.0, base=0.05, watch=None,
-                     sustain=4.0):
+                     sustain=5.0):
         """Drive the breaker with a sinusoid whose amplitude follows `shape`."""
-        b = Breaker(4, 2.0, 1.8, sustain, 10.0, 1.02, 0.98, 1)
+        b = breaker(4, sustain)
         b.arm(0.0)
         on, trip, seen = np.ones(4, bool), None, []
         for k in range(int(secs * hz)):
@@ -2103,15 +2518,13 @@ def _selftest():
                              float(g["env"][0])))
         return trip, seen
 
-    # A KICKED PLATE, as this one actually is: a ring-up, a decay at the measured
-    # re-quiet rate, and the beat ripple three modes necessarily produce -- the
-    # measured beat between mode B and mode A is 0.99193 - 0.72194 = 0.26999 Hz,
-    # and the recorded envelope dips about 10 % on it (ch0 ran 0.4166 -> 0.4342 V
+    # A KICKED PLATE, as this one actually is: a ring-up over ONE period of the
+    # dominant mode (an impulse rings a resonator up in about a period; a longer
+    # linear ramp is a sustained push), a decay at the measured re-quiet rate, and
+    # the beat three modes necessarily produce -- 0.99193 - 0.72194 = 0.26999 Hz,
+    # on which the recorded envelope dips about 10 % (ch0 ran 0.4166 -> 0.4342 V
     # under a 0.4599 V peak, data/20260818_002229_fast_lock.csv).
-    # rise = ONE PERIOD of the dominant mode (0.99193 Hz -> 1.008 s). An impulse
-    # rings a resonator up in about a period; a longer linear ramp is a sustained
-    # push, and the breaker is entitled to treat that as one.
-    def kicked(rate, ripple=0.10, t0=10.0, rise=1.0 / 0.99193):
+    def kicked(rate, ripple=0.10, t0=10.0, rise=1.0 / f[1]):
         def f(tt):
             if tt < t0:
                 return 0.02
@@ -2138,22 +2551,16 @@ def _selftest():
         check("A KICK THAT RISES AND THEN DECAYS CANNOT END A RUN (%s)" % law,
               tk is None, "decay %.4f /s, the measured re-quiet rate: trip %s"
               % (rate, "never" if tk is None else "%.1fs" % tk))
-    # KNOWN LIMIT, and it bounds the claim above. The recession term needs the
-    # envelope to come OFF its peak, so it buys nothing against an idealised ring-up
-    # that climbs monotonically for longer than the sustain and then decays very
-    # slowly. The margin on the two real records (4.00s -> 1.87-2.23s) comes from a
-    # real plate's envelope rippling on its own mode beats at 0.270 Hz. Raising the
-    # sustain to 8.0s covers this shape and was REVERTED: it cost the
-    # pumped-resonance and runaway-recovery detections the simulator holds.
+    # And it is not the ripple that saves it. The recession only VETOES now, so a
+    # kick survives because it stops GROWING, not because the envelope wobbles.
     tk0, _ = envelope_run(kicked(0.0278, ripple=0.0), secs=70.0)
     check("...and one with no beat ripple at all, which a real plate does not make",
           tk0 is None, "no ripple, 0.0278 /s decay: trip %s"
           % ("never" if tk0 is None else "%.1fs" % tk0))
-    # THE LIMIT, stated with its number. The recession term needs the envelope to
-    # come OFF its peak, so what it cannot cover is a ring-up that climbs
-    # monotonically for longer than the sustain. Two seconds of linear rise -- twice
-    # this plate's own period -- plus the 2 s RMS window is 4.0 s of monotone growth,
-    # and that trips whatever the ripple. It is a sustained push, not a kick.
+    # THE LIMIT: a ring-up that climbs monotonically for longer than the sustain
+    # is indistinguishable from a runaway, and 2.0 s of linear rise plus the 2 s
+    # RMS window is 4.0 s of monotone growth, which with the 2 s `past` exclusion
+    # clears a 5.0 s sustain. It is a sustained push, not a kick.
     tk2, _ = envelope_run(kicked(0.0278, rise=2.0), secs=70.0)
     check("KNOWN LIMIT: a ring-up longer than one period is treated as a push",
           tk2 is not None,
@@ -2166,12 +2573,30 @@ def _selftest():
           t_run is not None,
           "0.0739 /s, the worst-mode added decay: trip at %s"
           % ("never" if t_run is None else "%.1fs" % t_run))
-    # An envelope that climbs monotonically for longer than the sustain SHOULD
-    # trip -- that is not a kick, it is a sustained push, and the breaker is for
-    # exactly that. Recorded so nobody "fixes" it later.
+    # THE REGRESSION TEST FOR 2026-08-20, the whole defect in one fixture. A real
+    # plate's envelope wobbles about its own running maximum as a matter of course
+    # -- 13 bench runs, `env < 0.98 x peak` on 19-61 % of latch-accumulating
+    # samples -- and while `~receded` sat inside the latch conjunction every one of
+    # those restarted the sustain. The SAME 0.0739 /s ramp with a 0.6 s notch to
+    # 0.70 amplitude three seconds before the clean trip takes the envelope 8 %
+    # under its own peak (`receded` fires) while leaving it 6.6 % over
+    # `past x 1.02` (`growing` does not): the shape of a beat trough.
+    def notched(t0, secs=0.6, depth=0.70):
+        return lambda tt: grow(tt) * (depth if t0 <= tt < t0 + secs else 1.0)
+
+    t_notch, seen_n = envelope_run(notched(t_run - 3.0), secs=70.0,
+                                   watch=(t_run - 3.0, t_run - 1.0))
+    saw_recession = any(r for _, _, r, _ in seen_n)
+    check("A RECESSION VETOES THE TRIP, IT DOES NOT RESTART THE SUSTAIN",
+          saw_recession and t_notch is not None and abs(t_notch - t_run) < 0.5,
+          "clean ramp trips at %.2fs, the same ramp notched at %.2fs trips at %s "
+          "-- the notch DID recede (`receded` seen), and under the old conjunction "
+          "it would have cost a fresh 5.0s sustain"
+          % (t_run, t_run - 3.0,
+             "never" if t_notch is None else "%.2fs" % t_notch))
     # `judge` separates "watched" from "may freeze the whole rig".
     def judged_run(judge_mask, secs=40.0, hz=100.0):
-        b = Breaker(4, 2.0, 1.8, 4.0, 10.0, 1.02, 0.98, 1)
+        b = breaker(4)
         b.arm(0.0)
         on, trip = np.ones(4, bool), None
         for k in range(int(secs * hz)):
@@ -2186,14 +2611,12 @@ def _selftest():
 
     # The capability exists and is tested; osem.eta.py deliberately does NOT use
     # it -- narrowing the evidence set lost the pumped-resonance detection.
+    t_judged = judged_run(np.ones(4, bool))
     check("`judge` can separate who is watched from who may trip the whole rig",
-          judged_run(np.zeros(4, bool)) is None
-          and judged_run(np.ones(4, bool)) is not None,
-          "unjudged never trips; judged trips at %.1fs"
-          % judged_run(np.ones(4, bool)))
+          judged_run(np.zeros(4, bool)) is None and t_judged is not None,
+          "unjudged never trips; judged trips at %.1fs" % t_judged)
     check("...and it defaults to `drives`, so callers that omit it are unchanged",
-          judged_run(None) == judged_run(np.ones(4, bool)),
-          "both trip at %s" % judged_run(None))
+          judged_run(None) == t_judged, "both trip at %s" % t_judged)
 
     ramp = lambda tt: 0.02 if tt < 10.0 else 0.02 + 0.58 * min(1.0, (tt - 10.0) / 14.0)
     t_ramp, _ = envelope_run(ramp, secs=40.0)
@@ -2223,9 +2646,144 @@ def _selftest():
           cap_scale(np.array([0.1]), np.array([0.4]), 0.225, np.array([True]))
           == 0.0, "no scale can fix it; PID.drive's clip does")
 
+    # ---- the box allocator: the same total cap, solved per coil ------------
+    print()
+    rngb = np.random.default_rng(20260820)
+    KP = np.array([0.035, 0.035, 0.035])        # MODAL_KP as it ships, flat
+    worst_box = worst_pow = worst_proj = worst_obj = -np.inf
+    ndraw = nbind = nclip_pump = nrankdef = 0
+    ratio = []
+    for it in range(3000):
+        nc = int(rngb.integers(3, 5))            # 3 or 4 drivable coils
+        cb = list(rngb.permutation(4)[:nc])
+        Ab = np.zeros((nm, n))
+        Ab[:, cb] = rngb.normal(size=(nm, nc))
+        if it % 7 == 0:                          # rank-deficient on purpose
+            Ab[:, cb[1]] = Ab[:, cb[0]] * rngb.normal()
+        if it % 23 == 0:                         # a coil set that moves nothing
+            Ab[:, cb] = 0.0
+        msk = np.zeros(n, bool)
+        msk[cb] = True
+        Ac = Ab[:, cb]
+        Uc, svc, _ = np.linalg.svd(Ac, full_matrices=False)
+        keep = int(np.sum(svc > max(float(svc[0]), 1e-300) * 1e-9))
+        Pj = Uc[:, :keep] @ Uc[:, :keep].T
+        kp = KP if it % 3 else KP * np.array([1.0, 3.0, 0.4])   # non-flat too
+        qd = rngb.normal(size=nm) * (0.0 if it % 13 == 0 else 1.0)   # f = 0 draws
+        fd = -kp * (Pj @ qd)
+        gv = Pj @ fd
+        mb = np.zeros(n)
+        mb[cb] = np.linalg.pinv(Ac) @ gv
+        capb = float(10.0 ** rngb.uniform(-3.0, -0.3))
+        fixb = np.zeros(n)
+        # every fifth draw puts `fixed` ALONE past the cap -- the case cap_scale
+        # answers with a scale of 0.0 (CLAUDE.md 2: coil 3 reached 0.4229V
+        # against a 0.250V half-window while the allocation stayed inside 0.20V)
+        fixb[cb] = rngb.normal(size=nc) * capb * (3.0 if it % 5 == 0 else 0.3)
+        W = np.linalg.pinv(Pj @ np.diag(kp) @ Pj)
+        ub, _pin = cap_box(mb, fixb, capb, msk, Ab, w=W)
+        ndraw += 1
+        nrankdef += keep < nm
+        # 1. the box, stated as the invariant of the docstring
+        tot = np.abs(ub + fixb)[msk]
+        worst_box = max(worst_box, float(np.max(tot - np.maximum(capb,
+                                                                np.abs(fixb)[msk]))))
+        worst_box = max(worst_box, float(np.max(np.abs(ub[~msk]))))
+        # 2. dissipativity under saturation
+        pv = Ac @ ub[cb]
+        if keep == nm:
+            worst_pow = max(worst_pow, float(qd @ pv) if np.any(pv) else -np.inf)
+        worst_proj = max(worst_proj, float(qd @ (Pj @ pv)) if np.any(pv) else -np.inf)
+        # a naive per-channel clip has neither property
+        lob = np.minimum(0.0, -capb - fixb[cb])
+        hib = np.maximum(0.0, capb - fixb[cb])
+        if keep == nm and float(qd @ (Ac @ np.clip(mb[cb], lob, hib))) > 1e-15:
+            nclip_pump += 1
+        # 3. never worse than cap_scale on the objective it is asked to minimise
+        us = cap_scale(mb, fixb, capb, msk) * mb
+        rb, rs = Ac @ ub[cb] - gv, Ac @ us[cb] - gv
+        scl = max(1.0, float(gv @ W @ gv))
+        worst_obj = max(worst_obj, float(rb @ W @ rb - rs @ W @ rs) / scl)
+        if float(np.max(np.abs(ub - mb))) > 1e-12 * max(1.0, float(np.max(np.abs(mb)))):
+            nbind += 1
+            ns = float(np.linalg.norm(Ac @ us[cb]))
+            if ns > 0:
+                ratio.append(float(np.linalg.norm(pv)) / ns)
+
+    check("cap_box NEVER leaves the box, over %d randomised draws" % ndraw,
+          worst_box <= 1e-12,
+          "worst |u+fixed| - max(cap,|fixed|) = %+.2e; %d draws rank-deficient, "
+          "%d with fixed alone past the cap" % (worst_box, nrankdef, ndraw // 5))
+    check("...and it DISSIPATES under saturation: qdot . (A_C u) < 0",
+          worst_pow < 0.0,
+          "worst power %+.3e over the full-rank draws, where W = pinv(Proj K "
+          "Proj) is the metric the proof needs" % worst_pow)
+    check("...on a rank-deficient mask only the PROJECTED power is bounded",
+          worst_proj <= 1e-12,
+          "worst qdot . Proj p = %+.3e -- which is why `box_args` returns None "
+          "there and the caller must keep cap_scale" % worst_proj)
+    check("...where a naive per-channel clip PUMPS instead",
+          nclip_pump > 0, "clip(u) gave qdot . p > 0 on %d of %d full-rank draws"
+          % (nclip_pump, ndraw - nrankdef))
+    check("...and it never does worse than cap_scale on the objective",
+          worst_obj <= 1e-9,
+          "worst normalised excess %+.2e over %d draws, %d of them binding"
+          % (worst_obj, ndraw, nbind))
+    check("...and where the box binds it realises MORE force than cap_scale",
+          len(ratio) > 0 and float(np.median(ratio)) > 1.0,
+          "||A_C u|| ratio median %.3f, p10 %.3f, p90 %.3f over %d binding draws"
+          % (float(np.median(ratio)), float(np.percentile(ratio, 10)),
+             float(np.percentile(ratio, 90)), len(ratio)))
+
+    # An UNBOUND box is today's allocator exactly -- not a nearby point of the
+    # same objective. That is what the ||u/d|| tie-break is for, and `d` has to
+    # be the row-balancing scale `_build_tables` used or it lands elsewhere.
+    drv = np.zeros(n, bool)
+    drv[[0, 1, 2, 3]] = True
+    u0, mk0, cm0, _ = M.allocate(-KP * np.array([0.60, -0.30, 0.45]), drv)
+    Wf, df = M.box_args(mk0, KP)
+    ubig, _ = cap_box(u0, np.zeros(n), 1e6, cm0, M.a, w=Wf, d=df)
+    check("unconstrained, cap_box reproduces the ROW-BALANCED A_C^+ f exactly",
+          np.allclose(ubig, u0, rtol=0, atol=1e-12) and M.balanced[mk0],
+          "max |cap_box - allocate| = %.2e over the balanced inverse the rungs "
+          "actually run" % float(np.max(np.abs(ubig - u0))))
+    check("...and `box_args` hands back W = diag(1/kp) on a full-rank mask",
+          np.allclose(Wf, 1.0 / KP) and df.shape == (n,),
+          "kp %s -> W diag %s" % (np.round(KP, 4), np.round(Wf, 2)))
+    check("...and REFUSES the two cases the dissipation proof does not cover",
+          M.box_args(mk0, np.array([0.035, 0.0, 0.035])) == (None, None)
+          and M.box_args(0b0011, KP) == (None, None),
+          "a zero per-mode gain (K singular), and a 2-coil mask that has no "
+          "allocator table at all (min_coils %d)" % M.min_coils)
+
+    # The measured overrun, as a worked case. Coil 0 is 3x weaker than 1/2/3
+    # (9.92 against 29.80 / 34.28 / 28.93 counts/V, CLAUDE.md "The geometry"),
+    # so under one scalar it is the coil that decides the whole vector.
+    capd, mskd = 0.225, np.array([1, 1, 1, 1, 0, 0, 0, 0], bool)
+    Ad = np.zeros((nm, n))
+    Ad[:, :4] = np.array([[-0.0764, +0.2480, +0.8196, +0.5108],
+                          [-0.5489, +0.4114, -0.2699, -0.6757],
+                          [-0.2884, -0.5612, -0.6515, +0.4212]])   # 02:42 run's A
+    md = np.zeros(n)
+    md[:4] = np.array([0.150, -0.040, 0.030, 0.020])
+    fxd = np.zeros(n)
+    fxd[:4] = np.array([0.100, -0.010, 0.005, 0.000])   # a big D term on coil 0
+    sd = cap_scale(md, fxd, capd, mskd)
+    ud, _ = cap_box(md, fxd, capd, mskd, Ad, w=1.0 / KP)
+    gd = Ad[:, :4] @ md[:4]
+    check("ONE coil near its rail no longer throttles the other three",
+          np.abs(ud + fxd)[mskd].max() <= capd + 1e-12
+          and np.linalg.norm(Ad[:, :4] @ ud[:4] - gd)
+          < np.linalg.norm(Ad[:, :4] @ (sd * md)[:4] - gd),
+          "cap_scale scales all four by %.3f; cap_box pins coil 0 at %.4fV and "
+          "keeps %.0f%% of the commanded force against its %.0f%%"
+          % (sd, ud[0], 100 * np.linalg.norm(Ad[:, :4] @ ud[:4])
+             / np.linalg.norm(gd),
+             100 * np.linalg.norm(Ad[:, :4] @ (sd * md)[:4]) / np.linalg.norm(gd)))
+
     # ---- the in-band floor must not grade an orthogonal axis blind ----------
     print()
-    hf = Health(8, 12, 1011, 0.5, 0.8, 1.3, 0.8, 1.3, 2.0, 0.10)
+    hf = health()
     enb = np.array([1, 1, 1, 1, 1, 0, 1, 1], bool)
     exm = np.array([0, 0, 0, 0, 1, 1, 1, 1], bool)
     # a0-a3 carry the band; a4/a6/a7 read orthogonal axes and MOVE; a5 is a pin.

@@ -2,10 +2,14 @@
 
 ONE OWNER FOR THE NAMES. `harness.py` and `bench.py` both need to discover
 controllers and both need them in ladder order. They used to carry a copy each
-of the same regex, and `bench.py` still records what that cost: the two patterns
-drifted, and `make run` silently could not see `osem.v5.5.py` at all while
-`make check` could. A version the bench cannot select is a version that does not
-get run. So the list lives here and both import it.
+of the same regex, and the two patterns drifted: `make run` silently could not
+see `osem.v5.5.py` at all while `make check` could. A version the bench cannot
+select is a version that does not get run. So the list AND the directory scan
+(`discover`) live here and both import them.
+
+This module imports `glob` and `os` and NOTHING ELSE, deliberately. `bench.py`
+is the hardware entry point and must not acquire numpy, `sim/` or a stubbed
+`serial` by way of a name lookup.
 
 WHY NAMES AND NOT NUMBERS. The numbered ladder ran to v13 and the numbers stopped
 carrying information: v10 and v11 were both "newer than v9" and one of them damped
@@ -37,7 +41,9 @@ have -- v7 was a branch off v5, not a successor to it. Names force the question
              would be a guess, and deriving one from a bench run is the next
              rung. The cost is that Phi is now inside the estimator, so a wrong
              Phi gives a wrong velocity; zeta's refusal ladder is kept whole and
-             chi2 is what detects it. Written 2026-08-17, not yet on the bench.
+             chi2 is what detects it. RAN ON THE RIG 2026-08-18 -- one diagonal
+             null test and one modal run -- and is the first rung in this repo
+             ever to print LOCKED (DEGRADED, 4/7, on a stored baseline).
     theta    eta's law under ONE DECLARED ACTUATOR BUDGET, divided by NEED.
              `BUDGET_V = 0.225 V` is the demand about bias a single coil may
              carry -- eta's cap, but declared once and solved on the TOTAL
@@ -72,6 +78,9 @@ diagonal law verbatim when `data/modal.json` is absent or refused, so the
 diagonal control is still one run away -- that is the null test in CLAUDE.md
 Sec 4. `git show b90c983:osem.delta.py` if a direct comparison is ever needed.
 """
+
+import glob
+import os
 
 # Ladder order. Position in this tuple IS the order; nothing is derived from
 # the name. Appending a name here is how a new rung becomes visible to
@@ -115,6 +124,21 @@ def sort_key(basename):
 def filename(name):
     """'eta' -> 'osem.eta.py'."""
     return PREFIX + name + SUFFIX
+
+
+def discover(dirpath):
+    """Every controller in `dirpath`, in ladder order, tools last.
+
+    One copy, called by both entry points. Anything `sort_key` does not
+    recognise is skipped, which is what keeps an unlisted `osem.*.py` off
+    `make run`.
+    """
+    found = []
+    for path in glob.glob(os.path.join(dirpath, PREFIX + "*" + SUFFIX)):
+        k = sort_key(os.path.basename(path))
+        if k is not None:
+            found.append((k, path))
+    return [p for _, p in sorted(found)]
 
 
 def bare(text):

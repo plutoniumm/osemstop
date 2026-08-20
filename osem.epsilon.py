@@ -87,7 +87,28 @@ FIXES = ("saturation-latch", "rail-threshold", "runaway-baseline", "auto-disable
 ENABLE_CHANNEL = [True, True, True, True, True, True, True, True]
 
 BIAS = np.full(N, 0.25)
-VMIN, VMAX, MAX_SLEW_PER_S = 0.0, 0.5, 2.0     # nominal; the trim moves the
+VMIN, VMAX, MAX_SLEW_PER_S = 0.0, 2.5, 2.0
+# OPENED 2026-08-20, and the bench forced it rather than suggested it.
+#   The DAC's hard ceiling is 2.5000 V: `arduino.ino` clamps at 25000 units of
+#   100 uV and maps 0..25000 onto the AD5628's 0..4095 codes on its internal
+#   reference. It is UNIPOLAR -- there is no negative side, so a negative bias
+#   cannot be commanded at any setting.
+#   0.0-0.5 V used 20 % of that and there was never a recorded justification for
+#   it (CLAUDE.md Sec 11). What made it binding: on the 12:40 run every one of
+#   coils 0-3 slammed BOTH rails, out spanning 0.000 to 0.500 V with an rms
+#   demand of 0.089-0.148 V against a 0.25 V half-window, and the loop PUMPED --
+#   counts std 81.8/86.8/170.4/84.7 at zero gain against 136.6/153.8/273.8/180.7
+#   with the gain live, a factor 1.61-2.13, steady over twelve 20 s slices.
+#   The signs were re-measured the same session and are NOT the cause
+#   (slopesign.py: a0 +70.92, a1 +67.75, a2 -184.26, a3 +81.08 counts/V, and
+#   STEADY_GAIN already carries a2 inverted). Clipping is: once a coil clips the
+#   realised force is no longer -Kp*v and the dissipation guarantee is void.
+#   HIGHEST VOLTAGE EVER COMMANDED ON THIS HARDWARE WITHOUT INCIDENT IS 1.1 V
+#   (analysis/bias_sweep.py). Above that is unmeasured, and the coil driver
+#   between the DAC and the coil IS NOT IN THIS REPO, so 0.25 V may have encoded
+#   a real current limit. BIAS is the CONTINUOUS one: it sits on every coil for
+#   the whole run, so if the driver is a voltage source into a resistive coil
+#   the static dissipation goes as BIAS^2.     # nominal; the trim moves the
                                                # per-channel window in __init__
 
 # Kp. STEADY is bench-validated; CAPTURE is stronger, large-amplitude only, NOT
@@ -103,6 +124,14 @@ VMIN, VMAX, MAX_SLEW_PER_S = 0.0, 0.5, 2.0     # nominal; the trim moves the
 # a4-a7 ZERO GAIN, sensors only: 0.1-9% of power in 0.4-3 Hz, lock-in SNR 1.1-1.5,
 # coil signs unknown (DC diagonals +8 / +4 / +7 counts/V on a 4-count mean
 # |response|). Stepped sine, eight coils, both quadratures (CLAUDE.md 2b) fixes it.
+# STALE CONVENTION -- DO NOT RUN THIS RUNG BY ACCIDENT. The signs below are the
+# PRE-FIX ones. On 2026-08-20 the rule was corrected in `eta` and `theta` to
+#     slope x gain > 0
+# with the slopes re-measured that day (slopesign.py: a0 +70.92, a1 +67.75,
+# a2 -184.26, a3 +81.08 counts/V), which makes the correct a0-a3 vector
+# +/+/-/+ -- the exact inverse of what is written here. These VALUES are left
+# untouched because this rung is not being re-validated; it is kept only as the
+# diagonal law the modal rungs fall back to. Verify against eta before use.
 STEADY_GAIN = np.array([-0.035, -0.035, +0.035, -0.035,
                         +0.000, +0.000, +0.000, +0.000])
 CAPTURE_GAIN = np.array([-0.035, -0.035, +0.035, -0.035,
@@ -123,6 +152,7 @@ KI_GAIN = np.array([+0.0000, +0.0000, +0.0000, +0.0000,
 # Same sign per channel as Kp, so a guessed sign would be wrong in two places at
 # once. The derivative of velocity is ACCELERATION: effective mass, dissipating
 # nothing.
+# Same stale convention as STEADY_GAIN above: signs are the pre-2026-08-20 ones.
 KD_GAIN = np.array([-0.00045, -0.00045, +0.00045, -0.00045,
                     +0.00000, +0.00000, +0.00000, +0.00000])
 D_SMOOTH_HZ, I_CLAMP_V, TRACK_TC_S = 2.0, 0.15, 0.5   # I_CLAMP is a backstop
@@ -796,9 +826,17 @@ def _rms(bank, t, x, m):
 class Actuator:
     """DAC writes for all N coils: 0.5 mV deadband, with the CONTROL STEP as the
     throttle. No second write throttle: one on time.time() would race the loop's
-    own 10 ms period and drop a semi-random half of the writes. The budget fits,
-    8 coils x 100 Hz x ~15 bytes = 12 kB/s against 50 kB/s at 500000 baud (the
-    CLAUDE.md item 2c budget, written against 115200's 11.5 kB/s).
+    own 10 ms period and drop a semi-random half of the writes. THE BUDGET DOES
+    NOT FIT: 8 coils x 100 Hz x ~15 bytes = 12 kB/s against the 115200/10 =
+    11.5 kB/s the attached board was MEASURED at on 2026-08-17, i.e. 104 % of the
+    link. 7 driven channels is 10.5 kB/s (91 %), 4 is 6.0 kB/s (52 %). This
+    paragraph read "against 50 kB/s at 500000 baud" until 2026-08-20, which was
+    the rate a DIFFERENT board ran.
+    Saturating this link is not theoretical: `status.py`'s first settler ran at
+    the 379 Hz sample rate, about 182 kbit/s of SET traffic against 115200, and
+    the applied voltage lagged by a growing delay -- in-band rms went 40 -> 84
+    counts, i.e. it PUMPED (CLAUDE.md, `settle`). Decimating to the 100 Hz control
+    clock is what fixed it, and that is what this throttle is.
 
     ValueError is deliberately NOT caught: FastDAC raises it for a channel outside
     0..7 or a voltage outside 0..2.5 V, neither reachable since `self.out` is a
