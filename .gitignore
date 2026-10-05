@@ -19,3 +19,6 @@ talk/
 
 # Working notes for the AI assistant. Not part of the deliverable.
 CLAUDE.md
+
+# 1.0 reaches the shared run logs through a symlink
+/1.0/data

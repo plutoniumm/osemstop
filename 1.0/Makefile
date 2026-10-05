@@ -4,8 +4,8 @@
 # Prefer the repo venv if one exists. The system pythons on this machine are a
 # mess -- /usr/local/bin/python3 is an x86_64 build with no numpy, and Apple's
 # 3.9 launches x86_64 against an arm64 numpy. Create the venv with:
-#     uv venv .venv && uv pip install --python .venv/bin/python numpy pyserial
-PY ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
+#     uv venv .venv && uv pip install --python ../.venv/bin/python numpy pyserial
+PY ?= $(if $(wildcard ../.venv/bin/python),../.venv/bin/python,python3)
 FQBN ?= arduino:avr:mega        # CS on pin 53 is Mega/Due specific
 
 .PHONY: run status replay arduino ports check scope list help
