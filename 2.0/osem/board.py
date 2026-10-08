@@ -1,26 +1,36 @@
 import glob
+import os
+import re
 import time
 import numpy as np
+from .rig import HERE
 
 
 class Board:
     FRAME, SYNC, CMD = (23, b"\xa5\xc3", b"\xa5<")
+    OVERSAMPLE, CORNERS = (10, 2)
 
-    def __init__(self, rig, cfg, port=None, oversample=10, corners=2, say=print):
+    def __init__(self, rig, cfg, port=None, say=print):
         import serial
 
-        self.say, self.os, self.cr = say, int(oversample), int(corners)
+        self.say, self.os, self.cr = say, self.OVERSAMPLE, self.CORNERS
         self.map, self.n, self.max = (list(rig.dac_map), rig.n, cfg.adc_max)
         self.ser = serial.Serial(port or self.find_port(), 115200, timeout=2)
         if b"READY" not in self._wait(b"READY", 6.0):
             raise SystemExit(
-                "no READY from the board at 115200 baud. Wrong port, or flash it: `run.py flash`."
+                "no READY from the board at 115200 baud. Wrong port, or flash it: `python flash.py`."
             )
         self._ask(b"STOP")
         info = self._ask(b"INFO")
-        if b"fw=2" not in info:
+        want = re.search(
+            r"#define FW (\d+)", open(os.path.join(HERE, "firmware/firmware.ino")).read()
+        )[1]
+        got = re.search(rb"fw=(\d+)", info)
+        self.fw = got[1].decode() if got else "none"
+        if self.fw != want:
             raise SystemExit(
-                "board answered %r to INFO, not firmware 2. Flash it: `run.py flash`." % info[:60]
+                "board firmware is version %s, this code needs %s. Run `python flash.py`."
+                % (self.fw, want)
             )
         for cmd, want in (
             (b"ACK 0", b"ack=0"),
@@ -31,10 +41,7 @@ class Board:
             got = self._ask(cmd)
             if want not in got:
                 raise SystemExit("board answered %r to %r" % (got[:60], cmd))
-        say(
-            "[board] ready: binary both ways, %d scans per frame, corners read %dx"
-            % (self.os, self.cr)
-        )
+        say("board   firmware %s on %s" % (self.fw, self.ser.port))
         self.div = self.os * np.array([self.cr] * 4 + [1] * (8 - 4), float)
         self.buf, self.seq, self.t0, self._rx = (bytearray(), None, None, None)
         self.frames = self.lost = self.bad = self.sent = self.cmd_ok = self.cmd_bad = 0
@@ -118,8 +125,8 @@ class Board:
 
     def close(self):
         self.say(
-            "[link] %d frames, %d lost, %d bad; %d command frames sent, board accepted %d and rejected %d"
-            % (self.frames, self.lost, self.bad, self.sent, self.cmd_ok, self.cmd_bad)
+            "\nlink    %d frames, %d lost, %d corrupt; %d commands sent, %d rejected"
+            % (self.frames, self.lost, self.bad, self.sent, self.cmd_bad)
         )
         for step in (
             lambda: self.ser.write(b"STOP\nMODE ASCII\nOS 1\n"),
@@ -135,89 +142,67 @@ class Board:
 class Sim:
     OFFSET = np.array([560.0, 630.0, 700.0, 680.0, 670.0, 535.0, 590.0, 587.0])
 
+    GAMMA = 0.0072
+
     def __init__(
         self,
         rig,
         seconds,
-        wire_hz=400.0,
-        seed=0,
-        gamma=0.0072,
+        wire_hz=225.0,
         mode_rms=20.0,
-        noise=1.0,
         a_scale=1.0,
         kicks=(),
         stuck=None,
+        delay=0.0,
     ):
         self.rig, self.dt, self.end = (rig, 1.0 / wire_hz, seconds)
-        self.rng = np.random.default_rng(seed)
+        self.rng = np.random.default_rng(0)
         self.w = 2.0 * np.pi * rig.f_hz
-        self.gamma, self.noise = (gamma, noise)
         self.a = rig.a_dc * a_scale
         self.strong = np.linalg.norm(rig.phi, axis=1) > 0.5
-        self.drive = 2.0 * self.w * mode_rms * np.sqrt(gamma)
+        self.drive = 2.0 * self.w * mode_rms * np.sqrt(self.GAMMA)
         self.q = mode_rms * self.rng.normal(size=rig.nm)
         self.v = mode_rms * self.w * self.rng.normal(size=rig.nm)
         self.kicks = sorted(kicks)
         self.stuck = stuck or {}
         self.u = rig.bias.copy()
+        self.delay, self.pending = (delay, [])
         self.t, self.parked = (0.0, False)
 
     def read(self):
         if self.t >= self.end:
             raise EOFError
         self.t += self.dt
+        while self.pending and self.pending[0][0] <= self.t - self.dt + 1e-12:
+            self.u = self.pending.pop(0)[1]
         du = self.u - self.rig.bias
         eq = self.a @ du
         c, s = (np.cos(self.w * self.dt), np.sin(self.w * self.dt))
         x, v = (self.q - eq, self.v)
         self.q = eq + (c * x + s / self.w * v)
-        self.v = (-self.w * s * x + c * v) * np.exp(-2.0 * self.gamma * self.dt)
+        self.v = (-self.w * s * x + c * v) * np.exp(-2.0 * self.GAMMA * self.dt)
         self.v += self.drive * np.sqrt(self.dt) * self.rng.normal(size=len(self.w))
         while self.kicks and self.kicks[0][0] <= self.t:
             self.v += self.kicks.pop(0)[1] * self.w * 20.0
         y = self.OFFSET + self.rig.phi @ self.q
         y = y + np.where(self.strong, 0.0, self.rig.dc @ du)
-        y = y + self.noise * self.rng.normal(size=len(y))
+        y = y + self.rng.normal(size=len(y))
         for i, (t0, val) in self.stuck.items():
             if self.t >= t0:
                 y[i] = val
         return (self.t, np.clip(np.round(y), 0, 1023))
 
     def write(self, volts):
-        self.u = np.asarray(volts, float).copy()
+        volts = np.asarray(volts, float).copy()
+        if self.delay:
+            self.pending.append((self.t + self.delay, volts))
+        else:
+            self.u = volts
 
     def park(self, volts):
-        self.write(volts)
+        self.pending.clear()
+        self.u = np.asarray(volts, float).copy()
         self.parked = True
-
-    def close(self):
-        pass
-
-
-class Replay:
-
-    def __init__(self, path, n=8):
-        with open(path) as fh:
-            head = fh.readline().strip().split(",")
-        tcol = head.index("t" if "t" in head else "time_s")
-        names = (
-            ["a%d" % i for i in range(n)] if "a0" in head else ["ch%d_counts" % i for i in range(n)]
-        )
-        data = np.loadtxt(
-            path, delimiter=",", skiprows=1, usecols=[tcol] + [head.index(k) for k in names]
-        )
-        self.t, self.c, self.k = (data[:, 0] - data[0, 0], data[:, 1:], 0)
-
-    def read(self):
-        if self.k >= len(self.t):
-            raise EOFError
-        self.k += 1
-        return (self.t[self.k - 1], self.c[self.k - 1])
-
-    def write(self, volts):
-        pass
-
-    park = write
 
     def close(self):
         pass

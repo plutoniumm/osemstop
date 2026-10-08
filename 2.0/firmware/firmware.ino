@@ -1,6 +1,7 @@
 // Arduino Mega: 8 ADC inputs in, 8-channel SPI DAC out. Protocol: see osem/board.py.
 #include <SPI.h>
 
+#define FW 3
 #define CS 53
 #define NCH 8
 
@@ -263,7 +264,7 @@ static void handleCommand(char *s) {
     Serial.print(F(" presc="));  Serial.print(prescNow);
     Serial.print(F(" ack="));    Serial.print(ackOn ? 1 : 0);
     Serial.print(F(" frame="));  Serial.print(FRAME_LEN);
-    Serial.print(F(" fw=2 os=")); Serial.print(osN);
+    Serial.print(F(" fw=")); Serial.print(FW); Serial.print(F(" os=")); Serial.print(osN);
     Serial.print(F(" cr=")); Serial.print(crN);
     Serial.print(F(" frame2=")); Serial.print(FRAME2_LEN);
     Serial.print(F("\r\n"));

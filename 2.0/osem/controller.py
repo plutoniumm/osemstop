@@ -1,93 +1,295 @@
+from collections import deque
 import numpy as np
-from .config import Config
-from .filters import Decimator, InBand, RMSBank
-from .kalman import Chi2Log, Estimator
-from .regulators import Modal
-from .term import STATE, c
-from .safety import Baseline, Breaker, Health, QuietLevel
+from rich.text import Text
+from .filters import Clock, Estimator, RMSBank
+from .rig import GEOMETRY, Config
 
-STATES = ("CALIBRATING", "DAMPING", "FAULT")
+
+def hold(cond, since, t):
+    return np.where(cond, np.where(np.isinf(since), t, since), np.inf)
+
+
+def box_solve(H, b, lo, hi, room, start=None, rounds=6):
+    n = len(b)
+    u, free, tied = (np.zeros(n), np.ones(n, bool), False) if start is None else start
+    u, free, lam = (u.copy(), free.copy(), 0.0)
+    for _ in range(rounds):
+        k = np.nonzero(free)[0]
+        if len(k):
+            u[k] = 0.0
+            rhs = (b - H @ u)[k]
+            if tied:
+                K = np.ones((len(k) + 1, len(k) + 1))
+                K[:-1, :-1], K[-1, -1] = (H[k][:, k], 0.0)
+                x = np.linalg.solve(K, np.append(rhs, room - u.sum()))
+                x, lam = (x[:-1], x[-1])
+            else:
+                x, lam = (np.linalg.solve(H[k][:, k], rhs), 0.0)
+            bad = (x < lo[k]) | (x > hi[k])
+            u[k] = np.clip(x, lo[k], hi[k])
+            if bad.any():
+                free[k[bad]] = False
+                continue
+        push = H @ u - b
+        if not tied and u.sum() > room:
+            tied = True
+            if not len(k):
+                # every coil pinned and the sum is over: free the one that helps least
+                free[np.argmax(np.where(u > 0, push, -np.inf))] = True
+            continue
+        if tied and lam < 0:
+            tied = False
+            continue
+        push = push + lam
+        wrong = ~free & (((u >= hi) & (push > 0)) | ((u <= lo) & (push < 0)))
+        if not wrong.any():
+            break
+        free |= wrong
+    state = (u, free, tied)
+    if u.sum() > room:
+        u = u * (room / u.sum())
+    return (u, state)
+
+
+class Modal:
+    RIDGE, GAIN_FLOOR = (0.01, 0.1)
+
+    def __init__(self, rig, cfg):
+        self.cfg, self.n, self.a = (cfg, rig.n, rig.a_unit)
+        self.coils = np.zeros(rig.n, bool)
+        self.coils[rig.a_coils] = True
+        self.target = np.full(rig.nm, cfg.modal_kp * cfg.modal_scale)
+        self.target *= [dict(cfg.mode_gain).get(d, 1.0) for d in rig.dof]
+        self.gain = np.zeros(rig.nm)
+        self.min_sensors = np.minimum(cfg.modal_min_sensors, (rig.phi != 0).sum(axis=0))
+        self.lo = np.maximum(-cfg.budget_v, cfg.vmin - rig.bias)
+        self.hi = np.minimum(cfg.budget_v, cfg.vmax - rig.bias)
+        self.room = max(cfg.sum_v_max - float(rig.bias.sum()), 0.0)
+        self._solutions, self._warm = ({}, (None, None))
+
+    def ramp(self, dt):
+        step = self.cfg.gain_slew_per_s * dt
+        self.gain = self.gain + np.clip(self.target - self.gain, -step, step)
+
+    def _solve(self, cols):
+        if len(cols) < self.cfg.modal_min_coils:
+            return None
+        Ac = self.a[:, cols]
+        top = np.linalg.svd(Ac, compute_uv=False)[0]
+        if top <= 1e-09:
+            return None
+        return (Ac, self.RIDGE * (top / self.cfg.modal_cond_max) ** 2 * np.eye(len(cols)))
+
+    def solve(self, qdot, gain, coil_ok, seen):
+        u, used = (np.zeros(self.n), np.zeros(self.n, bool))
+        cols = tuple((j for j in range(self.n) if coil_ok[j] and self.coils[j]))
+        enough = seen >= self.min_sensors
+        if cols not in self._solutions:
+            self._solutions[cols] = self._solve(list(cols))
+        sol = self._solutions[cols]
+        if sol is None or not enough.any():
+            return (u, used)
+        k = list(cols)
+        used[k] = True
+        g = np.where(enough, gain, 0.0)
+        if g.max() <= 0:
+            return (u, used)
+        Ac, ridge = sol
+        # weighting each mode's shortfall by 1/gain keeps qdot.(A u) <= 0 at the optimum
+        AtW = Ac.T / np.maximum(g / g.max(), self.GAIN_FLOOR)
+        start = self._warm[1] if self._warm[0] == cols else None
+        x, state = box_solve(
+            AtW @ Ac + ridge, AtW @ (-g * qdot), self.lo[k], self.hi[k], self.room, start
+        )
+        self._warm = (cols, state)
+        if (qdot * (Ac @ x))[g > 0].sum() > 0:
+            return (u, used)
+        u[k] = x
+        return (u, used)
+
+
+class Health:
+
+    def __init__(self, n, cfg):
+        self.n, self.cfg = (n, cfg)
+        self.rail = np.zeros(n, bool)
+        self.sat = np.zeros(n, bool)
+        self.healthy = np.ones(n, bool)
+        self.floor_bad = np.zeros(n, bool)
+        self.clear_t = np.full(n, np.inf)
+        self.rail_std = np.zeros(n)
+        self.rail_hist, self.sat_hist = (deque(), deque())
+        self.rail_sum, self.sat_sum = (np.zeros(n), np.zeros(n))
+        self.c_sum, self.c2_sum = (np.zeros(n), np.zeros(n))
+
+    def rails(self, counts, t):
+        cfg = self.cfg
+        railed = (counts <= cfg.rail_lo) | (counts >= cfg.rail_hi)
+        self.rail_hist.append((t, railed, counts.copy()))
+        self.rail_sum = self.rail_sum + railed
+        self.c_sum = self.c_sum + counts
+        self.c2_sum = self.c2_sum + counts * counts
+        while self.rail_hist and t - self.rail_hist[0][0] > cfg.rail_sustain_s:
+            _, r0, c0 = self.rail_hist.popleft()
+            self.rail_sum = self.rail_sum - r0
+            self.c_sum = self.c_sum - c0
+            self.c2_sum = self.c2_sum - c0 * c0
+        spanned = bool(self.rail_hist) and t - self.rail_hist[0][0] >= cfg.rail_sustain_s * 0.9
+        nw = max(len(self.rail_hist), 1)
+        self.rail = np.logical_and(spanned, self.rail_sum / nw >= cfg.rail_fraction)
+        self.rail_std = np.sqrt(np.maximum(self.c2_sum / nw - (self.c_sum / nw) ** 2, 0.0))
+
+    def sats(self, pinned, t):
+        cfg = self.cfg
+        self.sat_hist.append((t, pinned))
+        self.sat_sum = self.sat_sum + pinned
+        while self.sat_hist and t - self.sat_hist[0][0] > cfg.sat_sustain_s:
+            self.sat_sum = self.sat_sum - self.sat_hist.popleft()[1]
+        spanned = bool(self.sat_hist) and t - self.sat_hist[0][0] >= cfg.sat_sustain_s * 0.9
+        self.sat = np.logical_and(
+            spanned, self.sat_sum / max(len(self.sat_hist), 1) >= cfg.sat_fraction
+        )
+
+    def dead_pin(self):
+        out = self.rail & (self.rail_std < self.cfg.dead_pin_std)
+        return out & ~out.all()
+
+    def rearm(self, t, kf_reset):
+        drop = self.healthy & self.rail
+        self.healthy[drop] = False
+        self.clear_t[self.rail] = np.inf
+        idle = ~self.healthy & ~self.rail & ~self.floor_bad
+        starting = idle & np.isinf(self.clear_t)
+        self.clear_t[starting] = t
+        if starting.any():
+            kf_reset(starting)
+        back = idle & (t - self.clear_t >= self.cfg.rearm_s)
+        self.healthy[back], self.clear_t[back] = (True, np.inf)
+        return (drop, back)
+
+
+class Breaker:
+
+    def __init__(self, n, cfg):
+        self.n, self.cfg = (n, cfg)
+        self.bank = RMSBank(cfg.envelope_window_s, n)
+        self.ht, self.he, self.h0, self.h1 = (np.zeros(64), np.zeros((n, 64)), 0, 0)
+        self.valid_t = 0.0
+        self.excess_since = np.full(n, np.inf)
+
+    def arm(self, t):
+        self.h0 = self.h1 = 0
+        self.valid_t = t + self.cfg.envelope_window_s
+        self.excess_since[:] = np.inf
+
+    def reset(self, mask=None):
+        self.bank.reset(mask)
+
+    def sample(self, t, x, healthy, judge, baseline, sat):
+        cfg = self.cfg
+        env = self.bank.update(t, x, healthy)
+        if t >= self.valid_t:
+            if self.h1 == len(self.ht):
+                k = self.h1 - self.h0
+                ht, he = (np.zeros(max(4 * k, 64)), np.zeros((self.n, max(4 * k, 64))))
+                ht[:k], he[:, :k] = (self.ht[self.h0 : self.h1], self.he[:, self.h0 : self.h1])
+                self.ht, self.he, self.h0, self.h1 = (ht, he, 0, k)
+            self.ht[self.h1], self.he[:, self.h1] = (t, env)
+            self.h1 += 1
+        while self.h0 < self.h1 and t - self.ht[self.h0] > cfg.runaway_lag_s * 2:
+            self.h0 += 1
+        he = self.he[:, self.h0 : self.h1]
+        old = int(np.count_nonzero(t - self.ht[self.h0 : self.h1] >= cfg.envelope_window_s))
+        past = he[:, :old].max(axis=1) if old else env
+        peak = he.max(axis=1) if self.h1 > self.h0 else env
+        growing = env > past * cfg.runaway_growth
+        high = env > baseline * cfg.runaway_multiple
+        receded = env < peak * cfg.sat_decay
+        self.excess_since = hold(healthy & judge & high & growing, self.excess_since, t)
+        run_trip = healthy & judge & ~receded & (t - self.excess_since >= cfg.runaway_sustain_s)
+        sat_trip = healthy & sat & ~(env < past * cfg.sat_decay)
+        return (env, run_trip, sat_trip)
+
+
+class QuietLevel:
+
+    def __init__(self, n, cfg):
+        self.n, self.window_s, self.pct = (n, cfg.quiet_window_s, cfg.quiet_pct)
+        self.keep_dt = 1.0 / cfg.quiet_keep_hz
+        self.want = max(2, int(cfg.quiet_min_fill * cfg.quiet_window_s * cfg.quiet_keep_hz))
+        self.hist = deque()
+        self.reset()
+
+    def reset(self):
+        self.hist.clear()
+        self.last_t, self._cache = (None, None)
+
+    def add(self, t, env, mask):
+        if self.last_t is not None and t - self.last_t < self.keep_dt:
+            return
+        self.last_t, self._cache = (t, None)
+        self.hist.append((t, np.asarray(env, float).copy(), np.asarray(mask, bool).copy()))
+        while self.hist and t - self.hist[0][0] > self.window_s:
+            self.hist.popleft()
+
+    def level(self):
+        if len(self.hist) < self.want:
+            return None
+        if self._cache is None:
+            x = np.array([e for _, e, _ in self.hist])
+            m = np.array([v for _, _, v in self.hist])
+            out = np.zeros(self.n)
+            for j in range(self.n):
+                col = x[m[:, j], j]
+                if col.size >= self.want:
+                    out[j] = float(np.percentile(col, self.pct))
+            self._cache = out
+        return self._cache
 
 
 class Controller:
 
-    def __init__(self, rig, cfg=Config(), regulators=None):
+    def __init__(self, rig, cfg=Config()):
         self.rig, self.cfg, self.n = (rig, cfg, rig.n)
         n = rig.n
-        self.regulators = [Modal(rig, cfg)] if regulators is None else list(regulators)
-        self.est = Estimator(rig, cfg, modes=any((r.needs_modes for r in self.regulators)))
-        self.enabled = np.ones(n, bool)
-        self.enabled[list(cfg.disable)] = False
+        self.modal = Modal(rig, cfg)
+        self.est = Estimator(rig, cfg)
         self.bias = rig.bias.copy()
         self.vmin = np.maximum(self.bias - cfg.bias_swing, cfg.vmin)
         self.vmax = np.minimum(self.bias + cfg.bias_swing, cfg.vmax)
         self.out = self.bias.copy()
-        strength = np.linalg.norm(rig.phi, axis=1)
-        self.phi_rows = strength > 0
-        self.voters = strength >= 0.5 * strength.max()
-        self.driven = (
-            np.any([r.coils for r in self.regulators], axis=0)
-            if self.regulators
-            else np.zeros(n, bool)
-        )
-        self.dec = Decimator(cfg.control_hz, n, cfg.mains_null)
-        self.health = Health(
-            n,
-            cfg.rail_lo,
-            cfg.rail_hi,
-            cfg.rail_sustain_s,
-            cfg.rail_fraction,
-            cfg.sat_sustain_s,
-            cfg.sat_fraction,
-            cfg.dead_pin_std,
-            cfg.rearm_s,
-            cfg.floor_frac,
-        )
-        self.brk = Breaker(
-            n,
-            cfg.envelope_window_s,
-            cfg.runaway_multiple,
-            cfg.runaway_sustain_s,
-            cfg.runaway_lag_s,
-            cfg.runaway_growth,
-            cfg.sat_decay,
-            cfg.min_healthy,
-        )
-        self.base = Baseline(
-            n,
-            cfg.calib_subwindow_s,
-            cfg.calib_subwindows,
-            cfg.calib_min_subwindows,
-            cfg.calib_agree_n,
-            cfg.calib_agree_tol,
-            cfg.baseline_sanity,
-            cfg.baseline_max_refusals,
-            cfg.floor_frac,
-        )
-        self.inband = InBand(rig.f_hz, n)
+        core = np.isin(rig.dof, list(GEOMETRY))
+        strength = np.linalg.norm(rig.phi[:, core], axis=1)
+        self.phi_rows = np.any(rig.phi != 0, axis=1)
+        self.driven = self.modal.coils
+        voters = strength >= 0.5 * strength.max()
+        self.extra = np.any(rig.phi[:, ~core] != 0, axis=1) & ~voters
+        self.vote = self.driven & voters if (self.driven & voters).any() else self.driven
+        # a mode only these sensors see must be able to trip the breaker
+        self.judge = self.vote | self.extra
+        self.clock = Clock(cfg.control_hz)
+        self.health = Health(n, cfg)
+        self.brk = Breaker(n, cfg)
         self.rms_ratio = RMSBank(cfg.ratio_window_s, n)
         self.rms_lock = RMSBank(cfg.lock_window_s, n)
-        self.quiet = QuietLevel(
-            n, cfg.quiet_window_s, cfg.quiet_pct, cfg.quiet_keep_hz, cfg.quiet_min_fill
-        )
-        self.chi2_log = {s: Chi2Log((1.0, 2.0, 3.0, 5.0, 10.0)) for s in STATES}
-        self.state, self.events = ("CALIBRATING", [])
-        self.ratio, self.baseline = (np.zeros(n), np.zeros(n))
+        self.quiet = QuietLevel(n, cfg)
+        self.state, self.events = ("WARMUP", [])
+        # a sensor is quiet when its band-passed rms is under this many times its own noise floor
+        self.baseline = cfg.quiet_sigma * np.sqrt(rig.kalman_r)
+        self.ratio = np.zeros(n)
         self.locked = np.zeros(n, bool)
-        self.locked_since = np.full(n, np.inf)
         self.locked_announced, self.lock_time = (False, None)
-        self.sense_ok = self.enabled.copy()
-        self.calib_start, self.damping_start, self.baseline_t = (0.0, None, None)
-        self.damped_for, self.fault_t, self.clear_since = (None, None, None)
-        self.fault_railed = self.fault_amp = False
-        self.fault_count = self.failed = self.reuse_count = self.bad_samples = 0
-        self.stepped, self.n_avg = (False, 0)
-        self.peak_demand, self.peak_sum, self.sum_limited = (0.0, 0.0, 0)
+        self.sense_ok = np.ones(n, bool)
+        self.claimed = np.zeros(n, bool)
+        self.warm_start, self.warm, self.damping_start = (0.0, [], None)
+        self.clear_since = None
+        # until it has locked once, a single failed engagement latches
+        self.fault_count, self.failed = (0, cfg.max_failed_engagements - 1)
+        self.stepped = False
+        self.peak_demand, self.peak_sum = (0.0, 0.0)
         self._said = set()
-        self.base.start(0.0)
-
-    def find(self, kind):
-        return next((r for r in self.regulators if isinstance(r, kind)), None)
+        self._mot = np.zeros((3, n))
+        self.motion, self.free = (np.zeros(n), np.zeros(n))
 
     @property
     def latched(self):
@@ -109,340 +311,195 @@ class Controller:
     def _who(mask):
         return ", ".join(("a%d" % i for i in np.nonzero(mask)[0]))
 
-    def _vote(self):
-        v = self.driven & self.voters
-        return v if v.any() else self.driven
-
     def _amp_ref(self):
         q = self.quiet.level()
-        ref = self.baseline if q is None else np.maximum(self.baseline, q)
-        d = self.driven
-        if d.any() and np.median(ref[d]) > 0:
-            ref = np.maximum(ref, self.cfg.ref_floor_frac * np.median(ref[d]))
-        return ref
+        return self.baseline if q is None else np.maximum(self.baseline, q)
 
     def step(self, counts, t):
         counts = np.asarray(counts, float)
         self.stepped = False
         if not np.all((counts >= 0) & (counts <= self.cfg.adc_max)):
-            self.bad_samples += 1
             return None
+        self._mot += (np.ones(self.n), counts, counts**2)
         self.health.rails(counts, t)
-        got = self.dec.feed(counts, counts * self.cfg.volts_per_count, t)
-        if got is None:
-            return None
-        _, volts, dt, self.n_avg = got
+        dt = self.clock.tick(t)
+        volts = counts * self.cfg.volts_per_count
         self.stepped = True
         h = self.health
-        self.sense_ok = self.enabled & h.healthy & ~h.floor_bad
-        self.est.update(volts, dt, self.sense_ok & ~h.rail & self.phi_rows)
-        if self.est.mkf is not None:
-            self.chi2_log[self.state].add(self.est.chi2)
-        if self.state == "CALIBRATING":
-            self._calibrating(t, volts)
+        self.sense_ok = h.healthy & ~h.floor_bad
+        self.est.update(volts, dt, self.sense_ok & ~h.rail & self.phi_rows, self.out - self.bias)
+        self.ratio = self.rms_ratio.update(t, self.est.bp, np.ones(self.n, bool)) / self.baseline
+        if self.state == "WARMUP":
+            self._warmup(t, counts)
         elif self.state == "DAMPING":
             self._damping(t, dt)
         else:
             self._faulted(t)
         return self._actuate(t, dt)
 
-    def _fault(self, t, msg, railed=False, amp=False):
+    def _fault(self, t, msg):
         self.say("!! " + msg)
-        self.damped_for = t - self.damping_start if self.state == "DAMPING" else None
-        self.fault_railed, self.fault_amp, self.fault_t = (railed, amp, t)
         self.failed += self.state == "DAMPING"
         self.state, self.clear_since = ("FAULT", None)
         self.fault_count += 1
 
-    def _calibrating(self, t, volts):
-        cfg, h = (self.cfg, self.health)
-        self.base.add(self.est.bp)
-        self.inband.add(t, volts)
-        dead, _ = h.dead_pin(self.enabled)
-        railed = h.rail & self.enabled & ~dead
+    def _warmup(self, t, counts):
+        h = self.health
+        self.warm.append(counts)
+        railed = h.rail & ~h.dead_pin()
         if railed.any():
-            return self._fault(
-                t,
-                "%s railed during calibration -- check alignment." % self._who(railed),
-                railed=True,
-            )
-        if t - self.base.sub_start >= cfg.calib_subwindow_s:
-            self.base.close_subwindow(t)
-        ceiling = t - self.calib_start >= cfg.calibration_s
-        early = not ceiling and self.base.stationary()
-        if not (early or ceiling):
+            return self._fault(t, "%s railed at start -- check alignment." % self._who(railed))
+        if t - self.warm_start < self.cfg.warmup_s:
             return
-        if ceiling and len(self.base.acc) > self.base.sub_n0:
-            self.base.close_subwindow(t)
-        took = t - self.calib_start
-        self.baseline, note = self.base.settle(early)
-        if note:
-            self.say(note)
-        self.baseline_t, self.reuse_count = (t, 0)
+        self.free = np.std(self.warm, axis=0)
         self._engage(t)
+        self.say("gain on at %.1f s" % t)
+        bad = (self.free < self.cfg.dead_pin_std) & ~self.extra
+        if not bad.any() or bad.all():
+            return
+        h.floor_bad = bad
+        h.healthy[bad], h.clear_t[bad] = (False, np.inf)
         self.say(
-            "[gain on] baseline %s in %.1f s, counts rms: %s"
-            % (
-                "KEPT (fresh one refused)" if self.base.refused else "set",
-                took,
-                " ".join(("%.1f" % (b / cfg.volts_per_count) for b in self.baseline)),
-            )
+            "%s barely move, so lock is judged on the other sensors; their coils still drive."
+            % self._who(bad)
         )
-        self._demote_quiet_sensors()
 
     def _engage(self, t):
         self.state, self.damping_start = ("DAMPING", t)
         self.brk.arm(t)
         self.quiet.reset()
         self.locked_announced = False
-        self._said.discard("quiet")
-
-    def _demote_quiet_sensors(self):
-        h = self.health
-        x = self.inband.rms()
-        x = x if (x > 0).any() else self.baseline
-        bad, med, _ = h.floor(x, self.enabled, exempt=~self.voters, motion=h.rail_std)
-        h.floor_bad = bad
-        if not bad.any():
-            return
-        h.healthy[bad], h.clear_t[bad] = (False, np.inf)
-        for r in self.regulators:
-            r.zero(bad)
-        self.say(
-            "[sensors] too quiet to vote: %s (%s counts std). Their coils still drive."
-            % (self._who(bad), "/".join(("%.1f" % v for v in h.rail_std[bad])))
-        )
 
     def _damping(self, t, dt):
         cfg, h, bp = (self.cfg, self.health, self.est.bp)
-        drop, _, back = h.rearm(t, kf_reset=self.est.kf.reset)
-        for r in self.regulators:
-            r.zero(drop)
+        drop, back = h.rearm(t, self.est.kf.reset)
         if back.any():
             self.brk.reset(back)
             self.rms_ratio.reset(back)
-            self.brk.excess_since[back], self.ratio[back] = (np.inf, 0.0)
-        live = self.enabled & h.healthy
+            self.brk.excess_since[back] = np.inf
+        live = h.healthy
         for i in np.nonzero(drop)[0]:
-            self.say("!! ch%d railed -- sensor out, its PID held at bias." % i)
+            self.say("!! ch%d railed -- sensor out, its coil held at bias." % i)
         for i in np.nonzero(back)[0]:
             self.say("[ch%d back] rail clear %.0fs." % (i, cfg.rearm_s))
         if int(live.sum()) < cfg.min_healthy:
             return self._fault(
                 t,
                 "quorum lost -- %d healthy, need %d." % (live.sum(), cfg.min_healthy),
-                railed=True,
             )
-        self.ratio = np.where(
-            live, self.rms_ratio.update(t, bp, live) / np.maximum(self.baseline, 1e-12), self.ratio
-        )
-        for r in self.regulators:
-            r.ramp(dt, self.sense_ok)
-        vote = self._vote()
-        got = self.brk.sample(t, bp, h.healthy, vote, self._amp_ref(), h.sat)
-        self.quiet.add(t, got["env"], live)
-        if self.quiet.ready():
-            q = self.quiet.level()
-            m = live & (self.baseline > 0)
-            self._once(
-                "quiet",
-                "[floor] loop's own floor, x baseline: "
-                + " ".join(("a%d %.2f" % (i, q[i] / self.baseline[i]) for i in np.nonzero(m)[0])),
-            )
-        if got["run_trip"].any():
-            return self._fault(
-                t, "%s runaway -- all coils to bias." % self._who(got["run_trip"]), amp=True
-            )
-        if got["sat_trip"].any():
+        self.modal.ramp(dt)
+        env, run_trip, sat_trip = self.brk.sample(t, bp, live, self.judge, self._amp_ref(), h.sat)
+        self.quiet.add(t, env, live)
+        if run_trip.any():
+            return self._fault(t, "%s runaway -- all coils to bias." % self._who(run_trip))
+        if sat_trip.any():
             return self._fault(
                 t,
                 "%s pinned against the window, still demanding more, and not winning."
-                % self._who(got["sat_trip"]),
+                % self._who(sat_trip),
             )
-        quiet = live & (self.rms_lock.update(t, bp, live) < self.baseline * cfg.lock_factor)
-        self.locked_since = Health.hold(quiet, self.locked_since, t)
-        self.locked = quiet & (t - self.locked_since >= cfg.lock_sustain_s)
-        claim = live & vote
-        if claim.any() and self.locked[claim].all() and (not self.locked_announced):
+        # no lock before the window is full and the breaker has had its first look at growth
+        seen = t - self.damping_start >= max(cfg.lock_window_s, 2.0 * cfg.envelope_window_s)
+        self.locked = live & seen & (self.rms_lock.update(t, bp, live) < self.baseline)
+        claim = live & self.vote
+        calm = np.isinf(self.brk.excess_since[self.judge & live]).all()
+        if claim.any() and self.locked[claim].all() and calm and (not self.locked_announced):
             self.locked_announced = True
             self.failed = 0
             self.lock_time = t - self.damping_start
-            self.say(
-                "LOCKED %.1f s after gain (t=%.1f s): %d channels quiet, worst ratio %.2f of %.2f, %s"
-                % (
-                    self.lock_time,
-                    t,
-                    claim.sum(),
-                    self.ratio[claim].max(),
-                    cfg.lock_factor,
-                    ", ".join(
-                        (
-                            "%s on %d coils" % (type(r).__name__, r.claimed.sum())
-                            for r in self.regulators
-                        )
-                    ),
-                )
-            )
+            self.say("LOCKED %.1f s after gain" % self.lock_time)
 
     def _faulted(self, t):
-        cfg, h, bp = (self.cfg, self.health, self.est.bp)
-        for r in self.regulators:
-            r.zero()
-        m = self.enabled & ~h.floor_bad & (self.baseline > 0)
-        if m.any():
-            self.ratio = np.where(
-                m, self.rms_ratio.update(t, bp, m) / np.maximum(self.baseline, 1e-12), self.ratio
-            )
-            self.brk.sample(
-                t, bp, m, np.zeros(self.n, bool), self._amp_ref(), np.zeros(self.n, bool)
-            )
+        cfg, h = (self.cfg, self.health)
+        self.modal.gain[:] = 0.0
         if self.latched:
             return self._once(
                 "latch",
-                "!! LATCHED OFF -- %d engagements in a row ended in a fault without ever locking. Coils stay at bias until restarted. Re-measure (`run.py measure`) before trying again."
-                % self.failed,
+                "!! LATCHED OFF -- gain ended in a fault without the plate going quiet first. Coils stay at bias until restarted. Run `python debug.py`, then `run.py calib`, before trying again.",
             )
-        dead, _ = h.dead_pin(self.enabled)
-        watch = self.enabled & ~h.floor_bad
-        stuck = h.rail & watch & ~dead
-        blocked = bool(stuck.any() or (h.sat & watch).any() or self._still_hot(t, m))
-        if blocked:
+        watch = ~h.floor_bad
+        if (h.rail & watch & ~h.dead_pin()).any() or (h.sat & watch).any():
             self.clear_since = None
         elif self.clear_since is None:
             self.clear_since = t
         elif t - self.clear_since >= cfg.fault_clear_s:
             self._recover(t)
 
-    def _still_hot(self, t, m):
-        cfg = self.cfg
-        if not self.fault_amp:
-            return False
-        if t - self.fault_t >= cfg.fault_max_hold_s:
-            self._once(
-                ("hold", self.fault_count),
-                "!! held out for %.0fs by amplitude alone -- dropping the amplitude gate and re-engaging."
-                % cfg.fault_max_hold_s,
-            )
-            return False
-        m = m & self._vote()
-        line = cfg.fault_clear_ratio * np.maximum(
-            1.0, self._amp_ref() / np.maximum(self.baseline, 1e-12)
-        )
-        return bool(m.any() and (self.ratio[m] > line[m]).any())
-
     def _recover(self, t):
-        cfg, h = (self.cfg, self.health)
-        if self.damped_for is not None and self.damped_for >= cfg.fast_refault_s:
-            self.reuse_count = 0
-        age = None if self.baseline_t is None else t - self.baseline_t
-        reuse = (
-            bool(self.baseline.all())
-            and (not self.fault_railed)
-            and (age is not None)
-            and (age <= cfg.baseline_max_age_s)
-            and (self.reuse_count < cfg.baseline_max_reuse)
-        )
-        keep_floor = h.floor_bad.copy()
-        self.base.start(t)
-        self.inband.reset()
-        self.ratio[:] = 0.0
+        h = self.health
         h.sat_hist.clear()
         h.sat_sum[:], h.sat[:], h.healthy[:], h.floor_bad[:] = (0.0, False, True, False)
-        h.clear_t[:] = self.brk.excess_since[:] = self.locked_since[:] = np.inf
+        h.clear_t[:] = self.brk.excess_since[:] = np.inf
         self.locked[:] = False
-        for r in self.regulators:
-            r.zero()
-            r.reset()
+        self.modal.gain[:] = 0.0
         for part in (self.est, self.brk, self.rms_ratio, self.rms_lock):
             part.reset()
-        if reuse:
-            self.reuse_count += 1
-            h.floor_bad, h.healthy[keep_floor] = (keep_floor, False)
-            self._engage(t)
-            self.say(
-                "[recovered] re-engaging on the baseline in hand (%d/%d before a forced re-calibration). Gain ramps from zero."
-                % (self.reuse_count, cfg.baseline_max_reuse)
-            )
-        else:
-            self.reuse_count, self.baseline_t, self.calib_start = (0, None, t)
-            self.baseline[:] = 0.0
-            self.state = "CALIBRATING"
-            self.say("[recovered] clear for %.0fs -- re-calibrating." % cfg.fault_clear_s)
-        self.fault_railed = self.fault_amp = False
-        self.fault_t = self.clear_since = self.lock_time = None
+        self.state, self.warm_start, self.warm = ("WARMUP", t, [])
+        self.clear_since = self.lock_time = None
+        self.say("[recovered] clear for %.0f s -- starting again." % self.cfg.fault_clear_s)
 
     def _actuate(self, t, dt):
         cfg, h = (self.cfg, self.health)
         on = self.state == "DAMPING"
         # a quiet sensor says nothing about its coil; a railed one does
-        coil_ok = self.enabled & (h.healthy | h.floor_bad) & on
-        cmd, taken = (np.zeros(self.n), np.zeros(self.n, bool))
-        for r in self.regulators:
-            u = r.command(self.est, coil_ok & ~taken, self.sense_ok, dt, on)
-            cmd = np.where(r.claimed, u, cmd)
-            taken |= r.claimed
-            if r.needs_modes and on and (not r.claimed.any()) and self.est.seen.any():
-                self._once("nomodal", "[modal] no reachable mode with these coils and sensors.")
+        coil_ok = (h.healthy | h.floor_bad) & on
+        cmd, self.claimed = self.modal.solve(self.est.qdot, self.modal.gain, coil_ok, self.est.seen)
+        if on and (not self.claimed.any()) and self.est.seen.any():
+            self._once("nomodal", "[modal] no reachable mode with these coils and sensors.")
         # one factor on every coil keeps the force direction
-        over = float((self.bias + cmd)[self.enabled].sum()) - cfg.sum_v_max
-        if over > 0 and cmd[self.enabled].sum() > 0:
-            cmd = cmd * max(1.0 - over / float(cmd[self.enabled].sum()), 0.0)
-            self.sum_limited += 1
+        over = float((self.bias + cmd).sum()) - cfg.sum_v_max
+        if over > 0 and cmd.sum() > 0:
+            cmd = cmd * max(1.0 - over / float(cmd.sum()), 0.0)
         self.peak_demand = max(self.peak_demand, float(np.abs(cmd).max()))
         self.peak_sum = max(self.peak_sum, float((self.bias + cmd).sum()))
         target = np.where(coil_ok, np.clip(self.bias + cmd, self.vmin, self.vmax), self.bias)
-        for r in self.regulators:
-            r.release(~coil_ok)
         step = cfg.slew_per_s * dt
         self.out = self.out + np.clip(target - self.out, -step, step)
+        # slewing can leave the rising coils ahead of the falling ones: hold the sum after it too
+        up, over = (float((self.out - self.bias).sum()), float(self.out.sum()) - cfg.sum_v_max)
+        if over > 0 and up > 0:
+            self.out = self.bias + (self.out - self.bias) * max(1.0 - over / up, 0.0)
         h.sats((self.out <= self.vmin + 1e-06) | (self.out >= self.vmax - 1e-06), t)
         return self.out
 
-    def law(self, i):
-        return next((r.letter for r in self.regulators if r.claimed[i]), "")
-
     def banner(self):
-        r, cfg = (self.rig, self.cfg)
-        out = [
-            "[rig] measured %s (%.1f days old); modes %s Hz = %s"
-            % (r.measured, r.age_days(), np.round(r.f_hz, 5), "/".join(r.dof))
-        ]
-        for reg in self.regulators:
-            out.append(
-                "[%s] coils %s" % (type(reg).__name__, " ".join(map(str, np.nonzero(reg.coils)[0])))
-            )
-        out.append(
-            "[limits] %.3f V per coil about bias, %.2f V summed" % (cfg.budget_v, cfg.sum_v_max)
+        r = self.rig
+        return "rig     calibrated %.1f days ago; modes %s Hz; %d coils in the loop" % (
+            r.age_days(),
+            " / ".join(("%.3f" % f for f in r.f_hz)),
+            self.driven.sum(),
         )
-        return out + ["[rig] NOTE: " + s for s in r.notes]
 
     def status_header(self):
-        cols = "".join(("     a%d" % i for i in range(self.n)))
-        return c(
-            "    time  state           Hz    chi2 " + cols + "   ratio to baseline, * locked", "dim"
+        cols = "".join(("%7s" % ("a%d" % i) for i in range(self.n)))
+        return Text(
+            "\nhow much each sensor moves, in counts rms (1 count = 5 mV); smaller is better\n"
+            "   time  state    " + cols + "   quieter",
+            "dim",
         )
 
-    def _cell(self, i):
-        h = self.health
-        if not self.enabled[i]:
-            return c("    off", "dim")
-        if h.floor_bad[i]:
-            return c("  nosig", "dim")
-        if not h.healthy[i]:
-            return c("   DOWN", "red")
-        text = "%2s%4.2f" % (self.law(i), self.ratio[i])
-        if h.rail[i]:
-            return c(text + "!", "red")
-        return c(text + "*", "green") if self.locked[i] else c(text + " ", "yellow")
-
     def status_line(self, t):
-        hz = self.dec.wire_hz
-        return "%8.1f  %s  %5s  %6.2f " % (
-            t,
-            c("%-11s" % self.state, STATE[self.state]),
-            "--" if hz != hz else "%.0f" % hz,
-            self.est.chi2,
-        ) + "".join((self._cell(i) for i in range(self.n)))
+        k, sx, sxx = self._mot
+        if k[0] > 1:
+            self.motion = np.sqrt(np.maximum(sxx / k - (sx / k) ** 2, 0.0))
+        self._mot[:] = 0.0
+        v, h = (self.vote, self.health)
+        gain = self.free[v].mean() / max(self.motion[v].mean(), 1e-9) if self.free[v].any() else 0
+        locked = self.state == "DAMPING" and self.locked_announced and self.locked[v].all()
+        word, col = {
+            "WARMUP": ("starting", "yellow"),
+            "DAMPING": ("locked", "green") if locked else ("damping", "yellow"),
+            "FAULT": ("FAULT", "red"),
+        }[self.state]
+        line = Text.assemble("%5.0f s  " % t, ("%-9s" % word, col))
+        for i in range(self.n):
+            style = (
+                "dim"
+                if h.floor_bad[i]
+                else "red" if h.rail[i] or not h.healthy[i] else "green" if self.locked[i] else ""
+            )
+            line.append("%7.1f" % self.motion[i], style)
+        return line.append("   %.0fx" % gain if self.state == "DAMPING" and gain else "")
 
     def csv_header(self):
         cols = ["t", "state", "ctl", "n_avg", "chi2"] + ["qdot%d" % m for m in range(self.rig.nm)]
@@ -452,13 +509,7 @@ class Controller:
 
     def csv_row(self, t, counts):
         e = self.est
-        row = [
-            "%.6f" % t,
-            self.state,
-            "1" if self.stepped else "0",
-            str(self.n_avg),
-            "%.4f" % e.chi2,
-        ]
+        row = ["%.6f" % t, self.state, "1" if self.stepped else "0", "1", "%.4f" % e.chi2]
         row += ["%.6f" % x for x in e.qdot]
         for i in range(self.n):
             row += [
@@ -467,6 +518,6 @@ class Controller:
                 "%.6f" % e.vel[i],
                 "%.5f" % self.out[i],
                 "%.4f" % self.ratio[i],
-                self.law(i) or "-",
+                "M" if self.claimed[i] else "-",
             ]
         return row

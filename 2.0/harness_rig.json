@@ -4,7 +4,6 @@
   "kalman_r": "1.0/analysis/kalman.md 2",
   "kalman_q": "1.0/analysis/kalman.md 3",
   "kalman_k": "1.0/osem.eta.py KALMAN_K, shipped literals",
-  "pid_weight": "a0-a3: warp-calibration h/max(h); a4-a7: coherent fraction, 2026-08-20 census; a5 zero (coil 5 does not move a5)",
   "dac_map": "rewired 2026-08-03",
   "bias": "0.50 V uniform, NOT established safe on the 3 A supply",
   "f_hz": "../data/20260820_162534_status_sensors.csv",
@@ -341,16 +340,6 @@
    0.004206829638,
    0.02203878805
   ]
- ],
- "pid_weight": [
-  1.0,
-  0.6643208569471258,
-  0.2965061966743477,
-  0.5302360341284176,
-  0.09,
-  0.0,
-  0.12,
-  0.05
  ],
  "bias": [
   0.3,
